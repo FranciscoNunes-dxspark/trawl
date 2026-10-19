@@ -184,7 +184,7 @@ Glim is Trawl's anglerfish: it carries its own light into the deep, which is rou
 | `><((◉>` | Something just went wrong |
 | `><((!>` | A transaction is open: the lure glows red until `/commit` or `/rollback` |
 
-The logo and the Windows icon in `assets/` are drawn from the same pixels (`src/glim.js`); `node scripts/logo.js` regenerates them.
+The logo and the Windows icon in `assets/` are drawn from the same pixels (`src/glim.js`), with an "SQL" badge in the corner (from 32 px up) so they are easy to tell apart from Tiller's; `node scripts/logo.js` regenerates them.
 
 ## Not yet
 

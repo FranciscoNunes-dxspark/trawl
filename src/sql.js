@@ -344,3 +344,54 @@ export function toJson(set) {
   );
   return JSON.stringify(rows, null, 2) + '\n';
 }
+
+const KEYWORDS = new Set(
+  `ADD ALL ALTER AND ANY AS ASC BACKUP BEGIN BETWEEN BREAK BY CASCADE CASE CAST CATCH CHECK COLUMN COMMIT CONSTRAINT
+  CONTINUE CONVERT CREATE CROSS CURSOR DATABASE DECLARE DEFAULT DELETE DESC DISTINCT DROP ELSE END ESCAPE EXCEPT EXEC
+  EXECUTE EXISTS FETCH FOR FOREIGN FROM FULL FUNCTION GO GOTO GRANT GROUP HAVING IDENTITY IF IN INDEX INNER INSERT
+  INTERSECT INTO IS JOIN KEY LEFT LIKE MERGE NEXT NOCOUNT NOT NULL OF OFF OFFSET ON ONLY OR ORDER OUTER OUTPUT OVER
+  PARTITION PERCENT PRIMARY PRINT PROC PROCEDURE RAISERROR REFERENCES RETURN RETURNS REVOKE RIGHT ROLLBACK ROW ROWS
+  SCHEMA SELECT SET TABLE THEN THROW TOP TRAN TRANSACTION TRIGGER TRUNCATE TRY UNION UNIQUE UPDATE USE USING VALUES
+  VIEW WAITFOR WHEN WHERE WHILE WITH`.split(/\s+/),
+);
+
+/**
+ * Splits a script into coloured runs per line: { text, kind } with kind 'keyword', 'string',
+ * 'comment', 'number', 'variable' or null. Comments and strings spanning lines stay coloured.
+ */
+export function highlight(text) {
+  const src = normalise(text);
+  const m = mask(src);
+  // What each masked run is, from the character it starts with.
+  const kinds = new Array(src.length).fill(null);
+  for (let i = 0; i < src.length; ) {
+    if (m[i] !== FILL) {
+      i++;
+      continue;
+    }
+    const kind = src[i] === '-' || src[i] === '/' ? 'comment' : src[i] === "'" ? 'string' : null;
+    let j = i;
+    while (j < src.length && m[j] === FILL) kinds[j++] = kind;
+    i = j;
+  }
+  for (const t of m.matchAll(/[@#]?[A-Za-z_][\w$#@]*|\b\d+(\.\d+)?\b/g)) {
+    const w = t[0];
+    const kind = /^\d/.test(w) ? 'number' : w.startsWith('@') ? 'variable' : KEYWORDS.has(w.toUpperCase()) ? 'keyword' : null;
+    if (kind) for (let k = 0; k < w.length; k++) kinds[t.index + k] = kind;
+  }
+  // N'…' is a string too.
+  for (let i = 0; i + 1 < src.length; i++) if ((src[i] === 'N' || src[i] === 'n') && kinds[i + 1] === 'string' && src[i + 1] === "'") kinds[i] = 'string';
+  const out = [];
+  let off = 0;
+  for (const line of src.split('\n')) {
+    const runs = [];
+    for (let k = 0; k < line.length; k++) {
+      const kind = kinds[off + k];
+      if (runs.length && runs.at(-1).kind === kind) runs.at(-1).text += line[k];
+      else runs.push({ text: line[k], kind });
+    }
+    out.push(runs);
+    off += line.length + 1;
+  }
+  return out;
+}

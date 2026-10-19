@@ -3,6 +3,7 @@
 import { writeFile } from 'node:fs/promises';
 import { extname, resolve } from 'node:path';
 import { ADD_USAGE, isReadOnly, parseAddArgs } from './connections.js';
+import * as ed from './editor.js';
 import { describeObject, findObject, objectName } from './schema.js';
 import { classifyScript, oneLine, selectTop, toCsv, toJson } from './sql.js';
 
@@ -18,7 +19,7 @@ function needSession(ctx) {
 }
 
 /** Runs SQL on the current connection, after the read-only and danger checks. */
-export async function runSql(ctx, sql, { title, lineBase } = {}) {
+export async function runSql(ctx, sql, { title, lineBase, stay } = {}) {
   if (!needSession(ctx)) return;
   const text = sql.trim();
   if (!text) return;
@@ -38,7 +39,7 @@ export async function runSql(ctx, sql, { title, lineBase } = {}) {
   }
   // Writes on production start a transaction, so nothing sticks until /commit.
   const wrap = write && conn.prod && !ctx.tranCount;
-  return ctx.query(wrap ? `BEGIN TRANSACTION;\n${text}` : text, { title: title ?? oneLine(text), wrapped: wrap, lineBase });
+  return ctx.query(wrap ? `BEGIN TRANSACTION;\n${text}` : text, { title: title ?? oneLine(text), wrapped: wrap, lineBase, stay });
 }
 
 export async function connect(ctx, name, { database } = {}) {
@@ -144,6 +145,29 @@ export function setLimit(ctx, value) {
   if (!Number.isInteger(n) || n < 1 || n > 1_000_000) return ctx.note('The limit is a whole number from 1 to 1000000.', 'error');
   ctx.setConfig((c) => ({ ...c, limit: n }));
   ctx.note(`Result sets now stop at ${n} rows.`, 'ok');
+}
+
+/** Empties the console, asking first when there's something in it. */
+export async function newConsole(ctx) {
+  if (ed.toText(ctx.console).trim()) {
+    const ok = await ctx.confirm({ title: 'Clear the console?', detail: 'Its text is gone for good. /save <file.sql> keeps a copy first.', options: YES_NO('Yes, clear it') });
+    if (!ok) return;
+  }
+  ctx.setConsole(ed.fromText(''));
+  ctx.showConsole();
+  ctx.setEditing(true);
+}
+
+/** Writes the console to a .sql file. */
+export async function saveConsoleAs(ctx, path) {
+  if (!path) return ctx.prefill('/save ');
+  const full = resolve(path);
+  try {
+    await writeFile(full, ed.toText(ctx.console).replace(/\n*$/, '\n'), 'utf8');
+    ctx.note(`Saved the console to ${full}. /open it to work on the file instead.`, 'ok');
+  } catch (e) {
+    ctx.note(`Couldn't write ${full}: ${e.message}`, 'error');
+  }
 }
 
 /** Writes the result set on screen to a .csv or .json file. */

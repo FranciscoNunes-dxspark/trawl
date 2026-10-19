@@ -70,13 +70,22 @@ Press `?` inside for every shortcut. The essentials:
 | --- | --- |
 | Anywhere | `1`–`5` or `tab` switch views · `/` commands · `!` SQL · `r` reload the schema · `esc` cancel the running query · `q` quit |
 | Lists | `j`/`k` or arrows · `g`/`G` top/bottom · `ctrl+d`/`ctrl+u` page |
-| Explorer | `↵` first rows · `d` describe · `s` start a query on it · `/find <text>` filter |
-| Query | `↵` run the statement under the cursor · `v` select several · `R` run the whole file · `e` copy to the prompt |
+| Explorer | `↵` first rows · `d` describe · `s` start a query on it in the console · `/find <text>` filter |
+| Query, the console | `↵` or `i` start typing · `esc` stop · `ctrl+r` run the statement under the cursor · `R` run it all |
+| Query, a file | `↵` run the statement under the cursor · `v` select several · `R` run the whole file · `e` edit in the console |
 | Results | `h`/`l` columns · `[`/`]` result sets · `↵` the row as a record · `x` export |
-| History | `↵` run again · `e` copy to the prompt |
+| History | `↵` run again · `e` edit in the console |
 | Connections | `↵` connect · `n` new · `x` forget |
 
-SQL typed at the prompt runs with `!`, or without it when it starts with a SQL keyword (`select …`, `exec …`).
+One-liners can also go straight in the prompt: SQL there runs with `!`, or without it when it starts with a SQL keyword (`select …`, `exec …`).
+
+### The console
+
+The Query tab starts as a console: a SQL editor inside Trawl, with keywords, strings, comments and numbers in colour. Press `↵` or `i` to start typing and `esc` to stop. While you type, every key is text, so the digits and `q` don't switch views or quit. `ctrl+r` runs the statement under the cursor (the gutter marks which one), and its results appear under the console, so you can keep typing. `R` runs everything, and `3` shows the results full size.
+
+The console is saved as you type (in `~/.trawl/console.sql`) and is there again next time. `/save <file.sql>` writes it to a file, and `/new` clears it. `s` on a table in the Explorer starts a `SELECT … WHERE` for it, and `e` in History or on a file's statement copies that SQL into the console to edit.
+
+Editing keys: arrows, `home`/`end` (or `ctrl+a`/`ctrl+e`), `ctrl+u`/`ctrl+k` cut to the start or end of the line, `tab` inserts two spaces, and a new line keeps the indent of the one above. Pasting works, multi-line text included.
 
 ### Scripts
 
@@ -99,7 +108,7 @@ Each result set stops at the row limit (500 to start with; `/limit <n>` changes 
 
 Type `/` and the menu narrows as you type. `tab` completes, `↑`/`↓` picks, `↵` runs. `/connect` completes connection names, `/use` database names and `/describe` tables and views.
 
-`/connect <name>` `/add …` `/forget <name>` `/disconnect` `/use <database>` `/open <file.sql>` `/describe <table>` `/find [text]` `/export <file>` `/limit [rows]` `/writes` `/commit` `/rollback` `/update` `/last` `/refresh` `/help` `/quit`
+`/connect <name>` `/add …` `/forget <name>` `/disconnect` `/use <database>` `/open <file.sql>` `/console` `/new` `/save <file.sql>` `/describe <table>` `/find [text]` `/export <file>` `/limit [rows]` `/writes` `/commit` `/rollback` `/update` `/last` `/refresh` `/help` `/quit`
 
 ## Updates
 

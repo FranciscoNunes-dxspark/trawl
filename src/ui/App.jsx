@@ -4,17 +4,19 @@ import { readFileSync, statSync, unwatchFile, watchFile } from 'node:fs';
 import { basename, resolve } from 'node:path';
 import * as a from '../actions.js';
 import { findCommand, suggestionsFor } from '../commands.js';
-import { saveConfig, withRan } from '../config.js';
+import { loadConsole, saveConfig, saveConsole, withRan } from '../config.js';
+import * as ed from '../editor.js';
 import { describeConn, isReadOnly } from '../connections.js';
 import { connect as openSession } from '../db.js';
 import { HELP } from '../help.js';
 import { SCHEMA_SQL, buildSchema } from '../schema.js';
-import { splitStatements } from '../sql.js';
+import { qualified, splitStatements } from '../sql.js';
 import { BULLET, theme } from '../theme.js';
 import { fitSegments, stringWidth } from '../text.js';
 import { useTerminalSize } from './hooks.js';
 import { Confirm, Panel, PromptBox, Row, Spinner, Suggestions, confirmHeight } from './parts.jsx';
 import { ConnectionsView } from './ConnectionsView.jsx';
+import { ConsoleView } from './ConsoleView.jsx';
 import { ExplorerView } from './ExplorerView.jsx';
 import { HistoryView } from './HistoryView.jsx';
 import { QueryView } from './QueryView.jsx';
@@ -34,10 +36,10 @@ const VIEWS = [
 ];
 
 const HINTS = {
-  explorer: '↵ first rows · d describe · s query it · /find filter',
-  query: '↵ run statement · v select several · R run file · e to prompt',
+  explorer: '↵ first rows · d describe · s query it in the console · /find filter',
+  query: '↵ run statement · v select several · R run file · e edit in the console · /console',
   results: 'h/l columns · [ ] result sets · ↵ record · x export',
-  history: '↵ run again · e to prompt',
+  history: '↵ run again · e edit in the console',
   connections: '↵ connect · n new · x forget',
 };
 
@@ -131,6 +133,8 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
   const [filter, setFilter] = useState('');
   const [welcome, setWelcome] = useState(true);
   const [update, setUpdate] = useState(null);
+  const [editor, setEditorState] = useState(() => ed.fromText(loadConsole()));
+  const [queryMode, setQueryMode] = useState(initialFile ? 'file' : 'console');
   // Glim looks happy (or worried) for a few seconds after a result; re-render when that wears off.
   const [, setMoodTick] = useState(0);
   useEffect(() => {
@@ -155,6 +159,8 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
   const nextId = useRef(1);
   const historyPos = useRef(-1);
   const lastOutput = useRef(null);
+  const editorRef = useRef(editor);
+  const saveTimer = useRef(null);
 
   const setConfig = (update) => {
     const next = update(configRef.current);
@@ -181,6 +187,13 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
   const setResultIndex = (i) => {
     resultIndexRef.current = i;
     setResultIndexState(i);
+  };
+  // The console is saved a moment after typing stops, and straight away on quit.
+  const setConsole = (next) => {
+    editorRef.current = next;
+    setEditorState(next);
+    clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(() => saveConsole(ed.toText(next)), 400);
   };
   const setFocus = (f) => {
     focusRef.current = f;
@@ -285,7 +298,7 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     return r.ok;
   };
 
-  const query = async (sql, { title, wrapped = false, lineBase = 1 } = {}) => {
+  const query = async (sql, { title, wrapped = false, lineBase = 1, stay = false } = {}) => {
     const s = sessionRef.current;
     const limit = configRef.current.limit;
     let res = null;
@@ -304,7 +317,7 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
       resultsRef.current = shown;
       setResults(shown);
       setResultIndex(0);
-      if (res.sets.length) setView('results');
+      if (res.sets.length && !stay) setView('results');
     }
     const summary = res && !res.error ? summarize(res, limit)[0] : r.error?.message;
     if (s && sessionRef.current === s) {
@@ -351,6 +364,7 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     const f = readFile(full);
     fileRef.current = f;
     setFile(f);
+    setQueryMode('file');
     setView('query');
     if (f.error) note(`${full}: ${f.error}`, 'error');
   };
@@ -397,6 +411,8 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
 
   const quit = async () => {
     if (!(await a.leaveSession(ctx))) return;
+    clearTimeout(saveTimer.current);
+    saveConsole(ed.toText(editorRef.current));
     dropSession();
     exit();
   };
@@ -418,6 +434,10 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
       },
       get writesAllowed() {
         return writesRef.current;
+      },
+      // The console's latest text; a getter here, since Object.assign below would copy a value.
+      get console() {
+        return editorRef.current;
       },
     };
   }
@@ -454,6 +474,25 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
       task('Reload the schema', async (signal) => [`${plural((await loadSchema(s, signal)).objects.length, 'object')}`], { label: 'Reading the schema' });
     },
     viewHasKeys: () => focusRef.current === 'view' && !overlayRef.current && !confirmRef.current,
+    editorHasKeys: () => focusRef.current === 'editor' && !overlayRef.current && !confirmRef.current,
+    setConsole,
+    // Stopping waits until this key has been handled everywhere, so the esc (or ctrl+c) that
+    // ends typing isn't also taken as a global key: clear the log, or quit.
+    setEditing: (on) => (on ? setFocus('editor') : queueMicrotask(() => focusRef.current === 'editor' && setFocus('view'))),
+    showConsole: () => {
+      setQueryMode('console');
+      setView('query');
+    },
+    // Puts SQL into the console to edit, after what's there, and starts typing.
+    editInConsole: (sql, { atEnd = false } = {}) => {
+      let next = ed.append(editorRef.current, sql);
+      if (atEnd) next = ed.lineEnd({ ...next, row: next.lines.length - 1 });
+      setConsole(next);
+      setQueryMode('console');
+      setView('query');
+      setFocus('editor');
+    },
+    startQuery: (obj) => ctx.editInConsole(`SELECT TOP (100) *\nFROM ${qualified(obj.schema, obj.name)}\nWHERE `, { atEnd: true }),
     quit,
     checkUpdates,
     showText: (title, text) => setOverlay({ title, text }),
@@ -515,6 +554,11 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     };
   }, []);
 
+  // Leaving the console stops typing, so keys never go to an editor that isn't on screen.
+  useEffect(() => {
+    if ((view !== 'query' || queryMode !== 'console') && focusRef.current === 'editor') setFocus('view');
+  }, [view, queryMode]);
+
   const lists = { config, schema };
   const suggestions = focus === 'prompt' && !confirmReq ? suggestionsFor(prompt.value, lists) : [];
   const sel = Math.min(sugIndex, Math.max(0, suggestions.length - 1));
@@ -572,6 +616,8 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
       }
       return;
     }
+    // ctrl+r is the console's run key, not r for refresh; no other global key takes ctrl or alt.
+    if (key.ctrl || key.meta) return;
     if (input === '/' || input === ':') return prefill('/');
     if (input === '!') return prefill('!');
     if (input === '?') return ctx.showHelp();
@@ -588,6 +634,8 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
   // One dispatcher reading focus from refs, which change the instant focus moves. Handlers that
   // switch on with the next render would let fast typing (or a paste) after "/" leak into the view.
   useInput((input, key) => {
+    // While typing in the console, every key is text (the console's own handler takes them).
+    if (focusRef.current === 'editor') return;
     if (focusRef.current === 'prompt' && !confirmRef.current) return promptKeys(input, key);
     if (key.ctrl && input === 'c') return quit();
     if (confirmRef.current || overlayRef.current) return;
@@ -610,6 +658,16 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     main = <TextViewer {...overlay} width={W} height={mainH} active={focus === 'view' && !confirmReq} onClose={() => setOverlay(null)} />;
   } else if (view === 'connections') {
     main = <ConnectionsView connections={config.connections} current={session?.conn} ctx={ctx} width={W} height={mainH} active={viewActive} />;
+  } else if (view === 'query' && queryMode === 'console') {
+    // Results go under the console when there's room, so a run doesn't take you away from it.
+    const under = results?.sets.length && mainH >= 18 ? Math.floor(mainH * 0.45) : 0;
+    const editing = focus === 'editor';
+    main = (
+      <Box flexDirection="column" width={W} height={mainH}>
+        <ConsoleView editor={editor} editing={editing} ctx={ctx} width={W} height={mainH - under} active={(viewActive || editing) && !overlay && !confirmReq} />
+        {under ? <ResultsView results={results} setIndex={resultIndex} ctx={ctx} width={W} height={under} active={false} /> : null}
+      </Box>
+    );
   } else if (view === 'query') {
     main = <QueryView file={file} ctx={ctx} width={W} height={mainH} active={viewActive} />;
   } else if (view === 'results') {
@@ -626,8 +684,17 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     main = <ExplorerView schema={schema} ctx={ctx} width={W} height={mainH} active={viewActive} filter={filter} />;
   }
 
-  const left = focus === 'prompt' ? 'enter run · tab complete · ↑↓ pick or history · esc back' : overlay ? 'j/k scroll · space page · esc close' : HINTS[view];
-  const right = focus === 'prompt' ? '' : '  / commands · ! SQL · ? help';
+  const left =
+    focus === 'prompt'
+      ? 'enter run · tab complete · ↑↓ pick or history · esc back'
+      : focus === 'editor'
+        ? 'typing SQL · ctrl+r run the statement · esc stop typing (then 3 for the full results)'
+        : overlay
+          ? 'j/k scroll · space page · esc close'
+          : view === 'query' && queryMode === 'console'
+            ? '↵/i type · ctrl+r run statement · R run all · /save <file> · /open <file>'
+            : HINTS[view];
+  const right = focus === 'prompt' || focus === 'editor' ? '' : '  / commands · ! SQL · ? help';
 
   return (
     <Box flexDirection="column" width={W} height={H}>

@@ -46,7 +46,7 @@ export function ExplorerView({ schema, ctx, width, height, active, filter }) {
       if (nav.handle(input, key) || !obj) return;
       if (key.return) a.browse(ctx, obj);
       else if (input === 'd') a.describe(ctx, obj);
-      else if (input === 's') ctx.prefill(`!SELECT * FROM ${qualified(obj.schema, obj.name)} WHERE `);
+      else if (input === 's') ctx.startQuery(obj);
     },
     { isActive: active },
   );

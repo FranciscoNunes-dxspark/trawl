@@ -156,3 +156,48 @@ test('a newer release shows in the header and the activity log, once a day', asy
   assert.equal(calls, 1);
   lastApp.unmount();
 });
+
+test('the console: type SQL, ctrl+r runs it with the results underneath, and it is kept', async () => {
+  const app = start();
+  await until(() => frame().includes('Clubs'), 'the explorer');
+  app.stdin.write('2');
+  await until(() => frame().includes('An empty console'), 'the empty console');
+  app.stdin.write('i');
+  await until(() => frame().includes('typing SQL'), 'typing mode');
+  // Digits and q are text while typing, not views or quit.
+  await type(app.stdin, 'SELECT 1 AS q2');
+  app.stdin.write(KEYS.enter);
+  app.stdin.write(KEYS.enter);
+  await type(app.stdin, 'SELECT TOP (2) * FROM dbo.Clubs');
+  app.stdin.write('\x12'); // ctrl+r: only the statement under the cursor runs
+  await until(() => frame().includes('Club A FC') && frame().includes('Console') && frame().includes('─ SELECT TOP (2) * FROM dbo.Clubs ─'), 'the results under the console');
+  app.stdin.write(KEYS.esc);
+  await until(() => frame().includes('↵/i type'), 'out of typing mode');
+  app.stdin.write('k');
+  app.stdin.write('k');
+  await new Promise((r) => setTimeout(r, 100));
+  app.stdin.write('\x12');
+  await until(() => frame().includes('SELECT 1 AS q2') && frame().includes('1 row'), 'the first statement run');
+  app.unmount();
+  await new Promise((r) => setTimeout(r, 500));
+  assert.equal(readFileSync(join(process.env.TRAWL_HOME, 'console.sql'), 'utf8'), 'SELECT 1 AS q2\n\nSELECT TOP (2) * FROM dbo.Clubs');
+  // A new start finds it again.
+  const again = start();
+  await until(() => frame().includes('Clubs'), 'the explorer');
+  again.stdin.write('2');
+  await until(() => frame().includes('SELECT TOP (2) * FROM dbo.Clubs'), 'the kept console');
+  again.unmount();
+});
+
+test('e in History puts the statement in the console to edit', async () => {
+  const app = start();
+  await until(() => frame().includes('Clubs'), 'the explorer');
+  await type(app.stdin, '!SELECT 7 AS seven');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('seven'), 'the result');
+  app.stdin.write('4');
+  await until(() => frame().includes('History'), 'history');
+  app.stdin.write('e');
+  await until(() => frame().includes('typing SQL') && /│\s*▌?\s*\d+ SELECT 7 AS seven/.test(frame()), 'the statement in the console');
+  app.unmount();
+});

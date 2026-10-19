@@ -39,7 +39,7 @@ export function QueryView({ file, ctx, width, height, active }) {
         const title = from === to ? oneLine(list[from].text) : `statements on lines ${list[from].line}–${list[to].endLine}`;
         setAnchor(null);
         a.runSql(ctx, sql, { title, lineBase: list[from].line });
-      } else if (input === 'e') ctx.prefill(`!${oneLine(st.text)}`);
+      } else if (input === 'e') ctx.editInConsole(st.text);
     },
     { isActive: active },
   );

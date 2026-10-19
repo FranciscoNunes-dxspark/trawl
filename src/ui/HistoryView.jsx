@@ -22,7 +22,7 @@ export function HistoryView({ ran, ctx, width, height, active }) {
       if (!ctx.viewHasKeys()) return;
       if (nav.handle(input, key) || !h) return;
       if (key.return) a.runSql(ctx, h.sql);
-      else if (input === 'e') ctx.prefill(`!${oneLine(h.sql)}`);
+      else if (input === 'e') ctx.editInConsole(h.sql);
     },
     { isActive: active },
   );
@@ -47,7 +47,7 @@ export function HistoryView({ ran, ctx, width, height, active }) {
         ))}
       </Panel>
       {split ? (
-        <Panel title={h ? new Date(h.at).toLocaleString() : 'Statement'} hint={h ? '↵ run again · e edit' : ''} width={sideW} height={height}>
+        <Panel title={h ? new Date(h.at).toLocaleString() : 'Statement'} hint={h ? '↵ run again · e edit in the console' : ''} width={sideW} height={height}>
           <Lines
             width={sideW - 2}
             height={innerH}

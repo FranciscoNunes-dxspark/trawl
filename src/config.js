@@ -32,3 +32,23 @@ export function saveConfig(config) {
 export function withRan(config, entry) {
   return { ...config, ran: [entry, ...config.ran].slice(0, 500) };
 }
+
+// The Query console's text lives beside the config, so it is there again next time.
+const consolePath = () => join(configDir(), 'console.sql');
+
+export function loadConsole() {
+  try {
+    return readFileSync(consolePath(), 'utf8');
+  } catch {
+    return '';
+  }
+}
+
+export function saveConsole(text) {
+  try {
+    mkdirSync(configDir(), { recursive: true });
+    writeFileSync(consolePath(), text);
+  } catch {
+    // As with the config: not being able to keep it shouldn't stop anything.
+  }
+}

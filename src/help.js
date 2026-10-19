@@ -14,14 +14,23 @@ Lists
 Explorer (tables, views and routines of the current database)
   ↵                First rows (SELECT TOP (limit) *)
   d                Describe: columns, types, keys
-  s                Start a query on it at the prompt
+  s                Start a query on it in the console
   /find <text>     Filter by name
 
-Query (a .sql file opened with /open; Trawl reloads it when you save)
+Query, the console (a SQL editor, kept between sessions)
+  ↵ or i           Start typing; while typing, every key is text (digits and q too)
+  esc              Stop typing
+  ctrl+r           Run the statement under the cursor (marked ▌ in the gutter); the results show below
+  R                Run the whole console
+  j k  g G         Move between lines (when not typing)
+  Typing           arrows · home/end or ctrl+a/ctrl+e · ctrl+u/ctrl+k cut to start/end · tab two spaces
+  /new  /save <file.sql>   Clear it · Write it to a file
+
+Query, a file (opened with /open; Trawl reloads it when you save; /console goes back)
   ↵                Run the statement under the cursor
   v                Start or end a selection of statements; ↵ then runs them together
   R                Run the whole file, batch by batch (split on GO)
-  e                Copy the statement to the prompt as !SQL
+  e                Copy the statement into the console to edit
   A statement ends at ;, a GO line or a blank line, except inside parentheses or BEGIN … END.
   Procedures, functions, triggers and views run on to the next GO.
 
@@ -33,7 +42,7 @@ Results
 
 History (every statement that ran, newest first)
   ↵                Run it again (the same checks apply)
-  e                Copy it to the prompt as !SQL
+  e                Copy it into the console to edit
 
 Connections
   ↵                Connect         n           New (/add …)
@@ -51,7 +60,8 @@ Prompt
 
 Slash commands
   /connect <name>   /add <name> <server> [database] [--user u --password-env VAR] [--domain d] [--prod] [--trust-cert]
-  /forget <name>   /disconnect   /use <database>   /open <file.sql>   /describe <table>   /find [text]
+  /forget <name>   /disconnect   /use <database>   /open <file.sql>   /console   /new   /save <file.sql>
+  /describe <table>   /find [text]
   /export <file>   /limit [rows]   /writes   /commit   /rollback   /update   /last   /refresh   /help   /quit
 
 Viewer (describe, records, output, this help)

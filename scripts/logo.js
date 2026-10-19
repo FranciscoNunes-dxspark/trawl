@@ -1,7 +1,7 @@
 // Draws Glim into assets/: glim.svg (README, GitHub), glim.png (social preview), glim.ico
 // (the Windows executable's icon), and glim-transparent.svg/.png/.ico (just the fish, no background),
-// all from the pixels in src/glim.js. Each carries an "SQL" badge in the corner, so Trawl's icon
-// is easy to tell from Tiller's at a glance.
+// all from the pixels in src/glim.js, each with a pixel-art "SQL" badge in the bottom-right corner,
+// so Trawl's icon is easy to tell from Tiller's at a glance.
 //   node scripts/logo.js
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { deflateSync } from 'node:zlib';
@@ -14,90 +14,77 @@ const used = [...full[0]].map((_, x) => full.some((row) => row[x] !== '.'));
 const first = used.indexOf(true);
 const last = used.lastIndexOf(true);
 const px = full.map((row) => row.slice(first, last + 1));
-const W = px[0].length;
-const H = px.length;
-
-// The badge: "SQL" in dark letters on the lure's yellow, ringed in the background colour so it
-// stands off the fish. 'Y' badge, 'E' letters, 'K' ring, '.' transparent.
-const BADGE = [
-  '.KKKKKKKKKKKKK.',
-  'KKYYYYYYYYYYYKK',
-  'KYYYYYYYYYYYYYK',
-  'KYEEEYEEEYEYYYK',
-  'KYEYYYEYEYEYYYK',
-  'KYEEEYEYEYEYYYK',
-  'KYYYEYEEYYEYYYK',
-  'KYEEEYYEEYEEEYK',
-  'KYYYYYYYYYYYYYK',
-  'KKYYYYYYYYYYYKK',
-  '.KKKKKKKKKKKKK.',
-];
-const BADGE_COLOURS = { Y: PALETTE.Y, E: PALETTE.E, K: '#0f1724' };
-const BW = BADGE[0].length;
-const BH = BADGE.length;
 
 const hex = (h) => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16), 255];
 
-// Square canvas with the fish centred and a margin, as RGBA rows.
-function canvas(size) {
-  const cells = 20; // the drawing is 16 × 10; leave room around it
-  const scale = size / cells;
-  const ox = (cells - W) / 2;
-  const oy = (cells - H) / 2;
-  const bg = hex(BG);
-  const radius = size * 0.18;
+// The badge: "SQL" in the eye's dark blue on the lure's yellow, a rounded tag. It's drawn at twice
+// Glim's resolution, the coarsest the letters still read at.
+const SQL = [
+  '.YYYYYYYYYYYYY.',
+  'YYYYYYYYYYYYYYY',
+  'YYEEEYEEEYEYYYY',
+  'YYEYYYEYEYEYYYY',
+  'YYEEEYEYEYEYYYY',
+  'YYYYEYEEYYEYYYY',
+  'YYEEEYYEEYEEEYY',
+  'YYYYYYYYYYYYYYY',
+  '.YYYYYYYYYYYYY.',
+];
+
+// Glim at the badge's resolution: every pixel doubled.
+const px2 = px.flatMap((row) => {
+  const wide = [...row].map((c) => c + c).join('');
+  return [wide, wide];
+});
+
+/**
+ * Glim at (ox, oy) on a w × h grid of half-pixels, with the badge's top-left corner at (bx, by),
+ * cut out of the fish by a one-cell gap. Rows of palette letters, '.' for nothing.
+ */
+function grid(w, h, ox, oy, bx, by) {
+  const badge = (x, y) => SQL[y - by]?.[x - bx] ?? '.';
+  return Array.from({ length: h }, (_, y) =>
+    Array.from({ length: w }, (_, x) => {
+      if (badge(x, y) !== '.') return badge(x, y);
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) if (badge(x + dx, y + dy) !== '.') return '.';
+      return px2[y - oy]?.[x - ox] ?? '.';
+    }).join(''),
+  );
+}
+
+// The dark square: 40 half-pixels across, the 32 × 20 fish centred with a margin.
+const SQUARE = grid(40, 40, 4, 10, 23, 29);
+// The transparent icon: 32 across, so the usual icon sizes (16, 32, 48 … 256) keep Glim's pixels whole.
+const ICON = grid(32, 32, 0, 6, 17, 23);
+// The fish cropped to the drawing, with room right and below for the badge to sit on.
+const CROPPED = grid(px2[0].length + 4, px2.length + 6, 0, 0, px2[0].length - 11, px2.length - 3);
+
+/** A grid drawn at `scale` image pixels per cell, as RGBA rows; `inside(x, y)` limits it to a shape. */
+function paint(cells, scale, bg = [0, 0, 0, 0], inside = () => true) {
   const rows = [];
-  for (let y = 0; y < size; y++) {
+  for (let y = 0; y < Math.round(cells.length * scale); y++) {
     const row = [];
-    for (let x = 0; x < size; x++) {
-      // Rounded square background, transparent outside the corners.
-      const cx = Math.max(radius - x, x - (size - 1 - radius), 0);
-      const cy = Math.max(radius - y, y - (size - 1 - radius), 0);
-      if (cx * cx + cy * cy > radius * radius) {
-        row.push(0, 0, 0, 0);
-        continue;
-      }
-      const c = px[Math.floor(y / scale - oy)]?.[Math.floor(x / scale - ox)];
-      row.push(...(PALETTE[c] ? hex(PALETTE[c]) : bg));
+    for (let x = 0; x < Math.round(cells[0].length * scale); x++) {
+      const c = cells[Math.floor(y / scale)][Math.floor(x / scale)];
+      row.push(...(!inside(x, y) ? [0, 0, 0, 0] : PALETTE[c] ? hex(PALETTE[c]) : bg));
     }
     rows.push(row);
   }
-  return badged(rows);
+  return rows;
+}
+
+// The dark rounded square with the fish, as RGBA rows; transparent outside the corners.
+function canvas(size) {
+  const radius = size * 0.18;
+  return paint(SQUARE, size / 40, hex(BG), (x, y) => {
+    const cx = Math.max(radius - x, x - (size - 1 - radius), 0);
+    const cy = Math.max(radius - y, y - (size - 1 - radius), 0);
+    return cx * cx + cy * cy <= radius * radius;
+  });
 }
 
 // Just the fish on transparency, cropped to the drawing: `scale` image pixels per drawing pixel.
-function bare(scale) {
-  const rows = [];
-  for (let y = 0; y < H * scale; y++) {
-    const row = [];
-    for (let x = 0; x < W * scale; x++) {
-      const c = px[Math.floor(y / scale)][Math.floor(x / scale)];
-      row.push(...(PALETTE[c] ? hex(PALETTE[c]) : [0, 0, 0, 0]));
-    }
-    rows.push(row);
-  }
-  return rows;
-}
-
-/**
- * Stamps the badge into the bottom-right corner of square RGBA rows, in whole pixels so the
- * letters stay crisp. Icons under 32 px are too small to read it, so they go without.
- */
-function badged(rows) {
-  const size = rows.length;
-  if (size < 32) return rows;
-  const k = Math.max(1, Math.round(size / 40));
-  const margin = Math.round(size * 0.04);
-  const left = size - margin - BW * k;
-  const top = size - margin - BH * k;
-  for (let y = 0; y < BH * k; y++) {
-    for (let x = 0; x < BW * k; x++) {
-      const c = BADGE_COLOURS[BADGE[Math.floor(y / k)][Math.floor(x / k)]];
-      if (c) rows[top + y].splice((left + x) * 4, 4, ...hex(c));
-    }
-  }
-  return rows;
-}
+const bare = (scale) => paint(CROPPED, scale / 2);
 
 /** Encodes RGBA rows as a PNG; a number means the square background canvas of that size. */
 function png(image) {
@@ -134,24 +121,8 @@ function png(image) {
 }
 
 // ICO files may hold PNGs directly (Windows Vista and later).
-// The fish centred on a transparent square, for icons. 16 cells across, so the usual icon
-// sizes (16, 32, 48 … 256) are whole multiples and every pixel stays crisp.
-function bareSquare(size) {
-  const cells = 16;
-  const scale = size / cells;
-  const ox = Math.floor((cells - W) / 2);
-  const oy = Math.floor((cells - H) / 2);
-  const rows = [];
-  for (let y = 0; y < size; y++) {
-    const row = [];
-    for (let x = 0; x < size; x++) {
-      const c = px[Math.floor(y / scale) - oy]?.[Math.floor(x / scale) - ox];
-      row.push(...(PALETTE[c] ? hex(PALETTE[c]) : [0, 0, 0, 0]));
-    }
-    rows.push(row);
-  }
-  return badged(rows);
-}
+// The fish centred on a transparent square, for icons.
+const bareSquare = (size) => paint(ICON, size / 32);
 
 // An uncompressed 32-bit icon image: BITMAPINFOHEADER, BGRA rows bottom-up, then the 1-bit
 // transparency mask older readers use. Every program that reads .ico files reads these.
@@ -205,35 +176,19 @@ function ico(sizes, draw = canvas) {
 
 /** The logo as SVG: on its dark rounded square, or with `background: false` just the fish, cropped. */
 function svg({ background = true } = {}) {
-  const cells = background ? 20 : null;
-  const ox = background ? (cells - W) / 2 : 0;
-  const oy = background ? (cells - H) / 2 : 0;
+  const cells = background ? SQUARE : CROPPED;
   const rects = [];
-  px.forEach((row, y) =>
+  cells.forEach((row, y) =>
     [...row].forEach((c, x) => {
-      if (PALETTE[c]) rects.push(`<rect x="${x + ox}" y="${y + oy}" width="1.02" height="1.02" fill="${PALETTE[c]}"/>`);
+      if (PALETTE[c]) rects.push(`<rect x="${x}" y="${y}" width="1.02" height="1.02" fill="${PALETTE[c]}"/>`);
     }),
   );
-  // The badge on the background square, in half-cell pixels like the raster icons'.
-  if (background) {
-    const k = 0.5;
-    const left = cells - 0.8 - BW * k;
-    const top = cells - 0.8 - BH * k;
-    BADGE.forEach((row, y) =>
-      [...row].forEach((c, x) => {
-        const fill = BADGE_COLOURS[c];
-        if (fill) rects.push(`<rect x="${left + x * k}" y="${top + y * k}" width="${k * 1.02}" height="${k * 1.02}" fill="${fill}"/>`);
-      }),
-    );
-  }
-  const box = background ? `0 0 ${cells} ${cells}` : `0 0 ${W} ${H}`;
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${box}" shape-rendering="crispEdges">
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${cells[0].length} ${cells.length}" shape-rendering="crispEdges">
 <title>Glim, the Trawl anglerfish</title>
-${background ? `<rect width="${cells}" height="${cells}" rx="3.6" fill="${BG}"/>\n` : ''}${rects.join('\n')}
+${background ? `<rect width="40" height="40" rx="7.2" fill="${BG}"/>\n` : ''}${rects.join('\n')}
 </svg>
 `;
 }
-
 mkdirSync('assets', { recursive: true });
 writeFileSync('assets/glim.svg', svg());
 writeFileSync('assets/glim.png', png(512));

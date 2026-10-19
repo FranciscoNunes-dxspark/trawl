@@ -1,15 +1,47 @@
-# Pushing a tag like v0.2.0 tests, builds the executables for every platform and publishes them as a GitHub Release.
+# Every push to main is a release: it tests, builds the executables for every platform and publishes
+# them as the next version, creating the tag. The next version is the latest release with the patch
+# number raised (v0.2.0 → v0.2.1), or package.json's version when that's higher, which is how to
+# move to a new minor or major version. Nothing is committed back; the version is baked into the builds.
+# Pushes that only change Markdown don't release. "Run workflow" on the Actions tab releases by hand.
 name: Release
 
 on:
   push:
-    tags: ['v*']
+    branches: [main]
+    paths-ignore: ['**.md']
+  workflow_dispatch:
 
 permissions:
   contents: write
 
+# Releases go one at a time, so two quick merges get two versions in order.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.next.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Next version
+        id: next
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          latest="$(gh release list --limit 1 --exclude-drafts --exclude-pre-releases --json tagName --jq '.[0].tagName // "v0.0.0"')"
+          version="$(node -e '
+            const [latest, pkg] = process.argv.slice(1).map((v) => v.replace(/^v/, "").split(".").map(Number));
+            const newer = pkg[0] - latest[0] || pkg[1] - latest[1] || pkg[2] - latest[2];
+            console.log((newer > 0 ? pkg : [latest[0], latest[1], latest[2] + 1]).join("."));
+          ' "$latest" "$(node -p "require('./package.json').version")")"
+          echo "Latest release $latest; releasing v$version."
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
   test:
+    needs: version
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -18,17 +50,10 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - name: Tag matches package.json
-        run: |
-          version="$(node -p "require('./package.json').version")"
-          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
-            echo "Tag $GITHUB_REF_NAME doesn't match package.json version $version" >&2
-            exit 1
-          fi
       - run: npm test
 
   build:
-    needs: test
+    needs: [version, test]
     strategy:
       matrix:
         include:
@@ -48,6 +73,8 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.2
+      # scripts/build.js bakes package.json's version into the executables.
+      - run: npm version "${{ needs.version.outputs.version }}" --no-git-tag-version --allow-same-version
       - run: bun scripts/build.js ${{ matrix.targets }}
       - uses: actions/upload-artifact@v4
         with:
@@ -55,7 +82,7 @@ jobs:
           path: dist/
 
   release:
-    needs: build
+    needs: [version, build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -67,7 +94,9 @@ jobs:
       - name: Checksums
         working-directory: dist
         run: sha256sum * > SHA256SUMS.txt
+      # Creates the tag on this commit too.
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --title "Trawl $GITHUB_REF_NAME" --generate-notes
+          TAG: v${{ needs.version.outputs.version }}
+        run: gh release create "$TAG" dist/* --target "$GITHUB_SHA" --title "Trawl $TAG" --generate-notes

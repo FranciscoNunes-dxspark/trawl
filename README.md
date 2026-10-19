@@ -42,6 +42,8 @@ npm link          # puts a `trawl` command on your PATH
 
 Without `npm link`, run it with `node C:\Team\Trawl\bin\trawl.js`. `npm run build` makes a single executable in `dist/` that needs nothing else installed.
 
+Releases are automatic: every push to main (a merged pull request, say) publishes a new GitHub Release. The Release workflow (`.github/workflows/release.yml`) picks the next version, the latest release with the patch number raised (v0.2.0 → v0.2.1), runs the tests, builds every platform and publishes it with the files and generated notes, creating the tag. For a new minor or major version, set it in `package.json` (`npm version minor --no-git-tag-version`) and merge that; a version higher than the latest release is used as is. Nothing is committed back, so `package.json` keeps the last version set by hand, while the executables carry the released one. Pushes that only change Markdown files don't release, and "Run workflow" on the Release workflow in the Actions tab releases by hand.
+
 ## Try it without a server
 
 ```bash
@@ -168,7 +170,7 @@ claude mcp add --scope user trawl -- trawl mcp
 
 ## Updates
 
-Once a day, in the background, Trawl asks GitHub for the latest release of [FranciscoNunes-dxspark/trawl](https://github.com/FranciscoNunes-dxspark/trawl/releases). If there's a newer one, the header shows `↑ 0.2.0` and the activity log says so once per start. `/update` checks right away and says how to update: for the executable, the `gh release download` command (replace the old file after quitting); for a checkout, `git pull && npm install`. Trawl never downloads or replaces anything itself.
+Once a day, in the background, Trawl asks GitHub for the latest release of [FranciscoNunes-dxspark/trawl](https://github.com/FranciscoNunes-dxspark/trawl/releases). If there's a newer one, the header shows `↑ 0.2.0` and the activity log says so once per start. `/update` checks right away and gives the `gh release download` command (replace the old file after quitting). Trawl never downloads or replaces anything itself. Running from a checkout skips the check; `git pull && npm install` updates that.
 
 The repository is private, so GitHub only shows its releases to someone signed in with access. Trawl asks anonymously first, then through the GitHub CLI (`gh api`) with your own sign-in; without `gh` signed in, it just finds nothing. The request carries `trawl/<version>` as the user agent, and nothing about your connections or queries is sent. When it fails (offline, say), it stays silent and tries again the next day. To turn it off, set `"checkUpdates": false` in `~/.trawl/config.json`, or the environment variable `TRAWL_NO_UPDATE_CHECK=1`.
 
@@ -184,7 +186,7 @@ Glim is Trawl's anglerfish: it carries its own light into the deep, which is rou
 | `><((◉>` | Something just went wrong |
 | `><((!>` | A transaction is open: the lure glows red until `/commit` or `/rollback` |
 
-The logo and the Windows icon in `assets/` are drawn from the same pixels (`src/glim.js`), with an "SQL" badge in the corner (from 32 px up) so they are easy to tell apart from Tiller's; `node scripts/logo.js` regenerates them.
+The logo and the Windows icon in `assets/` are drawn from the same pixels (`src/glim.js`); `node scripts/logo.js` regenerates them. `glim.svg`, `glim.png` and `glim.ico` sit on the dark rounded square; `glim-transparent.svg`, `glim-transparent.png` (544 × 416) and `glim-transparent@4x.png` are just the fish, cropped (with room for the badge), on transparency, and `glim-transparent.ico` is the fish centred on a transparent square (16 to 256 px). Each one carries an "SQL" pixel-art badge in the bottom-right corner, so Trawl's icon is easy to tell from Tiller's at a glance.
 
 ## Not yet
 

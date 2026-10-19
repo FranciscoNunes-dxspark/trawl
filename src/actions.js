@@ -4,6 +4,7 @@ import { writeFile } from 'node:fs/promises';
 import { extname, resolve } from 'node:path';
 import { ADD_USAGE, isReadOnly, parseAddArgs } from './connections.js';
 import * as ed from './editor.js';
+import { AI_LABELS, AI_LEVELS, aiLevel } from './ai.js';
 import { describeObject, findObject, objectName } from './schema.js';
 import { classifyScript, oneLine, selectTop, toCsv, toJson } from './sql.js';
 
@@ -145,6 +146,32 @@ export function setLimit(ctx, value) {
   if (!Number.isInteger(n) || n < 1 || n > 1_000_000) return ctx.note('The limit is a whole number from 1 to 1000000.', 'error');
   ctx.setConfig((c) => ({ ...c, limit: n }));
   ctx.note(`Result sets now stop at ${n} rows.`, 'ok');
+}
+
+/**
+ * Sets what Claude may see of a connection: /ai <level> for the one you're on, or
+ * /ai <connection> <level>. With no level, says what it is now.
+ */
+export async function setAi(ctx, rest) {
+  const parts = rest.split(/\s+/).filter(Boolean);
+  const level = AI_LEVELS.includes(parts.at(-1)) ? parts.pop() : null;
+  const name = parts[0] ?? ctx.session?.conn.name;
+  if (!name) return ctx.note('Connect first, or name the connection: /ai <connection> off|schema|results', 'error');
+  const conn = ctx.config.connections.find((c) => c.name.toLowerCase() === name.toLowerCase());
+  if (!conn) return ctx.note(`No connection called ${name}.`, 'error');
+  if (!level) return ctx.note(`Claude may see ${AI_LABELS[aiLevel(conn)]} of ${conn.name}. /ai ${conn.name} off|schema|results changes it.`);
+  if (level === 'results' && !conn.demo) {
+    const ok = await ctx.confirm({
+      title: `Let Claude see rows from ${conn.name}${conn.prod ? ' (production)' : ''}?`,
+      detail: 'Query results then go to Claude when it asks (through trawl mcp) or when you ask it about them. They leave this machine.',
+      options: YES_NO('Yes, rows too'),
+      danger: Boolean(conn.prod),
+    });
+    if (!ok) return;
+  }
+  if (conn.demo) conn.ai = level;
+  else ctx.setConfig((c) => ({ ...c, connections: c.connections.map((x) => (x.name === conn.name ? { ...x, ai: level } : x)) }));
+  ctx.note(`Claude may now see ${AI_LABELS[level]} of ${conn.name}.`, 'ok');
 }
 
 /** Empties the console, asking first when there's something in it. */

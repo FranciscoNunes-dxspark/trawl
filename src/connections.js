@@ -9,7 +9,7 @@ export function splitArgs(s) {
   return out;
 }
 
-export const ADD_USAGE = '/add <name> <server> [database] [--user <login> --password-env <VAR>] [--domain <domain>] [--prod] [--trust-cert]';
+export const ADD_USAGE = '/add <name> <server> [database] [--user <login> --password-env <VAR>] [--domain <domain>] [--prod] [--trust-cert] [--ai off|schema|results]';
 
 /**
  * Reads `/add` arguments into a connection. Without --user it signs in through the Azure CLI.
@@ -31,6 +31,10 @@ export function parseAddArgs(rest) {
     else if (a === '--domain') conn.domain = value();
     else if (a === '--prod') conn.prod = true;
     else if (a === '--trust-cert') conn.trustCert = true;
+    else if (a === '--ai') {
+      conn.ai = value();
+      if (!['off', 'schema', 'results'].includes(conn.ai)) throw new Error(`--ai is off, schema or results. ${ADD_USAGE}`);
+    }
     else if (a.startsWith('--')) throw new Error(`Unknown option ${a}. ${ADD_USAGE}`);
     else positional.push(a);
   }

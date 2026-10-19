@@ -83,7 +83,7 @@ Press `?` inside for every shortcut. The essentials:
 | Query, the console | `↵` or `i` start typing · `esc` stop · `ctrl+r` run the statement under the cursor · `R` run it all |
 | Query, a file | `↵` run the statement under the cursor · `v` select several · `R` run the whole file · `e` edit in the console |
 | Results | `h`/`l` columns · `[`/`]` result sets · `↵` the row as a record · `x` export |
-| History | `↵` run again · `e` edit in the console |
+| History | `↵` run again · `e` edit in the console · `◆` marks what Claude ran |
 | Connections | `↵` connect · `n` new · `x` forget |
 
 One-liners can also go straight in the prompt: SQL there runs with `!`, or without it when it starts with a SQL keyword (`select …`, `exec …`).
@@ -117,7 +117,39 @@ Each result set stops at the row limit (500 to start with; `/limit <n>` changes 
 
 Type `/` and the menu narrows as you type. `tab` completes, `↑`/`↓` picks, `↵` runs. `/connect` completes connection names, `/use` database names and `/describe` tables and views.
 
-`/connect <name>` `/add …` `/forget <name>` `/disconnect` `/use <database>` `/open <file.sql>` `/console` `/new` `/save <file.sql>` `/describe <table>` `/find [text]` `/export <file>` `/limit [rows]` `/writes` `/commit` `/rollback` `/update` `/last` `/refresh` `/help` `/quit`
+`/connect <name>` `/add …` `/forget <name>` `/disconnect` `/use <database>` `/open <file.sql>` `/console` `/new` `/save <file.sql>` `/describe <table>` `/find [text]` `/export <file>` `/limit [rows]` `/writes` `/commit` `/rollback` `/ai [connection] [level]` `/update` `/last` `/refresh` `/help` `/quit`
+
+## Claude
+
+### What Claude may see
+
+Each connection has a Claude access level, shown in Connections and changed with `/ai`:
+
+| Level | Claude sees |
+| --- | --- |
+| `schema` (the default) | Table and column names, the SQL, and error messages. Never rows. |
+| `results` | Rows too, when it runs a query. `/ai results` asks first, since the data then leaves your machine. |
+| `off` | Nothing. |
+
+`/ai` on its own says the current level; `/ai results` sets it for the connection you're on, and `/ai <connection> <level>` for another. `/add … --ai <level>` sets it when adding. The demo connections allow everything; their data is made up.
+
+### Claude Code reads your databases (MCP)
+
+`trawl mcp` runs Trawl as an MCP server, so Claude Code, working in any of your repositories, can look at your databases through your saved connections. Register it once:
+
+```bash
+claude mcp add --scope user trawl -- trawl mcp
+```
+
+(From a checkout without `npm link`: `claude mcp add --scope user trawl -- node C:\Team\Trawl\bin\trawl.js mcp`.) It gives Claude `list_connections`, `list_tables`, `describe_table` and `run_query`.
+
+- Claude signs in exactly as you do (your `az login`, or the password variable you named); it never sees a password.
+- **It only reads.** Anything the write check flags is refused before it reaches the database, on every connection, production or not. As a second lock, every query runs inside a transaction that is rolled back. The check reads the SQL text, so for connections Claude uses, a login with read-only rights (`db_datareader`) is the surest guard.
+- `run_query` only returns rows from connections at the `results` level; on `schema` ones Claude gets the names and writes queries you run.
+- Results stop at 100 rows unless Claude asks for more (1000 at most).
+- Everything Claude runs shows in History, marked `◆`.
+
+`trawl mcp --demo` adds the demo connections, to try it without a server.
 
 ## Updates
 

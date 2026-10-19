@@ -3,7 +3,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 // Read per call so tests can point TRAWL_HOME somewhere temporary.
-const configDir = () => process.env.TRAWL_HOME || join(homedir(), '.trawl');
+export const configDir = () => process.env.TRAWL_HOME || join(homedir(), '.trawl');
 
 // `history` is what was typed at the prompt; `ran` is every statement that reached a database.
 // `updateCheck` remembers the last look at GitHub Releases, so it happens at most once a day.
@@ -50,5 +50,29 @@ export function saveConsole(text) {
     writeFileSync(consolePath(), text);
   } catch {
     // As with the config: not being able to keep it shouldn't stop anything.
+  }
+}
+
+/**
+ * What Claude ran through `trawl mcp` (a separate process, so it appends to its own file rather
+ * than racing the app for config.json), newest first.
+ */
+export function loadClaudeHistory() {
+  try {
+    return readFileSync(join(configDir(), 'claude-history.jsonl'), 'utf8')
+      .split('\n')
+      .filter(Boolean)
+      .map((l) => {
+        try {
+          return JSON.parse(l);
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean)
+      .reverse()
+      .slice(0, 500);
+  } catch {
+    return [];
   }
 }

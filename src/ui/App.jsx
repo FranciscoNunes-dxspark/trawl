@@ -4,7 +4,7 @@ import { readFileSync, statSync, unwatchFile, watchFile } from 'node:fs';
 import { basename, resolve } from 'node:path';
 import * as a from '../actions.js';
 import { findCommand, suggestionsFor } from '../commands.js';
-import { loadConsole, saveConfig, saveConsole, withRan } from '../config.js';
+import { loadClaudeHistory, loadConsole, saveConfig, saveConsole, withRan } from '../config.js';
 import * as ed from '../editor.js';
 import { describeConn, isReadOnly } from '../connections.js';
 import { connect as openSession } from '../db.js';
@@ -39,7 +39,7 @@ const HINTS = {
   explorer: '↵ first rows · d describe · s query it in the console · /find filter',
   query: '↵ run statement · v select several · R run file · e edit in the console · /console',
   results: 'h/l columns · [ ] result sets · ↵ record · x export',
-  history: '↵ run again · e edit in the console',
+  history: '↵ run again · e edit in the console · ◆ ran by Claude',
   connections: '↵ connect · n new · x forget',
 };
 
@@ -673,7 +673,9 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
   } else if (view === 'results') {
     main = <ResultsView results={results} setIndex={resultIndex} ctx={ctx} width={W} height={mainH} active={viewActive} />;
   } else if (view === 'history') {
-    main = <HistoryView ran={config.ran} ctx={ctx} width={W} height={mainH} active={viewActive} />;
+    // Claude's queries come from trawl mcp's log, read each time the tab draws (it's small).
+    const ran = [...config.ran, ...loadClaudeHistory()].sort((x, y) => y.at - x.at);
+    main = <HistoryView ran={ran} ctx={ctx} width={W} height={mainH} active={viewActive} />;
   } else if (!schema) {
     main = (
       <Panel title="Explorer" width={W} height={mainH}>

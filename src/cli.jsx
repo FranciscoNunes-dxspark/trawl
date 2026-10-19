@@ -16,34 +16,48 @@ if (args.includes('-v') || args.includes('--version')) {
 
 if (args.includes('-h') || args.includes('--help')) {
   console.log(`trawl [file.sql] [--connect <name>] [--demo]
+trawl mcp [--demo]
 
 A keyboard-driven SQL Server client. Opens [file.sql] in Query, and connects to
 <name> (default: the connection you used last).
 
   --demo   adds two in-memory demo connections for this session (no server needed)
+  mcp      runs Trawl as an MCP server for Claude Code, reading through your saved
+           connections (register it with: claude mcp add trawl -- trawl mcp)
 
 Inside: press ? for shortcuts, / for commands, ! to run SQL.`);
   process.exit(0);
 }
 
-if (!process.stdin.isTTY || !process.stdout.isTTY) {
-  console.error('trawl needs an interactive terminal.');
-  process.exit(1);
+// Claude Code starts this with pipes, not a terminal, so it comes before the TTY check.
+if (args[0] === 'mcp') {
+  const { serve } = await import('./mcp.js');
+  serve({ demo: args.includes('--demo') });
+} else {
+  await runApp();
 }
 
-const demo = args.includes('--demo');
-const at = args.indexOf('--connect');
-const connectTo = at >= 0 ? args[at + 1] : demo ? 'demo' : undefined;
-const file = args.find((x, i) => !x.startsWith('-') && args[i - 1] !== '--connect');
+/** The full-screen app: needs a real terminal. */
+async function runApp() {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    console.error('trawl needs an interactive terminal.');
+    process.exit(1);
+  }
 
-const config = loadConfig();
-if (demo) config.connections = [...DEMO_CONNECTIONS, ...config.connections.filter((c) => !DEMO_CONNECTIONS.some((d) => d.name === c.name))];
-setAccent(config.accent);
+  const demo = args.includes('--demo');
+  const at = args.indexOf('--connect');
+  const connectTo = at >= 0 ? args[at + 1] : demo ? 'demo' : undefined;
+  const file = args.find((x, i) => !x.startsWith('-') && args[i - 1] !== '--connect');
 
-// Draw on the alternate screen, like a full-screen app, and give the terminal back untouched on exit.
-process.stdout.write('\x1b[?1049h\x1b[H');
-process.on('exit', () => process.stdout.write('\x1b[?1049l'));
+  const config = loadConfig();
+  if (demo) config.connections = [...DEMO_CONNECTIONS, ...config.connections.filter((c) => !DEMO_CONNECTIONS.some((d) => d.name === c.name))];
+  setAccent(config.accent);
 
-const app = render(<App config={config} initialFile={file} initialConnection={connectTo} checkLatest={(opts) => fetchLatest({ current: VERSION, ...opts })} />, { exitOnCtrlC: false });
-await app.waitUntilExit();
-process.exit(0);
+  // Draw on the alternate screen, like a full-screen app, and give the terminal back untouched on exit.
+  process.stdout.write('\x1b[?1049h\x1b[H');
+  process.on('exit', () => process.stdout.write('\x1b[?1049l'));
+
+  const app = render(<App config={config} initialFile={file} initialConnection={connectTo} checkLatest={(opts) => fetchLatest({ current: VERSION, ...opts })} />, { exitOnCtrlC: false });
+  await app.waitUntilExit();
+  process.exit(0);
+}

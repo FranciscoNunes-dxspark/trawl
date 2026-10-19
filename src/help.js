@@ -40,13 +40,17 @@ Results
   ↵                The row as a record, one column per line
   x                Export (/export <file.csv|file.json>)
 
-History (every statement that ran, newest first)
+History (every statement that ran, newest first; ◆ marks what Claude ran through trawl mcp)
   ↵                Run it again (the same checks apply)
   e                Copy it into the console to edit
 
 Connections
   ↵                Connect         n           New (/add …)
   x                Forget
+
+Claude
+  /ai [connection] [off|schema|results]   What Claude may see: nothing, names only (the default), or rows too
+  trawl mcp        Run from Claude Code (claude mcp add --scope user trawl -- trawl mcp); it only reads
 
 Safety
   A production connection (/add … --prod) is read-only: writes are refused until /writes.
@@ -62,7 +66,7 @@ Slash commands
   /connect <name>   /add <name> <server> [database] [--user u --password-env VAR] [--domain d] [--prod] [--trust-cert]
   /forget <name>   /disconnect   /use <database>   /open <file.sql>   /console   /new   /save <file.sql>
   /describe <table>   /find [text]
-  /export <file>   /limit [rows]   /writes   /commit   /rollback   /update   /last   /refresh   /help   /quit
+  /export <file>   /limit [rows]   /writes   /commit   /rollback   /ai   /update   /last   /refresh   /help   /quit
 
 Viewer (describe, records, output, this help)
   j k  space  g G  Scroll         esc / q     Close`;

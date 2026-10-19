@@ -21,6 +21,7 @@ export const COMMANDS = [
   { name: 'commit', desc: 'Commit the open transaction', run: (ctx) => a.commit(ctx) },
   { name: 'rollback', desc: 'Roll back the open transaction', run: (ctx) => a.rollback(ctx) },
   { name: 'update', desc: 'Check for a newer Trawl and say how to get it', run: (ctx) => ctx.checkUpdates() },
+  { name: 'ai', args: '[connection] [off|schema|results]', desc: 'What Claude may see of a connection (schema only by default)', complete: 'connections', run: (ctx, s) => a.setAi(ctx, s) },
   { name: 'last', desc: 'Show the full output of the last run', run: (ctx) => ctx.showLast() },
   { name: 'refresh', desc: 'Reload the schema', run: (ctx) => ctx.refresh() },
   { name: 'help', desc: 'Keyboard shortcuts', run: (ctx) => ctx.showHelp() },

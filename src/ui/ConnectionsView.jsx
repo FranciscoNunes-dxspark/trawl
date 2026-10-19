@@ -1,6 +1,7 @@
 import React from 'react';
 import { Box, useInput } from 'ink';
 import * as a from '../actions.js';
+import { AI_LABELS, aiLevel } from '../ai.js';
 import { describeConn, isReadOnly } from '../connections.js';
 import { theme } from '../theme.js';
 import { fit } from '../text.js';
@@ -39,6 +40,7 @@ export function ConnectionsView({ connections, current, ctx, width, height, acti
         ...(c.user ? [[{ text: 'Login     ', color: theme.dim }, { text: `${c.domain ? `${c.domain}\\` : ''}${c.user}` }]] : []),
         ...(c.passwordEnv ? [[{ text: 'Password  ', color: theme.dim }, { text: `from $${c.passwordEnv}` }]] : []),
         [{ text: 'Writes    ', color: theme.dim }, isReadOnly(c) ? { text: 'read-only until /writes', color: theme.warn } : { text: 'allowed' }],
+        [{ text: 'Claude    ', color: theme.dim }, { text: `may see ${AI_LABELS[aiLevel(c)]}`, color: aiLevel(c) === 'results' ? theme.warn : undefined }, { text: '  (/ai to change)', color: theme.dim }],
         ...(c.prod ? [[{ text: 'Production: writes run in a transaction you /commit or /rollback', color: theme.del }]] : []),
       ]
     : [];

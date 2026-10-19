@@ -1,15 +1,44 @@
-# Pushing a tag like v0.2.0 tests, builds the executables for every platform and publishes them as a GitHub Release.
+# When a push to main carries a package.json version that has no release yet, this tests, builds the
+# executables for every platform and publishes them as a GitHub Release, tagging the commit vX.Y.Z.
+# So releasing is bumping the version and merging. Run it by hand (Actions → Release) to retry.
 name: Release
 
 on:
   push:
-    tags: ['v*']
+    branches: [main]
+    paths: [package.json]
+  workflow_dispatch:
 
 permissions:
   contents: write
 
+# One release at a time, and never cancel one halfway through publishing.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.check.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Is this version released yet?
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="v$(node -p "require('./package.json').version")"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "$tag is already released; nothing to do."
+          else
+            echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          fi
+
   test:
+    needs: version
+    if: needs.version.outputs.tag
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -18,13 +47,6 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - name: Tag matches package.json
-        run: |
-          version="$(node -p "require('./package.json').version")"
-          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
-            echo "Tag $GITHUB_REF_NAME doesn't match package.json version $version" >&2
-            exit 1
-          fi
       - run: npm test
 
   build:
@@ -55,7 +77,7 @@ jobs:
           path: dist/
 
   release:
-    needs: build
+    needs: [version, build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -70,4 +92,5 @@ jobs:
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --title "Trawl $GITHUB_REF_NAME" --generate-notes
+          TAG: ${{ needs.version.outputs.tag }}
+        run: gh release create "$TAG" dist/* --target "$GITHUB_SHA" --title "Trawl $TAG" --generate-notes

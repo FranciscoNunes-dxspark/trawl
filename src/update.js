@@ -1,6 +1,7 @@
 // Checks GitHub Releases for a newer Trawl. It only tells you: nothing is downloaded or replaced.
-// The one request is a GET to the GitHub API with "trawl/<version>" as the user agent; no
-// connection, query or machine details are sent.
+// It asks the GitHub API with "trawl/<version>" as the user agent and, because the repository is
+// private, again through the gh CLI when that finds nothing. No connection, query or machine
+// details are sent.
 import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
@@ -42,21 +43,43 @@ export function assetName(platform = process.platform, arch = process.arch) {
 }
 
 /**
- * The latest published release: { version, url, download }, `download` being this machine's
- * file when the release has one. Null when the repository has no releases yet (or isn't public).
+ * The same request through the GitHub CLI, signed in as you: how a private repository's releases
+ * are seen. Resolves with the release JSON, or null when gh is missing, signed out, or finds none.
  */
-export async function fetchLatest({ current, signal, fetchImpl = fetch } = {}) {
+export function ghLatest({ signal } = {}) {
+  return new Promise((resolve) => {
+    execFile('gh', ['api', `repos/${REPO}/releases/latest`], { signal, windowsHide: true, encoding: 'utf8', timeout: 10000 }, (err, stdout) => {
+      if (err) return resolve(null);
+      try {
+        resolve(JSON.parse(stdout));
+      } catch {
+        resolve(null);
+      }
+    });
+  });
+}
+
+function shape(body, { signedIn }) {
+  const version = String(body?.tag_name ?? '').replace(/^v/, '');
+  if (!parseVersion(version)) return null;
+  const file = (body.assets ?? []).find((a) => a.name === assetName());
+  return { version, url: body.html_url ?? `${RELEASES_URL}/tag/v${version}`, download: file?.browser_download_url ?? null, signedIn };
+}
+
+/**
+ * The latest published release: { version, url, download, signedIn }, `download` being this
+ * machine's file when the release has one. The repository is private, which GitHub answers with
+ * a 404 to anyone not signed in, so a 404 asks again through gh (`signedIn` then). Null when
+ * neither finds a release.
+ */
+export async function fetchLatest({ current, signal, fetchImpl = fetch, ghImpl = ghLatest } = {}) {
   const res = await fetchImpl(LATEST_API, {
     signal,
     headers: { accept: 'application/vnd.github+json', 'user-agent': `trawl/${current ?? 'unknown'}` },
   });
-  if (res.status === 404) return null;
+  if (res.status === 404) return shape(await ghImpl({ signal }), { signedIn: true });
   if (!res.ok) throw new Error(`GitHub answered ${res.status} ${res.statusText ?? ''}`.trim());
-  const body = await res.json();
-  const version = String(body.tag_name ?? '').replace(/^v/, '');
-  if (!parseVersion(version)) return null;
-  const file = (body.assets ?? []).find((a) => a.name === assetName());
-  return { version, url: body.html_url ?? `${RELEASES_URL}/tag/v${version}`, download: file?.browser_download_url ?? null };
+  return shape(await res.json(), { signedIn: false });
 }
 
 /** The folder of the checkout this copy runs from. */
@@ -64,10 +87,13 @@ export const checkoutRoot = () => fileURLToPath(new URL('..', import.meta.url)).
 
 /** What to do to get `latest`, for the way this copy was installed. */
 export function updateAdvice({ latest, current, compiled, root = checkoutRoot() }) {
-  if (!latest) return [`No releases are published at ${RELEASES_URL} yet. You have ${current}.`];
+  if (!latest) return [`No release found at ${RELEASES_URL}. It's private, so the check needs gh signed in with access (gh auth login). You have ${current}.`];
   if (!isNewer(latest.version, current)) return [`Trawl ${current} is the latest version.`];
   const lines = [`Trawl ${latest.version} is out (you have ${current}).`];
-  if (compiled) {
+  if (compiled && latest.signedIn) {
+    // A private release's files need a signed-in download, which gh does.
+    lines.push(`Download it: gh release download v${latest.version} --repo ${REPO} --pattern ${assetName()}`);
+  } else if (compiled) {
     lines.push(latest.download ? `Download ${assetName()}: ${latest.download}` : `Download it from ${latest.url}`);
     lines.push('Then replace this executable with it (quit Trawl first).');
   } else {

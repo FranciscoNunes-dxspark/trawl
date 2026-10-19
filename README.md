@@ -23,9 +23,18 @@ A keyboard-driven SQL Server client for the terminal, built the same way as [Til
 
 ## Install
 
+**Download** the executable for your platform from [Releases](https://github.com/FranciscoNunes-dxspark/trawl/releases): `trawl-windows-x64.exe`, `trawl-linux-x64` / `-arm64`, `trawl-macos-arm64` / `-x64`. The repository is private, so download in the browser while signed in, or with the GitHub CLI:
+
+```bash
+gh release download --repo FranciscoNunes-dxspark/trawl --pattern trawl-windows-x64.exe
+```
+
+It's a single file with nothing else to install. Rename it to `trawl` (`trawl.exe`) and put it in a folder on your PATH. `SHA256SUMS.txt` lists each file's checksum. The builds aren't code-signed, so Windows SmartScreen may ask before the first run ("More info" → "Run anyway"), and on macOS you may need `xattr -d com.apple.quarantine trawl-macos-arm64` once.
+
 **From source** (Node 22+):
 
 ```bash
+git clone https://github.com/FranciscoNunes-dxspark/trawl.git C:\Team\Trawl
 cd C:\Team\Trawl
 npm install
 npm link          # puts a `trawl` command on your PATH
@@ -112,9 +121,9 @@ Type `/` and the menu narrows as you type. `tab` completes, `↑`/`↓` picks, `
 
 ## Updates
 
-Once a day, in the background, Trawl asks GitHub for the latest release of [FranciscoNunes-dxspark/trawl](https://github.com/FranciscoNunes-dxspark/trawl/releases). If there's a newer one, the header shows `↑ 0.2.0` and the activity log says so once per start. `/update` checks right away and says how to update: for the executable, the file to download (replace the old one after quitting); for a checkout, `git pull && npm install`. Trawl never downloads or replaces anything itself.
+Once a day, in the background, Trawl asks GitHub for the latest release of [FranciscoNunes-dxspark/trawl](https://github.com/FranciscoNunes-dxspark/trawl/releases). If there's a newer one, the header shows `↑ 0.2.0` and the activity log says so once per start. `/update` checks right away and says how to update: for the executable, the `gh release download` command (replace the old file after quitting); for a checkout, `git pull && npm install`. Trawl never downloads or replaces anything itself.
 
-The check is one GET request with `trawl/<version>` as the user agent. Nothing about your connections or queries is sent. When it fails (offline, say), it stays silent and tries again the next day. To turn it off, set `"checkUpdates": false` in `~/.trawl/config.json`, or the environment variable `TRAWL_NO_UPDATE_CHECK=1`.
+The repository is private, so GitHub only shows its releases to someone signed in with access. Trawl asks anonymously first, then through the GitHub CLI (`gh api`) with your own sign-in; without `gh` signed in, it just finds nothing. The request carries `trawl/<version>` as the user agent, and nothing about your connections or queries is sent. When it fails (offline, say), it stays silent and tries again the next day. To turn it off, set `"checkUpdates": false` in `~/.trawl/config.json`, or the environment variable `TRAWL_NO_UPDATE_CHECK=1`.
 
 ## Glim
 

@@ -43,17 +43,21 @@ test('fetchLatest reads the release and picks this machine’s file', async () =
       assets: [{ name: assetName(), browser_download_url: 'https://example.test/trawl' }],
     }),
   });
-  assert.deepEqual(latest, { version: '0.2.0', url: 'https://github.com/FranciscoNunes-dxspark/trawl/releases/tag/v0.2.0', download: 'https://example.test/trawl' });
+  assert.deepEqual(latest, { version: '0.2.0', url: 'https://github.com/FranciscoNunes-dxspark/trawl/releases/tag/v0.2.0', download: 'https://example.test/trawl', signedIn: false });
 });
 
-test('no releases yet is not an error; a server error is', async () => {
-  assert.equal(await fetchLatest({ current: '0.1.0', fetchImpl: reply(404, {}) }), null);
+test('a 404 (private, or no releases) asks again through gh', async () => {
+  const viaGh = await fetchLatest({ current: '0.1.0', fetchImpl: reply(404, {}), ghImpl: async () => ({ tag_name: 'v0.3.0', html_url: 'https://r', assets: [] }) });
+  assert.deepEqual(viaGh, { version: '0.3.0', url: 'https://r', download: null, signedIn: true });
+  assert.equal(await fetchLatest({ current: '0.1.0', fetchImpl: reply(404, {}), ghImpl: async () => null }), null);
   await assert.rejects(fetchLatest({ current: '0.1.0', fetchImpl: reply(403, {}) }), /GitHub answered 403/);
 });
 
 test('the advice depends on how Trawl was installed', () => {
   const latest = { version: '0.2.0', url: 'https://r', download: 'https://d' };
-  assert.match(updateAdvice({ latest: null, current: '0.1.0' })[0], /No releases are published/);
+  assert.match(updateAdvice({ latest: null, current: '0.1.0' })[0], /gh auth login/);
+  const signedIn = updateAdvice({ latest: { ...latest, signedIn: true }, current: '0.1.0', compiled: true });
+  assert.equal(signedIn[1], `Download it: gh release download v0.2.0 --repo FranciscoNunes-dxspark/trawl --pattern ${assetName()}`);
   assert.deepEqual(updateAdvice({ latest, current: '0.2.0' }), ['Trawl 0.2.0 is the latest version.']);
   const exe = updateAdvice({ latest, current: '0.1.0', compiled: true });
   assert.equal(exe[0], 'Trawl 0.2.0 is out (you have 0.1.0).');

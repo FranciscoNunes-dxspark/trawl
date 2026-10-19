@@ -216,9 +216,10 @@ test('/ask puts Claude’s query in the console and runs nothing', async () => {
   assert.match(frame(), /The query is in the console/);
   assert.match(prompts[0], /dbo\.Players\(Id int PK/);
   assert.match(prompts[0], /Question: who scores the most/);
-  assert.doesNotMatch(frame(), /● SELECT TOP \(3\) Name/, 'nothing ran');
+  // The activity bullet is ● on Windows and ⏺ elsewhere (theme.js BULLET).
+  assert.doesNotMatch(frame(), /[●⏺] SELECT TOP \(3\) Name/, 'nothing ran');
   app.stdin.write('\x12');
-  await until(() => frame().includes('● SELECT TOP (3) Name, Goals FROM dbo.Players ORDER BY Goals DESC;') && frame().includes('3 rows'), 'the run after ctrl+r');
+  await until(() => /[●⏺] SELECT TOP \(3\) Name, Goals FROM dbo\.Players ORDER BY Goals DESC;/.test(frame()) && frame().includes('3 rows'), 'the run after ctrl+r');
   app.unmount();
 });
 

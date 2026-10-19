@@ -1,4 +1,4 @@
-// Compiles Fathom into standalone executables with Bun (no Node needed to run them).
+// Compiles Trawl into standalone executables with Bun (no Node needed to run them).
 //   bun scripts/build.js                 this machine's platform
 //   bun scripts/build.js --all           every release target
 //   bun scripts/build.js bun-linux-x64   specific targets
@@ -6,11 +6,11 @@
 import pkg from '../package.json' with { type: 'json' };
 
 const TARGETS = {
-  'bun-windows-x64': 'fathom-windows-x64.exe',
-  'bun-linux-x64': 'fathom-linux-x64',
-  'bun-linux-arm64': 'fathom-linux-arm64',
-  'bun-darwin-x64': 'fathom-macos-x64',
-  'bun-darwin-arm64': 'fathom-macos-arm64',
+  'bun-windows-x64': 'trawl-windows-x64.exe',
+  'bun-linux-x64': 'trawl-linux-x64',
+  'bun-linux-arm64': 'trawl-linux-arm64',
+  'bun-darwin-x64': 'trawl-macos-x64',
+  'bun-darwin-arm64': 'trawl-macos-arm64',
 };
 
 const args = process.argv.slice(2);
@@ -34,7 +34,7 @@ for (const target of targets) {
     compile: { target, outfile },
     minify: true,
     plugins: [noDevtools],
-    define: { 'process.env.FATHOM_VERSION': JSON.stringify(pkg.version) },
+    define: { 'process.env.TRAWL_VERSION': JSON.stringify(pkg.version) },
   });
   if (!result.success) {
     for (const log of result.logs) console.error(log);

@@ -20,7 +20,7 @@ export const COMMANDS = [
   { name: 'last', desc: 'Show the full output of the last run', run: (ctx) => ctx.showLast() },
   { name: 'refresh', desc: 'Reload the schema', run: (ctx) => ctx.refresh() },
   { name: 'help', desc: 'Keyboard shortcuts', run: (ctx) => ctx.showHelp() },
-  { name: 'quit', desc: 'Exit Fathom', run: (ctx) => ctx.quit() },
+  { name: 'quit', desc: 'Exit Trawl', run: (ctx) => ctx.quit() },
 ];
 
 /** Exact name, or an unambiguous prefix of one. */

@@ -17,7 +17,7 @@ Explorer (tables, views and routines of the current database)
   s                Start a query on it at the prompt
   /find <text>     Filter by name
 
-Query (a .sql file opened with /open; Fathom reloads it when you save)
+Query (a .sql file opened with /open; Trawl reloads it when you save)
   ↵                Run the statement under the cursor
   v                Start or end a selection of statements; ↵ then runs them together
   R                Run the whole file, batch by batch (split on GO)

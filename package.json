@@ -1,17 +1,17 @@
 {
-  "name": "fathom",
+  "name": "trawl",
   "version": "0.1.0",
   "description": "A keyboard-driven SQL Server client for the terminal",
   "type": "module",
   "bin": {
-    "fathom": "bin/fathom.js"
+    "trawl": "bin/trawl.js"
   },
   "engines": {
     "node": ">=22"
   },
   "scripts": {
-    "start": "node bin/fathom.js",
-    "demo": "node bin/fathom.js --demo",
+    "start": "node bin/trawl.js",
+    "demo": "node bin/trawl.js --demo",
     "test": "node --import ./src/register.js --test test/*.test.js",
     "build": "npx --yes bun@1.4.2 scripts/build.js",
     "build:all": "npx --yes bun@1.4.2 scripts/build.js --all"

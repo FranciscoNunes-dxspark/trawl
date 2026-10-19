@@ -54,7 +54,7 @@ export function QueryView({ file, ctx, width, height, active }) {
             [{ text: '  No script open.', bold: true }],
             '',
             [{ text: '  /open <file.sql> lists its statements here; ↵ runs the one under the cursor.', color: theme.dim }],
-            [{ text: '  Edit the file in your editor: Fathom reloads it each time you save.', color: theme.dim }],
+            [{ text: '  Edit the file in your editor: Trawl reloads it each time you save.', color: theme.dim }],
             [{ text: '  For a quick one, type ! and the SQL at the prompt.', color: theme.dim }],
           ]}
         />

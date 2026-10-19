@@ -118,7 +118,7 @@ function runBatch(connection, sql, line, state, { signal, limit = 500 } = {}) {
     const request = new Request(sql, (err) => {
       signal?.removeEventListener('abort', onAbort);
       if (!err) return resolve();
-      // Fathom cancels on purpose once a result set reaches the row limit.
+      // Trawl cancels on purpose once a result set reaches the row limit.
       if (err.code === 'ECANCEL' && state.stopped) return resolve();
       if (err.code === 'ECANCEL') return reject(new DbError('Cancelled', { cancelled: true }));
       reject(toDbError(err, line - 1));

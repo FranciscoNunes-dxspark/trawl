@@ -1,4 +1,4 @@
-// Azure SQL sign-in through the Azure CLI: the token comes from `az login`, so Fathom never
+// Azure SQL sign-in through the Azure CLI: the token comes from `az login`, so Trawl never
 // sees or stores a password. Tokens last about an hour; each new connection asks for a fresh one.
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';

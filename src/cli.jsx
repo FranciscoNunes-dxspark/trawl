@@ -9,12 +9,12 @@ import { App } from './ui/App.jsx';
 const args = process.argv.slice(2);
 
 if (args.includes('-v') || args.includes('--version')) {
-  console.log(`fathom ${VERSION}`);
+  console.log(`trawl ${VERSION}`);
   process.exit(0);
 }
 
 if (args.includes('-h') || args.includes('--help')) {
-  console.log(`fathom [file.sql] [--connect <name>] [--demo]
+  console.log(`trawl [file.sql] [--connect <name>] [--demo]
 
 A keyboard-driven SQL Server client. Opens [file.sql] in Query, and connects to
 <name> (default: the connection you used last).
@@ -26,7 +26,7 @@ Inside: press ? for shortcuts, / for commands, ! to run SQL.`);
 }
 
 if (!process.stdin.isTTY || !process.stdout.isTTY) {
-  console.error('fathom needs an interactive terminal.');
+  console.error('trawl needs an interactive terminal.');
   process.exit(1);
 }
 

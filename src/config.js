@@ -2,8 +2,8 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-// Read per call so tests can point FATHOM_HOME somewhere temporary.
-const configDir = () => process.env.FATHOM_HOME || join(homedir(), '.fathom');
+// Read per call so tests can point TRAWL_HOME somewhere temporary.
+const configDir = () => process.env.TRAWL_HOME || join(homedir(), '.trawl');
 
 // `history` is what was typed at the prompt; `ran` is every statement that reached a database.
 const DEFAULTS = { connections: [], history: [], ran: [], limit: 500, last: null };

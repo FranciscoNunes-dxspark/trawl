@@ -13,8 +13,8 @@ const KEYS = { down: '\x1b[B', enter: '\r', esc: '\x1b' };
 
 let base;
 before(() => {
-  base = mkdtempSync(join(tmpdir(), 'fathom-'));
-  process.env.FATHOM_HOME = join(base, 'home');
+  base = mkdtempSync(join(tmpdir(), 'trawl-'));
+  process.env.TRAWL_HOME = join(base, 'home');
 });
 after(() => rmSync(base, { recursive: true, force: true }));
 

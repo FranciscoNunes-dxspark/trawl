@@ -56,9 +56,9 @@ export function ConnectionsView({ connections, current, ctx, width, height, acti
               [{ text: '  /add club-a myserver.database.windows.net ClubA', color: theme.accent }],
               [{ text: '      Azure SQL, signing in with your az login', color: theme.dim }],
               [{ text: '  /add local localhost,1433 Dev --user sa --password-env SA_PASSWORD --trust-cert', color: theme.accent }],
-              [{ text: '      a SQL login; Fathom reads the password from that variable and never stores it', color: theme.dim }],
+              [{ text: '      a SQL login; Trawl reads the password from that variable and never stores it', color: theme.dim }],
               [{ text: '  Add --prod to make a connection read-only and transactional.', color: theme.dim }],
-              [{ text: '  Or try it out first: fathom --demo', color: theme.dim }],
+              [{ text: '  Or try it out first: trawl --demo', color: theme.dim }],
             ]}
           />
         ) : null}

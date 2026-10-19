@@ -54,7 +54,7 @@ function summarize(res, limit) {
 function Header({ session, tranCount, writesAllowed, file, width, connecting }) {
   const segs = [
     { text: '≋ ', color: theme.accent, bold: true },
-    { text: 'Fathom', bold: true },
+    { text: 'Trawl', bold: true },
   ];
   if (session) {
     const { conn } = session;

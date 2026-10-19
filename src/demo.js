@@ -1,4 +1,4 @@
-// An in-memory stand-in for SQL Server, for `fathom --demo` and the tests. It has no SQL engine:
+// An in-memory stand-in for SQL Server, for `trawl --demo` and the tests. It has no SQL engine:
 // it knows the catalog query, SELECT [TOP (n)] … FROM a table, simple SELECT lists, USE,
 // transactions, WAITFOR DELAY (to try cancelling), RAISERROR/THROW, and counts what writes would
 // touch without changing anything.
@@ -77,7 +77,7 @@ function selectItem(item, session) {
   else if (/^N?'(.*)'$/s.test(expr)) value = expr.replace(/^N?'(.*)'$/s, '$1').replace(/''/g, "'");
   else if (/^(GETDATE|SYSDATETIME|GETUTCDATE|SYSUTCDATETIME)\(\)$/i.test(expr)) value = new Date();
   else if (/^DB_NAME\(\)$/i.test(expr)) value = session.database;
-  else if (/^@@VERSION$/i.test(expr)) value = 'Fathom demo (no SQL engine)';
+  else if (/^@@VERSION$/i.test(expr)) value = 'Trawl demo (no SQL engine)';
   else if (/^NULL$/i.test(expr)) value = null;
   else value = expr;
   return { name: alias ?? '(No column name)', value };
@@ -169,7 +169,7 @@ export function demoSession(conn, { database } = {}) {
         session,
         script,
         async (batch, line, state) => {
-          if (batch.startsWith('-- fathom:schema')) return void state.sets.push(...schemaSets(session.database));
+          if (batch.startsWith('-- trawl:schema')) return void state.sets.push(...schemaSets(session.database));
           for (const st of splitStatements(batch)) {
             await runStatement(session, st.text, line + st.line - 1, state, opts);
             if (state.stopped) return;

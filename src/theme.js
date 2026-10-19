@@ -1,4 +1,4 @@
-// One palette for the whole UI. The accent can be changed in ~/.fathom/config.json ("accent": "#hex").
+// One palette for the whole UI. The accent can be changed in ~/.trawl/config.json ("accent": "#hex").
 export const theme = {
   accent: '#5fd787',
   border: '#5f5f5f',

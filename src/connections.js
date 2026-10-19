@@ -37,7 +37,7 @@ export function parseAddArgs(rest) {
   const [name, server, database] = positional;
   if (!name || !server) throw new Error(ADD_USAGE);
   if (positional.length > 3) throw new Error(`Too many arguments. ${ADD_USAGE}`);
-  if (conn.user && !conn.passwordEnv) throw new Error('A SQL login needs --password-env <VAR>: the environment variable holding its password. Fathom never stores passwords.');
+  if (conn.user && !conn.passwordEnv) throw new Error('A SQL login needs --password-env <VAR>: the environment variable holding its password. Trawl never stores passwords.');
   if (conn.passwordEnv && !conn.user) throw new Error('--password-env goes with --user.');
   return { name, server, ...(database ? { database } : {}), auth: conn.user ? (conn.domain ? 'ntlm' : 'sql') : 'azure-cli', ...conn };
 }
@@ -81,13 +81,13 @@ export function tediousConfig(conn, { token, password, database = conn.database 
       connectTimeout: 20000,
       // No timeout: a long query runs until it finishes or esc cancels it.
       requestTimeout: 0,
-      appName: 'Fathom',
+      appName: 'Trawl',
       useUTC: true,
     },
   };
 }
 
-/** The connections `fathom --demo` adds for the session: an ordinary one and a production one. */
+/** The connections `trawl --demo` adds for the session: an ordinary one and a production one. */
 export const DEMO_CONNECTIONS = [
   { name: 'demo', demo: true, server: 'demo', database: 'ClubA' },
   { name: 'demo-prod', demo: true, prod: true, server: 'demo', database: 'ClubA' },

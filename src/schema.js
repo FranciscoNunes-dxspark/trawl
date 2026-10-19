@@ -2,7 +2,7 @@
 // that the Explorer, completion and /describe all read from.
 
 // The marker comment lets the demo driver recognise this batch.
-export const SCHEMA_SQL = `-- fathom:schema
+export const SCHEMA_SQL = `-- trawl:schema
 SELECT DB_NAME() AS db;
 SELECT name FROM sys.databases WHERE HAS_DBACCESS(name) = 1 ORDER BY name;
 SELECT s.name AS [schema], o.name, RTRIM(o.type) AS type,

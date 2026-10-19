@@ -1,6 +1,7 @@
 // Draws Glim into assets/: glim.svg (README, GitHub), glim.png (social preview), glim.ico
 // (the Windows executable's icon), and glim-transparent.svg/.png/.ico (just the fish, no background),
-// all from the pixels in src/glim.js.
+// all from the pixels in src/glim.js. Each carries an "SQL" badge in the corner, so Trawl's icon
+// is easy to tell from Tiller's at a glance.
 //   node scripts/logo.js
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { deflateSync } from 'node:zlib';
@@ -15,6 +16,25 @@ const last = used.lastIndexOf(true);
 const px = full.map((row) => row.slice(first, last + 1));
 const W = px[0].length;
 const H = px.length;
+
+// The badge: "SQL" in dark letters on the lure's yellow, ringed in the background colour so it
+// stands off the fish. 'Y' badge, 'E' letters, 'K' ring, '.' transparent.
+const BADGE = [
+  '.KKKKKKKKKKKKK.',
+  'KKYYYYYYYYYYYKK',
+  'KYYYYYYYYYYYYYK',
+  'KYEEEYEEEYEYYYK',
+  'KYEYYYEYEYEYYYK',
+  'KYEEEYEYEYEYYYK',
+  'KYYYEYEEYYEYYYK',
+  'KYEEEYYEEYEEEYK',
+  'KYYYYYYYYYYYYYK',
+  'KKYYYYYYYYYYYKK',
+  '.KKKKKKKKKKKKK.',
+];
+const BADGE_COLOURS = { Y: PALETTE.Y, E: PALETTE.E, K: '#0f1724' };
+const BW = BADGE[0].length;
+const BH = BADGE.length;
 
 const hex = (h) => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16), 255];
 
@@ -42,7 +62,7 @@ function canvas(size) {
     }
     rows.push(row);
   }
-  return rows;
+  return badged(rows);
 }
 
 // Just the fish on transparency, cropped to the drawing: `scale` image pixels per drawing pixel.
@@ -55,6 +75,26 @@ function bare(scale) {
       row.push(...(PALETTE[c] ? hex(PALETTE[c]) : [0, 0, 0, 0]));
     }
     rows.push(row);
+  }
+  return rows;
+}
+
+/**
+ * Stamps the badge into the bottom-right corner of square RGBA rows, in whole pixels so the
+ * letters stay crisp. Icons under 32 px are too small to read it, so they go without.
+ */
+function badged(rows) {
+  const size = rows.length;
+  if (size < 32) return rows;
+  const k = Math.max(1, Math.round(size / 40));
+  const margin = Math.round(size * 0.04);
+  const left = size - margin - BW * k;
+  const top = size - margin - BH * k;
+  for (let y = 0; y < BH * k; y++) {
+    for (let x = 0; x < BW * k; x++) {
+      const c = BADGE_COLOURS[BADGE[Math.floor(y / k)][Math.floor(x / k)]];
+      if (c) rows[top + y].splice((left + x) * 4, 4, ...hex(c));
+    }
   }
   return rows;
 }
@@ -110,7 +150,7 @@ function bareSquare(size) {
     }
     rows.push(row);
   }
-  return rows;
+  return badged(rows);
 }
 
 // An uncompressed 32-bit icon image: BITMAPINFOHEADER, BGRA rows bottom-up, then the 1-bit
@@ -174,6 +214,18 @@ function svg({ background = true } = {}) {
       if (PALETTE[c]) rects.push(`<rect x="${x + ox}" y="${y + oy}" width="1.02" height="1.02" fill="${PALETTE[c]}"/>`);
     }),
   );
+  // The badge on the background square, in half-cell pixels like the raster icons'.
+  if (background) {
+    const k = 0.5;
+    const left = cells - 0.8 - BW * k;
+    const top = cells - 0.8 - BH * k;
+    BADGE.forEach((row, y) =>
+      [...row].forEach((c, x) => {
+        const fill = BADGE_COLOURS[c];
+        if (fill) rects.push(`<rect x="${left + x * k}" y="${top + y * k}" width="${k * 1.02}" height="${k * 1.02}" fill="${fill}"/>`);
+      }),
+    );
+  }
   const box = background ? `0 0 ${cells} ${cells}` : `0 0 ${W} ${H}`;
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${box}" shape-rendering="crispEdges">
 <title>Glim, the Trawl anglerfish</title>

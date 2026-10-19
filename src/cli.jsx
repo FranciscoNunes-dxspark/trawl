@@ -1,6 +1,6 @@
 import React from 'react';
 import { render } from 'ink';
-import { VERSION } from './version.js';
+import { COMPILED, VERSION } from './version.js';
 import { fetchLatest } from './update.js';
 import { loadConfig } from './config.js';
 import { DEMO_CONNECTIONS } from './connections.js';
@@ -57,7 +57,10 @@ async function runApp() {
   process.stdout.write('\x1b[?1049h\x1b[H');
   process.on('exit', () => process.stdout.write('\x1b[?1049l'));
 
-  const app = render(<App config={config} initialFile={file} initialConnection={connectTo} checkLatest={(opts) => fetchLatest({ current: VERSION, ...opts })} />, { exitOnCtrlC: false });
+  // Only the downloaded executables look for updates: a checkout updates with git pull, and its
+  // package.json version is behind the releases (the Release workflow sets the version as it builds).
+  const checkLatest = COMPILED ? (opts) => fetchLatest({ current: VERSION, ...opts }) : undefined;
+  const app = render(<App config={config} initialFile={file} initialConnection={connectTo} checkLatest={checkLatest} />, { exitOnCtrlC: false });
   await app.waitUntilExit();
   process.exit(0);
 }

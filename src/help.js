@@ -44,7 +44,7 @@ History (every statement that ran, newest first; ◆ marks what Claude ran throu
   ↵                Run it again (the same checks apply)
   e                Copy it into the console to edit
 
-Connections
+Connections (/import datagrip brings in DataGrip's data sources)
   ↵                Connect         n           New (/add …)
   x                Forget
 
@@ -64,7 +64,7 @@ Prompt
   ctrl+u ctrl+w    Clear the line · Delete a word
 
 Slash commands
-  /connect <name>   /add <name> <server> [database] [--user u --password-env VAR] [--domain d] [--prod] [--trust-cert]
+  /import datagrip [folder]   /connect <name>   /add <name> <server> [database] [--user u --password-env VAR] [--domain d] [--prod] [--trust-cert]
   /forget <name>   /disconnect   /use <database>   /open <file.sql>   /console   /new   /save <file.sql>
   /describe <table>   /find [text]
   /export <file>   /limit [rows]   /writes   /commit   /rollback   /ask <question>   /ai   /update   /last   /refresh   /help   /quit

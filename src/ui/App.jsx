@@ -110,9 +110,10 @@ function activityRows(entries) {
 /**
  * `checkLatest({ signal })` looks up the latest release (update.js fetchLatest); without it,
  * as in the tests, Trawl never checks for updates. `askClaude({ prompt, signal })` answers /ask
- * (the claude CLI by default; the tests pass their own).
+ * (the claude CLI by default) and `findDataSources` feeds /import datagrip (DataGrip's own
+ * files by default); the tests pass their own.
  */
-export function App({ config: initialConfig, initialFile, initialConnection, checkLatest, askClaude = askClaudeCli }) {
+export function App({ config: initialConfig, initialFile, initialConnection, checkLatest, askClaude = askClaudeCli, findDataSources }) {
   const { exit } = useApp();
   const { columns, rows } = useTerminalSize();
   const [config, setConfigState] = useState(initialConfig);
@@ -498,7 +499,10 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     quit,
     checkUpdates,
     askClaude,
+    findDataSources,
     showText: (title, text) => setOverlay({ title, text }),
+    closeOverlay: () => setOverlay(null),
+    rememberOutput: (title, text) => (lastOutput.current = { title, text }),
     showHelp: () => setOverlay({ title: 'Keyboard shortcuts', text: HELP }),
     showLast: () => (lastOutput.current ? setOverlay({ ...lastOutput.current }) : note('Nothing has run yet.')),
   });
@@ -658,7 +662,7 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
 
   let main;
   if (overlay) {
-    main = <TextViewer {...overlay} width={W} height={mainH} active={focus === 'view' && !confirmReq} onClose={() => setOverlay(null)} />;
+    main = <TextViewer {...overlay} width={W} height={mainH} active={focus === 'view' && (!confirmReq || confirmReq.scrollsOverlay)} pageOnly={Boolean(confirmReq)} onClose={() => setOverlay(null)} />;
   } else if (view === 'connections') {
     main = <ConnectionsView connections={config.connections} current={session?.conn} ctx={ctx} width={W} height={mainH} active={viewActive} />;
   } else if (view === 'query' && queryMode === 'console') {

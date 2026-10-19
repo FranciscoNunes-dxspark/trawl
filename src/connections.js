@@ -40,6 +40,8 @@ export function parseAddArgs(rest) {
   }
   const [name, server, database] = positional;
   if (!name || !server) throw new Error(ADD_USAGE);
+  // `trawl --demo` would hide a saved connection with one of its names, and the next save drop it.
+  if (DEMO_CONNECTIONS.some((d) => d.name === name.toLowerCase())) throw new Error(`${name} is the demo's name; pick another.`);
   if (positional.length > 3) throw new Error(`Too many arguments. ${ADD_USAGE}`);
   if (conn.user && !conn.passwordEnv) throw new Error('A SQL login needs --password-env <VAR>: the environment variable holding its password. Trawl never stores passwords.');
   if (conn.passwordEnv && !conn.user) throw new Error('--password-env goes with --user.');

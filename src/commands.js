@@ -6,6 +6,7 @@ import { objectName } from './schema.js';
 export const COMMANDS = [
   { name: 'connect', args: '<name>', desc: 'Connect to a saved connection', complete: 'connections', run: (ctx, s) => a.connect(ctx, s) },
   { name: 'add', args: '<name> <server> [database] [--user u --password-env VAR] [--prod]', desc: 'Save a connection (az login unless --user)', run: (ctx, s) => a.addConnection(ctx, s) },
+  { name: 'import', args: 'datagrip [folder]', desc: 'Add your DataGrip data sources as connections (passwords stay in DataGrip)', run: (ctx, s) => a.importConnections(ctx, s) },
   { name: 'forget', args: '<name>', desc: 'Remove a saved connection', complete: 'connections', run: (ctx, s) => (s ? a.forgetConnection(ctx, s) : ctx.prefill('/forget ')) },
   { name: 'disconnect', desc: 'Close the connection', run: (ctx) => a.disconnect(ctx) },
   { name: 'use', args: '<database>', desc: 'Switch to another database on the same server', complete: 'databases', run: (ctx, s) => a.use(ctx, s) },

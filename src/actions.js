@@ -4,6 +4,7 @@ import { writeFile } from 'node:fs/promises';
 import { extname, resolve } from 'node:path';
 import { ADD_USAGE, isReadOnly, parseAddArgs } from './connections.js';
 import * as ed from './editor.js';
+import { findDataSources, importPlan, planText } from './datagrip.js';
 import { AI_LABELS, AI_LEVELS, aiLevel, askPrompt, canSeeSchema, consoleText, parseAnswer } from './ai.js';
 import { describeObject, findObject, objectName } from './schema.js';
 import { classifyScript, oneLine, selectTop, toCsv, toJson } from './sql.js';
@@ -196,6 +197,36 @@ export async function setAi(ctx, rest) {
   else ctx.setConfig((c) => ({ ...c, connections: c.connections.map((x) => (x.name === conn.name ? { ...x, ai: level } : x)) }));
   ctx.note(`Claude may now see ${AI_LABELS[level]} of ${conn.name}.`, 'ok');
 }
+
+/**
+ * /import datagrip [folder]: DataGrip's data sources as connections, after a preview. Without a
+ * folder it looks where DataGrip keeps them; with one, it reads that project's .idea.
+ */
+export async function importConnections(ctx, rest) {
+  const [source, ...folder] = splitArgsLoose(rest);
+  if (!source || source.toLowerCase() !== 'datagrip') return ctx.note('Import from DataGrip: /import datagrip [project folder]', source ? 'error' : 'info');
+  const dir = folder.length ? resolve(folder.join(' ')) : undefined;
+  const sources = (ctx.findDataSources ?? findDataSources)({ folder: dir });
+  if (!sources.length) return ctx.note(dir ? `No DataGrip data sources in ${dir} (looked for .idea/dataSources.xml).` : 'No DataGrip data sources found. Point at a project: /import datagrip <folder>', 'error');
+  const plan = importPlan(sources, ctx.config.connections);
+  ctx.showText(`Import from DataGrip${dir ? `: ${dir}` : ''}`, planText(plan));
+  if (!plan.add.length) return;
+  const ok = await ctx.confirm({
+    title: `Add ${plan.add.length} connection${plan.add.length === 1 ? '' : 's'} from DataGrip?`,
+    detail: 'The list is above (pgup/pgdn scroll it). Nothing is sent anywhere; passwords stay in DataGrip.',
+    scrollsOverlay: true,
+    options: YES_NO(`Yes, add ${plan.add.length}`),
+  });
+  ctx.closeOverlay();
+  if (!ok) return;
+  ctx.setConfig((c) => ({ ...c, connections: [...c.connections, ...plan.add] }));
+  ctx.setView('connections');
+  const envs = plan.add.filter((c) => c.passwordEnv).length;
+  ctx.note(`Added ${plan.add.length} connection${plan.add.length === 1 ? '' : 's'} from DataGrip${envs ? `. ${envs} sign in with a password: set each one's TRAWL_PW_… variable before connecting (the import list is in /last)` : ''}.`, 'ok');
+  ctx.rememberOutput(`Import from DataGrip`, planText(plan));
+}
+
+const splitArgsLoose = (s) => String(s ?? '').trim().split(/\s+/).filter(Boolean);
 
 /** Empties the console, asking first when there's something in it. */
 export async function newConsole(ctx) {

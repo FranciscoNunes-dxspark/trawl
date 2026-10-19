@@ -233,3 +233,22 @@ test('/ask is refused on a connection closed to Claude', async () => {
   await until(() => frame().includes('demo is closed to Claude'), 'the refusal');
   app.unmount();
 });
+
+test('/import datagrip previews, asks, then adds the connections', async () => {
+  const findDataSources = () => [
+    { uuid: '1', name: 'FUNDS', group: 'PROD', url: 'jdbc:sqlserver://funds.database.windows.net;database=fundsdb', user: 'fundsapp' },
+    { uuid: '2', name: 'pg', driver: 'postgresql', url: 'jdbc:postgresql://x/db' },
+  ];
+  const app = start('demo', { findDataSources });
+  await until(() => frame().includes('Clubs'), 'the explorer');
+  await type(app.stdin, '/import datagrip');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('Will add 1 connection') && frame().includes('Add 1 connection from DataGrip?'), 'the preview and question');
+  assert.match(frame(), /funds +funds\.database\.windows\.net\/fundsdb {2}PROD/);
+  assert.match(frame(), /postgresql isn't supported yet/);
+  app.stdin.write('1');
+  await until(() => frame().includes('Added 1 connection from DataGrip') && frame().includes('PROD'), 'the added connection');
+  const saved = JSON.parse(readFileSync(join(process.env.TRAWL_HOME, 'config.json'), 'utf8'));
+  assert.deepEqual(saved.connections.find((c) => c.name === 'funds').passwordEnv, 'TRAWL_PW_FUNDS');
+  app.unmount();
+});

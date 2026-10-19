@@ -69,6 +69,15 @@ Save connections with `/add`:
 
 Trawl never stores a password or token. Azure SQL gets a fresh token from the Azure CLI each time it connects. A SQL or Windows login reads its password from the environment variable you name. Connections live in `~/.trawl/config.json` (or `TRAWL_HOME`), along with the prompt history, the run history and the row limit.
 
+### From DataGrip
+
+`/import datagrip` brings in your DataGrip data sources as connections. It reads the places DataGrip keeps them (its projects in `DataGripProjects`, its global data sources, and the per-project history newer versions use) and shows what it would add before adding anything. `/import datagrip <folder>` reads one project's `.idea` instead.
+
+- SQL Server and Azure SQL data sources come across with their server, database, login name and options (trust certificate, encryption, Entra sign-in). Others (Postgres, CockroachDB, MySQL…) are listed as skipped.
+- **Passwords don't**: DataGrip keeps them encrypted in its own store, which Trawl never opens. Each SQL login gets a password variable named after it (`TRAWL_PW_FUNDS` for `funds`), to set once before connecting, for example in PowerShell: `[Environment]::SetEnvironmentVariable('TRAWL_PW_FUNDS', '<password>', 'User')`.
+- Data sources in a DataGrip folder called PROD (or with prod in the name) become production connections, read-only until `/writes`; DataGrip's own read-only flag carries over too.
+- Importing again only adds what's new: one Trawl already has (same server, database and login) is skipped.
+
 `/use <database>` switches database by reconnecting. That works on Azure SQL Database too, where `USE` doesn't.
 
 ## Use
@@ -117,7 +126,7 @@ Each result set stops at the row limit (500 to start with; `/limit <n>` changes 
 
 Type `/` and the menu narrows as you type. `tab` completes, `↑`/`↓` picks, `↵` runs. `/connect` completes connection names, `/use` database names and `/describe` tables and views.
 
-`/connect <name>` `/add …` `/forget <name>` `/disconnect` `/use <database>` `/open <file.sql>` `/console` `/new` `/save <file.sql>` `/describe <table>` `/find [text]` `/export <file>` `/limit [rows]` `/writes` `/commit` `/rollback` `/ask <question>` `/ai [connection] [level]` `/update` `/last` `/refresh` `/help` `/quit`
+`/import datagrip [folder]` `/connect <name>` `/add …` `/forget <name>` `/disconnect` `/use <database>` `/open <file.sql>` `/console` `/new` `/save <file.sql>` `/describe <table>` `/find [text]` `/export <file>` `/limit [rows]` `/writes` `/commit` `/rollback` `/ask <question>` `/ai [connection] [level]` `/update` `/last` `/refresh` `/help` `/quit`
 
 ## Claude
 

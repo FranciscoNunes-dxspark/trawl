@@ -37,6 +37,8 @@ The layering, bottom to top:
 
 Claude (`src/ai.js`, `src/mcp.js`): a connection's `ai` level (`off` / `schema` / `results`, default `schema`) decides what Claude may see, and both the MCP server and `/ask` check it. `trawl mcp` is a hand-rolled JSON-RPC server over stdio (no SDK): stdout carries only protocol messages, so log to stderr. It reads config fresh per call, queues requests per connection (Claude calls tools in parallel; a session runs one request at a time), refuses anything `classifyScript` flags as a write, and wraps reads in a transaction it rolls back. It logs to `claude-history.jsonl`, never config.json, because it runs beside the app as a separate process.
 
+DataGrip import (`src/datagrip.js`): reads `DataGripProjects/*/.idea/dataSources(.local).xml`, `JetBrains/DataGrip*/options`, and `JetBrains/DataGrip*/dataSourcesHistory/*/data_sources_history.xml` (where recent DataGrip versions keep most data sources), newest version first, one entry per uuid. It parses with regexes, not an XML library: the files are machine-written and flat. Never touch `c.kdbx` / `c.pwd` (DataGrip's encrypted passwords); SQL logins get a `TRAWL_PW_<NAME>` password variable instead. Imported names keep off the demo connections' names, which `--demo` would otherwise hide and then drop on save.
+
 Updates (`src/update.js`): the only network call besides the database. `App` receives `checkLatest` from `cli.jsx`; tests pass a fake (or nothing, which turns checks off), so the suite never reaches GitHub.
 
 Glim (`src/glim.js`, `src/ui/Glim.jsx`): the anglerfish mascot's pixel art and mood-from-session logic, as Tiller's Knot. `assets/` is generated from it by `scripts/logo.js`; don't hand-edit those files. The accent is blue (`theme.accent`, also Glim's outline).

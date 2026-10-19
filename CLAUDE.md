@@ -13,6 +13,7 @@ node --import ./src/register.js --test --test-name-pattern="WHERE" test/*.test.j
 npm run demo                                                   # run against the in-memory demo (needs a real TTY)
 node bin/trawl.js query.sql --connect club-a                  # open a script on a saved connection
 npm run build                                                  # Bun-compiled executable for this machine → dist/
+node scripts/logo.js                                           # regenerate assets/ from src/glim.js
 ```
 
 `--import ./src/register.js` is required whenever Node loads `.jsx`: it installs a module hook (`src/jsx-hooks.js`) that compiles `.jsx` with esbuild on import. There is no dev build step. CI runs `npm test` on Linux and Windows, so path handling and line endings must work on both (`.gitattributes` forces LF).
@@ -32,6 +33,8 @@ The layering, bottom to top:
 - **`src/commands.js`**: the slash-command table and completion, same shape as Tiller's.
 - **`src/ui/App.jsx`**: layout, focus, the prompt, overlays, the activity log, the open script's file watcher, and **`ctx`**. `ctx.query` runs SQL visibly (spinner, esc cancels, history, transaction count afterwards); read the `Object.assign(ctx, {...})` block before adding an action.
 - **`src/ui/*View.jsx`**: one component per tab. Views must check `ctx.viewHasKeys()` at the start of their `useInput` handlers so keys don't fire while the prompt, an overlay or a confirm has focus. `useListNav` in `src/ui/hooks.js` is the shared cursor/scroll logic.
+
+Glim (`src/glim.js`, `src/ui/Glim.jsx`): the anglerfish mascot's pixel art and mood-from-session logic, as Tiller's Knot. `assets/` is generated from it by `scripts/logo.js`; don't hand-edit those files. The accent is blue (`theme.accent`, also Glim's outline).
 
 Theme and text: use `BULLET` instead of `⏺` (Windows draws it wide), and `src/text.js` (`fit`, `fitSegments`, `stringWidth`) for width-aware truncation, never `.length`.
 

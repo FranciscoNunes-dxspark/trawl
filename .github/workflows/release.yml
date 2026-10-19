@@ -29,7 +29,15 @@ jobs:
 
   build:
     needs: test
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          # Bun only embeds the Windows icon when it builds on Windows.
+          - os: windows-latest
+            targets: bun-windows-x64
+          - os: ubuntu-latest
+            targets: bun-linux-x64 bun-linux-arm64 bun-darwin-x64 bun-darwin-arm64
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -40,10 +48,10 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.2
-      - run: bun scripts/build.js --all
+      - run: bun scripts/build.js ${{ matrix.targets }}
       - uses: actions/upload-artifact@v4
         with:
-          name: dist
+          name: dist-${{ matrix.os }}
           path: dist/
 
   release:

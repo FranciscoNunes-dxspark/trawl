@@ -1,9 +1,11 @@
+<p align="center"><img src="assets/glim.svg" width="128" alt="Glim, the Trawl anglerfish"></p>
+
 # Trawl
 
 A keyboard-driven SQL Server client for the terminal, built the same way as [Tiller](https://github.com/FranciscoNunes-dxspark/tiller): titled rounded panels, a prompt box with slash commands and completion, `!` to run any SQL, and a running log of what each statement did.
 
 ```
-≋ Trawl  │  club-a  myserver.database.windows.net/ClubA   PROD   read-only
+><((•> Trawl  │  club-a  myserver.database.windows.net/ClubA   PROD   read-only
  1 Explorer   2 Query   3 Results   4 History   5 Connections
 ╭─ SELECT TOP (500) * FROM [dbo].[Matches]; ─────────────────────────────── 8 rows · 6 ms ─╮
 │    Id │ HomeId │ AwayId │ PlayedOn   │ HomeGoals │ AwayGoals                             │
@@ -98,6 +100,20 @@ Each result set stops at the row limit (500 to start with; `/limit <n>` changes 
 Type `/` and the menu narrows as you type. `tab` completes, `↑`/`↓` picks, `↵` runs. `/connect` completes connection names, `/use` database names and `/describe` tables and views.
 
 `/connect <name>` `/add …` `/forget <name>` `/disconnect` `/use <database>` `/open <file.sql>` `/describe <table>` `/find [text]` `/export <file>` `/limit [rows]` `/writes` `/commit` `/rollback` `/last` `/refresh` `/help` `/quit`
+
+## Glim
+
+Glim is Trawl's anglerfish: it carries its own light into the deep, which is roughly what a query does. It says hello in the welcome box when Trawl starts (if the terminal is tall enough), and a small fish in the header shows how it feels:
+
+| | |
+| --- | --- |
+| `><((–>` | Not connected: asleep, lure dimmed |
+| `><((•>` | Connected, looking around (it glances side to side while a query runs) |
+| `><((^>` | A query just worked |
+| `><((◉>` | Something just went wrong |
+| `><((!>` | A transaction is open: the lure glows red until `/commit` or `/rollback` |
+
+The logo and the Windows icon in `assets/` are drawn from the same pixels (`src/glim.js`); `node scripts/logo.js` regenerates them.
 
 ## Not yet
 

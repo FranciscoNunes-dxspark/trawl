@@ -20,6 +20,8 @@ import { HistoryView } from './HistoryView.jsx';
 import { QueryView } from './QueryView.jsx';
 import { ResultsView } from './ResultsView.jsx';
 import { TextViewer } from './TextViewer.jsx';
+import { WELCOME_HEIGHT, Welcome } from './Glim.jsx';
+import { FACES, moodFor } from '../glim.js';
 
 const VIEWS = [
   { id: 'explorer', label: 'Explorer' },
@@ -51,9 +53,9 @@ function summarize(res, limit) {
   return [[...parts, ...res.messages.filter((m) => /rows? affected$/.test(m)), `${res.ms} ms`].join(' · '), ...res.messages.filter((m) => !/rows? affected$/.test(m))];
 }
 
-function Header({ session, tranCount, writesAllowed, file, width, connecting }) {
+function Header({ session, tranCount, writesAllowed, file, width, connecting, mood }) {
   const segs = [
-    { text: '≋ ', color: theme.accent, bold: true },
+    { text: `${FACES[mood]} `, color: mood === 'alert' ? theme.warn : theme.accent, bold: true },
     { text: 'Trawl', bold: true },
   ];
   if (session) {
@@ -120,6 +122,13 @@ export function App({ config: initialConfig, initialFile, initialConnection }) {
   const [busy, setBusy] = useState(null);
   const [connecting, setConnecting] = useState(false);
   const [filter, setFilter] = useState('');
+  const [welcome, setWelcome] = useState(true);
+  // Glim looks happy (or worried) for a few seconds after a result; re-render when that wears off.
+  const [, setMoodTick] = useState(0);
+  useEffect(() => {
+    const t = setTimeout(() => setMoodTick((n) => n + 1), 8100);
+    return () => clearTimeout(t);
+  }, [entries]);
 
   // Async actions read the latest state through refs, not through stale closures.
   const sessionRef = useRef(null);
@@ -202,6 +211,7 @@ export function App({ config: initialConfig, initialFile, initialConnection }) {
     busyRef.current = b;
     setBusy(b);
     const id = quiet ? null : addEntry({ title, status: 'running' });
+    if (!quiet && !title.startsWith('connect ')) setWelcome(false);
     try {
       const lines = await start(controller.signal);
       lastOutput.current = { title, text: lines.join('\n') || 'Done' };
@@ -495,7 +505,10 @@ export function App({ config: initialConfig, initialFile, initialConnection }) {
   const globalKeys = (input, key) => {
     if (key.escape) {
       if (busyRef.current) busyRef.current.abort();
-      else setEntries([]);
+      else {
+        setEntries([]);
+        setWelcome(false);
+      }
       return;
     }
     if (input === '/' || input === ':') return prefill('/');
@@ -525,7 +538,10 @@ export function App({ config: initialConfig, initialFile, initialConnection }) {
   const H = Math.max(12, rows - 1);
   const act = activityRows(entries);
   const bottom = confirmReq ? confirmHeight(confirmReq) : 3 + suggestions.length;
-  const mainH = Math.max(6, H - 2 - act.length - (busy ? 1 : 0) - bottom - 1);
+  const mood = moodFor({ session, busy, lastEntry: entries.at(-1), tranCount });
+  // The welcome box only appears when the terminal has room for it next to a useful view.
+  const showWelcome = welcome && H >= 28;
+  const mainH = Math.max(6, H - 2 - act.length - (busy ? 1 : 0) - bottom - 1 - (showWelcome ? WELCOME_HEIGHT : 0));
   const viewActive = focus === 'view' && !overlay && !confirmReq;
 
   let main;
@@ -554,11 +570,12 @@ export function App({ config: initialConfig, initialFile, initialConnection }) {
 
   return (
     <Box flexDirection="column" width={W} height={H}>
-      <Header session={session} tranCount={tranCount} writesAllowed={writesAllowed} file={file} width={W} connecting={connecting} />
+      <Header session={session} tranCount={tranCount} writesAllowed={writesAllowed} file={file} width={W} connecting={connecting} mood={mood} />
       <Tabs view={view} results={results} width={W} />
       <Box height={mainH} width={W}>
         {main}
       </Box>
+      {showWelcome ? <Welcome mood={mood} session={session} width={W} /> : null}
       {act.map((segs, i) => (
         <Row key={i} pointer={false} width={W} segments={segs} />
       ))}

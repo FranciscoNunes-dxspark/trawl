@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Bash(npm test)",
+      "Bash(node --import ./src/register.js --test *)",
+      "Bash(npm run build)",
+      "Bash(node scripts/logo.js)",
+      "Bash(node bin/trawl.js --version)",
+      "Bash(node bin/trawl.js --help)",
+      "Bash(git status *)",
+      "Bash(git diff *)",
+      "Bash(git log *)",
+      "Bash(git show *)",
+      "PowerShell(npm test)",
+      "PowerShell(node --import ./src/register.js --test *)",
+      "PowerShell(npm run build)",
+      "PowerShell(node scripts/logo.js)",
+      "PowerShell(node bin/trawl.js --version)",
+      "PowerShell(node bin/trawl.js --help)",
+      "PowerShell(git status *)",
+      "PowerShell(git diff *)",
+      "PowerShell(git log *)",
+      "PowerShell(git show *)"
+    ]
+  }
+}

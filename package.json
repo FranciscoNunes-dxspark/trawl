@@ -1,0 +1,31 @@
+{
+  "name": "fathom",
+  "version": "0.1.0",
+  "description": "A keyboard-driven SQL Server client for the terminal",
+  "type": "module",
+  "bin": {
+    "fathom": "bin/fathom.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node bin/fathom.js",
+    "demo": "node bin/fathom.js --demo",
+    "test": "node --import ./src/register.js --test test/*.test.js",
+    "build": "npx --yes bun@1.4.2 scripts/build.js",
+    "build:all": "npx --yes bun@1.4.2 scripts/build.js --all"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "cli-truncate": "^4.0.0",
+    "esbuild": "^0.25.10",
+    "ink": "^6.8.0",
+    "react": "^19.2.0",
+    "string-width": "^7.2.0",
+    "tedious": "^20.3.8"
+  },
+  "devDependencies": {
+    "ink-testing-library": "^4.0.0"
+  }
+}

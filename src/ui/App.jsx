@@ -25,6 +25,7 @@ import { TextViewer } from './TextViewer.jsx';
 import { WELCOME_HEIGHT, Welcome } from './Glim.jsx';
 import { FACES, moodFor } from '../glim.js';
 import { checksDisabled, isDue, isNewer, openUrl, updateAdvice } from '../update.js';
+import { askClaude as askClaudeCli } from '../ai.js';
 import { COMPILED, VERSION } from '../version.js';
 
 const VIEWS = [
@@ -108,9 +109,10 @@ function activityRows(entries) {
 
 /**
  * `checkLatest({ signal })` looks up the latest release (update.js fetchLatest); without it,
- * as in the tests, Trawl never checks for updates.
+ * as in the tests, Trawl never checks for updates. `askClaude({ prompt, signal })` answers /ask
+ * (the claude CLI by default; the tests pass their own).
  */
-export function App({ config: initialConfig, initialFile, initialConnection, checkLatest }) {
+export function App({ config: initialConfig, initialFile, initialConnection, checkLatest, askClaude = askClaudeCli }) {
   const { exit } = useApp();
   const { columns, rows } = useTerminalSize();
   const [config, setConfigState] = useState(initialConfig);
@@ -495,6 +497,7 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     startQuery: (obj) => ctx.editInConsole(`SELECT TOP (100) *\nFROM ${qualified(obj.schema, obj.name)}\nWHERE `, { atEnd: true }),
     quit,
     checkUpdates,
+    askClaude,
     showText: (title, text) => setOverlay({ title, text }),
     showHelp: () => setOverlay({ title: 'Keyboard shortcuts', text: HELP }),
     showLast: () => (lastOutput.current ? setOverlay({ ...lastOutput.current }) : note('Nothing has run yet.')),

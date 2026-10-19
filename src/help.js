@@ -49,6 +49,7 @@ Connections
   x                Forget
 
 Claude
+  /ask <question>  Claude writes a query from the schema; it lands in the console, and nothing runs until ctrl+r
   /ai [connection] [off|schema|results]   What Claude may see: nothing, names only (the default), or rows too
   trawl mcp        Run from Claude Code (claude mcp add --scope user trawl -- trawl mcp); it only reads
 
@@ -66,7 +67,7 @@ Slash commands
   /connect <name>   /add <name> <server> [database] [--user u --password-env VAR] [--domain d] [--prod] [--trust-cert]
   /forget <name>   /disconnect   /use <database>   /open <file.sql>   /console   /new   /save <file.sql>
   /describe <table>   /find [text]
-  /export <file>   /limit [rows]   /writes   /commit   /rollback   /ai   /update   /last   /refresh   /help   /quit
+  /export <file>   /limit [rows]   /writes   /commit   /rollback   /ask <question>   /ai   /update   /last   /refresh   /help   /quit
 
 Viewer (describe, records, output, this help)
   j k  space  g G  Scroll         esc / q     Close`;

@@ -117,7 +117,7 @@ Each result set stops at the row limit (500 to start with; `/limit <n>` changes 
 
 Type `/` and the menu narrows as you type. `tab` completes, `↑`/`↓` picks, `↵` runs. `/connect` completes connection names, `/use` database names and `/describe` tables and views.
 
-`/connect <name>` `/add …` `/forget <name>` `/disconnect` `/use <database>` `/open <file.sql>` `/console` `/new` `/save <file.sql>` `/describe <table>` `/find [text]` `/export <file>` `/limit [rows]` `/writes` `/commit` `/rollback` `/ai [connection] [level]` `/update` `/last` `/refresh` `/help` `/quit`
+`/connect <name>` `/add …` `/forget <name>` `/disconnect` `/use <database>` `/open <file.sql>` `/console` `/new` `/save <file.sql>` `/describe <table>` `/find [text]` `/export <file>` `/limit [rows]` `/writes` `/commit` `/rollback` `/ask <question>` `/ai [connection] [level]` `/update` `/last` `/refresh` `/help` `/quit`
 
 ## Claude
 
@@ -132,6 +132,12 @@ Each connection has a Claude access level, shown in Connections and changed with
 | `off` | Nothing. |
 
 `/ai` on its own says the current level; `/ai results` sets it for the connection you're on, and `/ai <connection> <level>` for another. `/add … --ai <level>` sets it when adding. The demo connections allow everything; their data is made up.
+
+### Ask for a query
+
+`/ask top scorers per club this season` sends Claude the question and the database's tables and columns (names only, never rows) and puts the query it writes into the console, under the question and Claude's note as comments. **Nothing runs by itself**: read it, change it if you like, then `ctrl+r`. The usual checks apply when you do, so a risky statement still asks first.
+
+It uses the Claude Code CLI you're already signed in to (`claude -p`), with no tools and none of your MCP servers, so Claude can only answer. Nothing to configure, and no API key. `esc` cancels while it thinks. A connection at the `off` level can't be asked about.
 
 ### Claude Code reads your databases (MCP)
 

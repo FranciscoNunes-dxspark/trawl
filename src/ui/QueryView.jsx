@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Box, useInput } from 'ink';
 import * as a from '../actions.js';
-import { oneLine } from '../sql.js';
+import { oneLine, withoutLeadingComments } from '../sql.js';
 import { theme } from '../theme.js';
 import { fit } from '../text.js';
 import { useListNav } from './hooks.js';
@@ -36,7 +36,7 @@ export function QueryView({ file, ctx, width, height, active }) {
       if (key.return) {
         const [from, to] = range;
         const sql = from === to ? list[from].text : scriptFor(file, list[from], list[to]);
-        const title = from === to ? oneLine(list[from].text) : `statements on lines ${list[from].line}–${list[to].endLine}`;
+        const title = from === to ? oneLine(withoutLeadingComments(list[from].text)) : `statements on lines ${list[from].line}–${list[to].endLine}`;
         setAnchor(null);
         a.runSql(ctx, sql, { title, lineBase: list[from].line });
       } else if (input === 'e') ctx.editInConsole(st.text);

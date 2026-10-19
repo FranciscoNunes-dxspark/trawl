@@ -4,7 +4,7 @@ import { writeFile } from 'node:fs/promises';
 import { extname, resolve } from 'node:path';
 import { ADD_USAGE, isReadOnly, parseAddArgs } from './connections.js';
 import * as ed from './editor.js';
-import { AI_LABELS, AI_LEVELS, aiLevel } from './ai.js';
+import { AI_LABELS, AI_LEVELS, aiLevel, askPrompt, canSeeSchema, consoleText, parseAnswer } from './ai.js';
 import { describeObject, findObject, objectName } from './schema.js';
 import { classifyScript, oneLine, selectTop, toCsv, toJson } from './sql.js';
 
@@ -146,6 +146,29 @@ export function setLimit(ctx, value) {
   if (!Number.isInteger(n) || n < 1 || n > 1_000_000) return ctx.note('The limit is a whole number from 1 to 1000000.', 'error');
   ctx.setConfig((c) => ({ ...c, limit: n }));
   ctx.note(`Result sets now stop at ${n} rows.`, 'ok');
+}
+
+/**
+ * /ask: Claude writes a query from the schema (names only, never rows) and it goes into the
+ * console under the question. Nothing runs until you press ctrl+r there.
+ */
+export async function ask(ctx, question) {
+  if (!needSession(ctx)) return;
+  if (!question) return ctx.prefill('/ask ');
+  const { conn } = ctx.session;
+  if (!canSeeSchema(conn)) return ctx.note(`${conn.name} is closed to Claude. /ai schema lets Claude see its table and column names.`, 'error');
+  if (!ctx.schema) return ctx.note('The schema is still loading; try again in a moment.', 'error');
+  const prompt = askPrompt({ question, schema: ctx.schema, database: ctx.session.database });
+  let answer = null;
+  const r = await ctx.task(
+    `ask Claude: ${question}`,
+    async (signal) => {
+      answer = parseAnswer(await ctx.askClaude({ prompt, signal }));
+      return answer.sql ? ['The query is in the console: read it, then ctrl+r runs it.', ...(answer.note ? [answer.note] : [])] : [answer.note || 'Claude gave no query.'];
+    },
+    { label: 'Asking Claude' },
+  );
+  if (r.ok && answer?.sql) ctx.editInConsole(consoleText({ question, ...answer }));
 }
 
 /**

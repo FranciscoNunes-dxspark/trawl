@@ -395,3 +395,10 @@ export function highlight(text) {
   }
   return out;
 }
+
+/** The statement from its first line of code, with leading line and block comments dropped. */
+export function withoutLeadingComments(text) {
+  const src = normalise(text);
+  const at = mask(src).search(/[^\s\u0001]/);
+  return at < 0 ? '' : src.slice(at);
+}

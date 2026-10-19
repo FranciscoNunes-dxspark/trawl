@@ -201,3 +201,35 @@ test('e in History puts the statement in the console to edit', async () => {
   await until(() => frame().includes('typing SQL') && /│\s*▌?\s*\d+ SELECT 7 AS seven/.test(frame()), 'the statement in the console');
   app.unmount();
 });
+
+test('/ask puts Claude’s query in the console and runs nothing', async () => {
+  const prompts = [];
+  const askClaude = async ({ prompt }) => {
+    prompts.push(prompt);
+    return 'Top three by goals:\n```sql\nSELECT TOP (3) Name, Goals\nFROM dbo.Players\nORDER BY Goals DESC;\n```';
+  };
+  const app = start('demo', { askClaude });
+  await until(() => frame().includes('Clubs'), 'the explorer');
+  await type(app.stdin, '/ask who scores the most');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('-- Asked Claude: who scores the most') && frame().includes('ORDER BY Goals DESC;'), 'the query in the console');
+  assert.match(frame(), /The query is in the console/);
+  assert.match(prompts[0], /dbo\.Players\(Id int PK/);
+  assert.match(prompts[0], /Question: who scores the most/);
+  assert.doesNotMatch(frame(), /● SELECT TOP \(3\) Name/, 'nothing ran');
+  app.stdin.write('\x12');
+  await until(() => frame().includes('● SELECT TOP (3) Name, Goals FROM dbo.Players ORDER BY Goals DESC;') && frame().includes('3 rows'), 'the run after ctrl+r');
+  app.unmount();
+});
+
+test('/ask is refused on a connection closed to Claude', async () => {
+  const app = start('demo');
+  await until(() => frame().includes('Clubs'), 'the explorer');
+  await type(app.stdin, '/ai off');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('Claude may now see nothing of demo'), 'the level change');
+  await type(app.stdin, '/ask anything');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('demo is closed to Claude'), 'the refusal');
+  app.unmount();
+});

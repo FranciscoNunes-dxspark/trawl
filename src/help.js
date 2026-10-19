@@ -52,7 +52,7 @@ Prompt
 Slash commands
   /connect <name>   /add <name> <server> [database] [--user u --password-env VAR] [--domain d] [--prod] [--trust-cert]
   /forget <name>   /disconnect   /use <database>   /open <file.sql>   /describe <table>   /find [text]
-  /export <file>   /limit [rows]   /writes   /commit   /rollback   /last   /refresh   /help   /quit
+  /export <file>   /limit [rows]   /writes   /commit   /rollback   /update   /last   /refresh   /help   /quit
 
 Viewer (describe, records, output, this help)
   j k  space  g G  Scroll         esc / q     Close`;

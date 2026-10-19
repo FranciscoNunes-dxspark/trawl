@@ -1,6 +1,7 @@
 import React from 'react';
 import { render } from 'ink';
 import { VERSION } from './version.js';
+import { fetchLatest } from './update.js';
 import { loadConfig } from './config.js';
 import { DEMO_CONNECTIONS } from './connections.js';
 import { setAccent } from './theme.js';
@@ -43,6 +44,6 @@ setAccent(config.accent);
 process.stdout.write('\x1b[?1049h\x1b[H');
 process.on('exit', () => process.stdout.write('\x1b[?1049l'));
 
-const app = render(<App config={config} initialFile={file} initialConnection={connectTo} />, { exitOnCtrlC: false });
+const app = render(<App config={config} initialFile={file} initialConnection={connectTo} checkLatest={(opts) => fetchLatest({ current: VERSION, ...opts })} />, { exitOnCtrlC: false });
 await app.waitUntilExit();
 process.exit(0);

@@ -6,7 +6,8 @@ import { join } from 'node:path';
 const configDir = () => process.env.TRAWL_HOME || join(homedir(), '.trawl');
 
 // `history` is what was typed at the prompt; `ran` is every statement that reached a database.
-const DEFAULTS = { connections: [], history: [], ran: [], limit: 500, last: null };
+// `updateCheck` remembers the last look at GitHub Releases, so it happens at most once a day.
+const DEFAULTS = { connections: [], history: [], ran: [], limit: 500, last: null, checkUpdates: true, updateCheck: null };
 
 export function loadConfig() {
   try {

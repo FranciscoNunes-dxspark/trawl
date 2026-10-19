@@ -141,3 +141,18 @@ test('/export writes the result set as CSV', async () => {
   assert.match(readFileSync(out, 'utf8'), /^Id,Name,Country,Founded,Active\r\n1,Club A FC,PT,1904-03-14,1\r\n/);
   app.unmount();
 });
+
+test('a newer release shows in the header and the activity log, once a day', async () => {
+  let calls = 0;
+  const checkLatest = async () => (calls++, { version: '9.0.0', url: 'https://example.test/r', download: null });
+  const app = start('demo', { checkLatest });
+  await until(() => frame().includes('Trawl 9.0.0 is out') && frame().includes('↑ 9.0.0'), 'the update notice');
+  app.unmount();
+  // The answer was remembered: the next start shows it again without asking GitHub.
+  const config = JSON.parse(readFileSync(join(process.env.TRAWL_HOME, 'config.json'), 'utf8'));
+  assert.equal(config.updateCheck.latest.version, '9.0.0');
+  lastApp = render(React.createElement(App, { config: { ...config, connections: [...DEMO_CONNECTIONS] }, initialConnection: 'demo', checkLatest }));
+  await until(() => frame().includes('↑ 9.0.0'), 'the remembered notice');
+  assert.equal(calls, 1);
+  lastApp.unmount();
+});

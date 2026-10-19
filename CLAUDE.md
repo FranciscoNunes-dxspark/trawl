@@ -34,6 +34,8 @@ The layering, bottom to top:
 - **`src/ui/App.jsx`**: layout, focus, the prompt, overlays, the activity log, the open script's file watcher, and **`ctx`**. `ctx.query` runs SQL visibly (spinner, esc cancels, history, transaction count afterwards); read the `Object.assign(ctx, {...})` block before adding an action.
 - **`src/ui/*View.jsx`**: one component per tab. Views must check `ctx.viewHasKeys()` at the start of their `useInput` handlers so keys don't fire while the prompt, an overlay or a confirm has focus. `useListNav` in `src/ui/hooks.js` is the shared cursor/scroll logic.
 
+Updates (`src/update.js`): the only network call besides the database. `App` receives `checkLatest` from `cli.jsx`; tests pass a fake (or nothing, which turns checks off), so the suite never reaches GitHub.
+
 Glim (`src/glim.js`, `src/ui/Glim.jsx`): the anglerfish mascot's pixel art and mood-from-session logic, as Tiller's Knot. `assets/` is generated from it by `scripts/logo.js`; don't hand-edit those files. The accent is blue (`theme.accent`, also Glim's outline).
 
 Theme and text: use `BULLET` instead of `⏺` (Windows draws it wide), and `src/text.js` (`fit`, `fitSegments`, `stringWidth`) for width-aware truncation, never `.length`.

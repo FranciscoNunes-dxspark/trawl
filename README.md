@@ -99,7 +99,13 @@ Each result set stops at the row limit (500 to start with; `/limit <n>` changes 
 
 Type `/` and the menu narrows as you type. `tab` completes, `↑`/`↓` picks, `↵` runs. `/connect` completes connection names, `/use` database names and `/describe` tables and views.
 
-`/connect <name>` `/add …` `/forget <name>` `/disconnect` `/use <database>` `/open <file.sql>` `/describe <table>` `/find [text]` `/export <file>` `/limit [rows]` `/writes` `/commit` `/rollback` `/last` `/refresh` `/help` `/quit`
+`/connect <name>` `/add …` `/forget <name>` `/disconnect` `/use <database>` `/open <file.sql>` `/describe <table>` `/find [text]` `/export <file>` `/limit [rows]` `/writes` `/commit` `/rollback` `/update` `/last` `/refresh` `/help` `/quit`
+
+## Updates
+
+Once a day, in the background, Trawl asks GitHub for the latest release of [FranciscoNunes-dxspark/trawl](https://github.com/FranciscoNunes-dxspark/trawl/releases). If there's a newer one, the header shows `↑ 0.2.0` and the activity log says so once per start. `/update` checks right away and says how to update: for the executable, the file to download (replace the old one after quitting); for a checkout, `git pull && npm install`. Trawl never downloads or replaces anything itself.
+
+The check is one GET request with `trawl/<version>` as the user agent. Nothing about your connections or queries is sent. When it fails (offline, say), it stays silent and tries again the next day. To turn it off, set `"checkUpdates": false` in `~/.trawl/config.json`, or the environment variable `TRAWL_NO_UPDATE_CHECK=1`.
 
 ## Glim
 

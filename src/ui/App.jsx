@@ -22,6 +22,8 @@ import { ResultsView } from './ResultsView.jsx';
 import { TextViewer } from './TextViewer.jsx';
 import { WELCOME_HEIGHT, Welcome } from './Glim.jsx';
 import { FACES, moodFor } from '../glim.js';
+import { checksDisabled, isDue, isNewer, openUrl, updateAdvice } from '../update.js';
+import { COMPILED, VERSION } from '../version.js';
 
 const VIEWS = [
   { id: 'explorer', label: 'Explorer' },
@@ -53,11 +55,12 @@ function summarize(res, limit) {
   return [[...parts, ...res.messages.filter((m) => /rows? affected$/.test(m)), `${res.ms} ms`].join(' · '), ...res.messages.filter((m) => !/rows? affected$/.test(m))];
 }
 
-function Header({ session, tranCount, writesAllowed, file, width, connecting, mood }) {
+function Header({ session, tranCount, writesAllowed, file, width, connecting, mood, update }) {
   const segs = [
     { text: `${FACES[mood]} `, color: mood === 'alert' ? theme.warn : theme.accent, bold: true },
     { text: 'Trawl', bold: true },
   ];
+  if (update) segs.push({ text: ` ↑ ${update.version}`, color: theme.warn, bold: true });
   if (session) {
     const { conn } = session;
     segs.push({ text: '  │  ', color: theme.border }, { text: conn.name, bold: true });
@@ -101,7 +104,11 @@ function activityRows(entries) {
   return out.slice(-6);
 }
 
-export function App({ config: initialConfig, initialFile, initialConnection }) {
+/**
+ * `checkLatest({ signal })` looks up the latest release (update.js fetchLatest); without it,
+ * as in the tests, Trawl never checks for updates.
+ */
+export function App({ config: initialConfig, initialFile, initialConnection, checkLatest }) {
   const { exit } = useApp();
   const { columns, rows } = useTerminalSize();
   const [config, setConfigState] = useState(initialConfig);
@@ -123,6 +130,7 @@ export function App({ config: initialConfig, initialFile, initialConnection }) {
   const [connecting, setConnecting] = useState(false);
   const [filter, setFilter] = useState('');
   const [welcome, setWelcome] = useState(true);
+  const [update, setUpdate] = useState(null);
   // Glim looks happy (or worried) for a few seconds after a result; re-render when that wears off.
   const [, setMoodTick] = useState(0);
   useEffect(() => {
@@ -361,6 +369,32 @@ export function App({ config: initialConfig, initialFile, initialConnection }) {
     return () => unwatchFile(path, onChange);
   }, [file?.path]);
 
+  // Remembers what GitHub said, and returns the release when it's newer than this copy.
+  const recordCheck = (latest) => {
+    setConfig((c) => ({ ...c, updateCheck: { at: Date.now(), latest } }));
+    const newer = latest && isNewer(latest.version, VERSION) ? latest : null;
+    setUpdate(newer);
+    return newer;
+  };
+
+  const checkUpdates = async () => {
+    if (!checkLatest) return note('Update checks are off in this copy.');
+    let latest = null;
+    const r = await task(
+      'Check for updates',
+      async (signal) => {
+        latest = await checkLatest({ signal });
+        recordCheck(latest);
+        return updateAdvice({ latest, current: VERSION, compiled: COMPILED });
+      },
+      { label: 'Checking for updates' },
+    );
+    if (r.ok && latest && isNewer(latest.version, VERSION)) {
+      const ok = await confirm({ title: `Open the Trawl ${latest.version} release page in your browser?`, options: [{ label: 'Yes, open it', value: true }, { label: 'No', value: false }] });
+      if (ok) openUrl(latest.url);
+    }
+  };
+
   const quit = async () => {
     if (!(await a.leaveSession(ctx))) return;
     dropSession();
@@ -421,6 +455,7 @@ export function App({ config: initialConfig, initialFile, initialConnection }) {
     },
     viewHasKeys: () => focusRef.current === 'view' && !overlayRef.current && !confirmRef.current,
     quit,
+    checkUpdates,
     showText: (title, text) => setOverlay({ title, text }),
     showHelp: () => setOverlay({ title: 'Keyboard shortcuts', text: HELP }),
     showLast: () => (lastOutput.current ? setOverlay({ ...lastOutput.current }) : note('Nothing has run yet.')),
@@ -452,6 +487,32 @@ export function App({ config: initialConfig, initialFile, initialConnection }) {
     const conn = name && initialConfig.connections.find((c) => c.name === name);
     if (conn) connect(conn);
     else if (!initialFile) setView('connections');
+  }, []);
+
+  // At most once a day, in the background: a newer release gets one line in the activity log and
+  // a ↑ in the header. A failed check (offline, rate-limited) says nothing and waits a day.
+  useEffect(() => {
+    if (!checkLatest || checksDisabled(configRef.current)) return;
+    const cached = configRef.current.updateCheck;
+    const announce = (latest) => note(`Trawl ${latest.version} is out (you have ${VERSION}). /update says how to get it.`);
+    const known = cached?.latest && isNewer(cached.latest.version, VERSION) ? cached.latest : null;
+    if (known) {
+      setUpdate(known);
+      announce(known);
+    }
+    if (!isDue(cached)) return;
+    let live = true;
+    checkLatest({ signal: AbortSignal.timeout(5000) }).then(
+      (latest) => {
+        if (!live) return;
+        const newer = recordCheck(latest);
+        if (newer && newer.version !== known?.version) announce(newer);
+      },
+      () => live && setConfig((c) => ({ ...c, updateCheck: { at: Date.now(), latest: cached?.latest ?? null } })),
+    );
+    return () => {
+      live = false;
+    };
   }, []);
 
   const lists = { config, schema };
@@ -570,7 +631,7 @@ export function App({ config: initialConfig, initialFile, initialConnection }) {
 
   return (
     <Box flexDirection="column" width={W} height={H}>
-      <Header session={session} tranCount={tranCount} writesAllowed={writesAllowed} file={file} width={W} connecting={connecting} mood={mood} />
+      <Header session={session} tranCount={tranCount} writesAllowed={writesAllowed} file={file} width={W} connecting={connecting} mood={mood} update={update} />
       <Tabs view={view} results={results} width={W} />
       <Box height={mainH} width={W}>
         {main}

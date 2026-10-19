@@ -6,6 +6,7 @@ import { objectName } from './schema.js';
 export const COMMANDS = [
   { name: 'connect', args: '<name>', desc: 'Connect to a saved connection', complete: 'connections', run: (ctx, s) => a.connect(ctx, s) },
   { name: 'add', args: '<name> <server> [database] [--user u --password-env VAR] [--prod]', desc: 'Save a connection (az login unless --user)', run: (ctx, s) => a.addConnection(ctx, s) },
+  { name: 'import', args: 'datagrip [folder]', desc: 'Add your DataGrip data sources as connections (passwords stay in DataGrip)', run: (ctx, s) => a.importConnections(ctx, s) },
   { name: 'forget', args: '<name>', desc: 'Remove a saved connection', complete: 'connections', run: (ctx, s) => (s ? a.forgetConnection(ctx, s) : ctx.prefill('/forget ')) },
   { name: 'disconnect', desc: 'Close the connection', run: (ctx) => a.disconnect(ctx) },
   { name: 'use', args: '<database>', desc: 'Switch to another database on the same server', complete: 'databases', run: (ctx, s) => a.use(ctx, s) },
@@ -21,6 +22,8 @@ export const COMMANDS = [
   { name: 'commit', desc: 'Commit the open transaction', run: (ctx) => a.commit(ctx) },
   { name: 'rollback', desc: 'Roll back the open transaction', run: (ctx) => a.rollback(ctx) },
   { name: 'update', desc: 'Check for a newer Trawl and say how to get it', run: (ctx) => ctx.checkUpdates() },
+  { name: 'ask', args: '<question>', desc: 'Claude writes a query for it, into the console (nothing runs)', run: (ctx, s) => a.ask(ctx, s) },
+  { name: 'ai', args: '[connection] [off|schema|results]', desc: 'What Claude may see of a connection (schema only by default)', complete: 'connections', run: (ctx, s) => a.setAi(ctx, s) },
   { name: 'last', desc: 'Show the full output of the last run', run: (ctx) => ctx.showLast() },
   { name: 'refresh', desc: 'Reload the schema', run: (ctx) => ctx.refresh() },
   { name: 'help', desc: 'Keyboard shortcuts', run: (ctx) => ctx.showHelp() },

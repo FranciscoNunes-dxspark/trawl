@@ -2,7 +2,7 @@ import React, { useMemo, useRef } from 'react';
 import { Box, Text, useInput } from 'ink';
 import * as a from '../actions.js';
 import * as ed from '../editor.js';
-import { highlight, oneLine, splitStatements, statementAt } from '../sql.js';
+import { highlight, oneLine, splitStatements, statementAt, withoutLeadingComments } from '../sql.js';
 import { theme } from '../theme.js';
 import { Panel, Row } from './parts.jsx';
 
@@ -19,7 +19,7 @@ export function runConsole(ctx, editor, { all = false } = {}) {
   if (all) return text.trim() ? a.runSql(ctx, text, { title: 'console (everything)', stay: true }) : ctx.note('The console is empty.', 'error');
   const st = currentStatement(editor);
   if (!st) return ctx.note('The console is empty: press i (or ↵) and type some SQL.', 'error');
-  return a.runSql(ctx, st.text, { title: oneLine(st.text), lineBase: st.line, stay: true });
+  return a.runSql(ctx, st.text, { title: oneLine(withoutLeadingComments(st.text)), lineBase: st.line, stay: true });
 }
 
 /**

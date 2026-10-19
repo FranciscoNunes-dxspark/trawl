@@ -4,6 +4,8 @@ import { writeFile } from 'node:fs/promises';
 import { extname, resolve } from 'node:path';
 import { ADD_USAGE, isReadOnly, parseAddArgs } from './connections.js';
 import * as ed from './editor.js';
+import { findDataSources, importPlan, planText } from './datagrip.js';
+import { AI_LABELS, AI_LEVELS, aiLevel, askPrompt, canSeeSchema, consoleText, parseAnswer } from './ai.js';
 import { describeObject, findObject, objectName } from './schema.js';
 import { classifyScript, oneLine, selectTop, toCsv, toJson } from './sql.js';
 
@@ -146,6 +148,85 @@ export function setLimit(ctx, value) {
   ctx.setConfig((c) => ({ ...c, limit: n }));
   ctx.note(`Result sets now stop at ${n} rows.`, 'ok');
 }
+
+/**
+ * /ask: Claude writes a query from the schema (names only, never rows) and it goes into the
+ * console under the question. Nothing runs until you press ctrl+r there.
+ */
+export async function ask(ctx, question) {
+  if (!needSession(ctx)) return;
+  if (!question) return ctx.prefill('/ask ');
+  const { conn } = ctx.session;
+  if (!canSeeSchema(conn)) return ctx.note(`${conn.name} is closed to Claude. /ai schema lets Claude see its table and column names.`, 'error');
+  if (!ctx.schema) return ctx.note('The schema is still loading; try again in a moment.', 'error');
+  const prompt = askPrompt({ question, schema: ctx.schema, database: ctx.session.database });
+  let answer = null;
+  const r = await ctx.task(
+    `ask Claude: ${question}`,
+    async (signal) => {
+      answer = parseAnswer(await ctx.askClaude({ prompt, signal }));
+      return answer.sql ? ['The query is in the console: read it, then ctrl+r runs it.', ...(answer.note ? [answer.note] : [])] : [answer.note || 'Claude gave no query.'];
+    },
+    { label: 'Asking Claude' },
+  );
+  if (r.ok && answer?.sql) ctx.editInConsole(consoleText({ question, ...answer }));
+}
+
+/**
+ * Sets what Claude may see of a connection: /ai <level> for the one you're on, or
+ * /ai <connection> <level>. With no level, says what it is now.
+ */
+export async function setAi(ctx, rest) {
+  const parts = rest.split(/\s+/).filter(Boolean);
+  const level = AI_LEVELS.includes(parts.at(-1)) ? parts.pop() : null;
+  const name = parts[0] ?? ctx.session?.conn.name;
+  if (!name) return ctx.note('Connect first, or name the connection: /ai <connection> off|schema|results', 'error');
+  const conn = ctx.config.connections.find((c) => c.name.toLowerCase() === name.toLowerCase());
+  if (!conn) return ctx.note(`No connection called ${name}.`, 'error');
+  if (!level) return ctx.note(`Claude may see ${AI_LABELS[aiLevel(conn)]} of ${conn.name}. /ai ${conn.name} off|schema|results changes it.`);
+  if (level === 'results' && !conn.demo) {
+    const ok = await ctx.confirm({
+      title: `Let Claude see rows from ${conn.name}${conn.prod ? ' (production)' : ''}?`,
+      detail: 'Query results then go to Claude when it asks (through trawl mcp) or when you ask it about them. They leave this machine.',
+      options: YES_NO('Yes, rows too'),
+      danger: Boolean(conn.prod),
+    });
+    if (!ok) return;
+  }
+  if (conn.demo) conn.ai = level;
+  else ctx.setConfig((c) => ({ ...c, connections: c.connections.map((x) => (x.name === conn.name ? { ...x, ai: level } : x)) }));
+  ctx.note(`Claude may now see ${AI_LABELS[level]} of ${conn.name}.`, 'ok');
+}
+
+/**
+ * /import datagrip [folder]: DataGrip's data sources as connections, after a preview. Without a
+ * folder it looks where DataGrip keeps them; with one, it reads that project's .idea.
+ */
+export async function importConnections(ctx, rest) {
+  const [source, ...folder] = splitArgsLoose(rest);
+  if (!source || source.toLowerCase() !== 'datagrip') return ctx.note('Import from DataGrip: /import datagrip [project folder]', source ? 'error' : 'info');
+  const dir = folder.length ? resolve(folder.join(' ')) : undefined;
+  const sources = (ctx.findDataSources ?? findDataSources)({ folder: dir });
+  if (!sources.length) return ctx.note(dir ? `No DataGrip data sources in ${dir} (looked for .idea/dataSources.xml).` : 'No DataGrip data sources found. Point at a project: /import datagrip <folder>', 'error');
+  const plan = importPlan(sources, ctx.config.connections);
+  ctx.showText(`Import from DataGrip${dir ? `: ${dir}` : ''}`, planText(plan));
+  if (!plan.add.length) return;
+  const ok = await ctx.confirm({
+    title: `Add ${plan.add.length} connection${plan.add.length === 1 ? '' : 's'} from DataGrip?`,
+    detail: 'The list is above (pgup/pgdn scroll it). Nothing is sent anywhere; passwords stay in DataGrip.',
+    scrollsOverlay: true,
+    options: YES_NO(`Yes, add ${plan.add.length}`),
+  });
+  ctx.closeOverlay();
+  if (!ok) return;
+  ctx.setConfig((c) => ({ ...c, connections: [...c.connections, ...plan.add] }));
+  ctx.setView('connections');
+  const envs = plan.add.filter((c) => c.passwordEnv).length;
+  ctx.note(`Added ${plan.add.length} connection${plan.add.length === 1 ? '' : 's'} from DataGrip${envs ? `. ${envs} sign in with a password: set each one's TRAWL_PW_… variable before connecting (the import list is in /last)` : ''}.`, 'ok');
+  ctx.rememberOutput(`Import from DataGrip`, planText(plan));
+}
+
+const splitArgsLoose = (s) => String(s ?? '').trim().split(/\s+/).filter(Boolean);
 
 /** Empties the console, asking first when there's something in it. */
 export async function newConsole(ctx) {

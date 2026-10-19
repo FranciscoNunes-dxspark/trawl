@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { classify, classifyScript, formatValue, mask, oneLine, quoteIdent, splitBatches, splitStatements, statementAt, toCsv, toJson } from '../src/sql.js';
+import { classify, classifyScript, formatValue, mask, oneLine, quoteIdent, splitBatches, splitStatements, statementAt, toCsv, toJson, withoutLeadingComments } from '../src/sql.js';
 
 const texts = (list) => list.map((s) => s.text);
 
@@ -118,4 +118,9 @@ test('IF … ELSE and TRY … CATCH stay one statement', () => {
     'BEGIN TRY\n  SELECT 3;\nEND TRY\nBEGIN CATCH\n  SELECT 4;\nEND CATCH',
     'SELECT 5',
   ]);
+});
+
+test('withoutLeadingComments starts at the first line of code', () => {
+  assert.equal(withoutLeadingComments('-- one\n/* two\n */  SELECT 1 -- three'), 'SELECT 1 -- three');
+  assert.equal(withoutLeadingComments('-- only a comment'), '');
 });

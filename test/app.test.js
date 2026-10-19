@@ -201,3 +201,55 @@ test('e in History puts the statement in the console to edit', async () => {
   await until(() => frame().includes('typing SQL') && /│\s*▌?\s*\d+ SELECT 7 AS seven/.test(frame()), 'the statement in the console');
   app.unmount();
 });
+
+test('/ask puts Claude’s query in the console and runs nothing', async () => {
+  const prompts = [];
+  const askClaude = async ({ prompt }) => {
+    prompts.push(prompt);
+    return 'Top three by goals:\n```sql\nSELECT TOP (3) Name, Goals\nFROM dbo.Players\nORDER BY Goals DESC;\n```';
+  };
+  const app = start('demo', { askClaude });
+  await until(() => frame().includes('Clubs'), 'the explorer');
+  await type(app.stdin, '/ask who scores the most');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('-- Asked Claude: who scores the most') && frame().includes('ORDER BY Goals DESC;'), 'the query in the console');
+  assert.match(frame(), /The query is in the console/);
+  assert.match(prompts[0], /dbo\.Players\(Id int PK/);
+  assert.match(prompts[0], /Question: who scores the most/);
+  // The activity bullet is ● on Windows and ⏺ elsewhere (theme.js BULLET).
+  assert.doesNotMatch(frame(), /[●⏺] SELECT TOP \(3\) Name/, 'nothing ran');
+  app.stdin.write('\x12');
+  await until(() => /[●⏺] SELECT TOP \(3\) Name, Goals FROM dbo\.Players ORDER BY Goals DESC;/.test(frame()) && frame().includes('3 rows'), 'the run after ctrl+r');
+  app.unmount();
+});
+
+test('/ask is refused on a connection closed to Claude', async () => {
+  const app = start('demo');
+  await until(() => frame().includes('Clubs'), 'the explorer');
+  await type(app.stdin, '/ai off');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('Claude may now see nothing of demo'), 'the level change');
+  await type(app.stdin, '/ask anything');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('demo is closed to Claude'), 'the refusal');
+  app.unmount();
+});
+
+test('/import datagrip previews, asks, then adds the connections', async () => {
+  const findDataSources = () => [
+    { uuid: '1', name: 'FUNDS', group: 'PROD', url: 'jdbc:sqlserver://funds.database.windows.net;database=fundsdb', user: 'fundsapp' },
+    { uuid: '2', name: 'pg', driver: 'postgresql', url: 'jdbc:postgresql://x/db' },
+  ];
+  const app = start('demo', { findDataSources });
+  await until(() => frame().includes('Clubs'), 'the explorer');
+  await type(app.stdin, '/import datagrip');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('Will add 1 connection') && frame().includes('Add 1 connection from DataGrip?'), 'the preview and question');
+  assert.match(frame(), /funds +funds\.database\.windows\.net\/fundsdb {2}PROD/);
+  assert.match(frame(), /postgresql isn't supported yet/);
+  app.stdin.write('1');
+  await until(() => frame().includes('Added 1 connection from DataGrip') && frame().includes('PROD'), 'the added connection');
+  const saved = JSON.parse(readFileSync(join(process.env.TRAWL_HOME, 'config.json'), 'utf8'));
+  assert.deepEqual(saved.connections.find((c) => c.name === 'funds').passwordEnv, 'TRAWL_PW_FUNDS');
+  app.unmount();
+});

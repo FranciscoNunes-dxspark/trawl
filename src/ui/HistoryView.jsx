@@ -39,6 +39,7 @@ export function HistoryView({ ran, ctx, width, height, active }) {
             focused={active}
             segments={[
               { text: e.ok ? '✓ ' : '✗ ', color: e.ok ? theme.ok : theme.del },
+              { text: e.via === 'claude' ? '◆ ' : '  ', color: theme.accent },
               { text: fit(relTime(e.at), 4, 'right'), color: theme.dim },
               { text: ` ${fit(`${e.conn}/${e.database}`, whereW)} `, color: theme.info },
               { text: oneLine(e.sql), strong: true },
@@ -47,7 +48,7 @@ export function HistoryView({ ran, ctx, width, height, active }) {
         ))}
       </Panel>
       {split ? (
-        <Panel title={h ? new Date(h.at).toLocaleString() : 'Statement'} hint={h ? '↵ run again · e edit in the console' : ''} width={sideW} height={height}>
+        <Panel title={h ? new Date(h.at).toLocaleString() : 'Statement'} hint={h ? `${h.via === 'claude' ? 'Claude ran this · ' : ''}↵ run again · e edit in the console` : ''} width={sideW} height={height}>
           <Lines
             width={sideW - 2}
             height={innerH}

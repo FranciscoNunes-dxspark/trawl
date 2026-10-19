@@ -4,7 +4,7 @@
 // touch without changing anything.
 import { DbError, runScript } from './db.js';
 import { findObject } from './schema.js';
-import { splitStatements } from './sql.js';
+import { splitStatements, withoutLeadingComments } from './sql.js';
 
 const col = (name, type, extra = {}) => ({ name, type, nullable: false, identity: false, pk: false, ...extra });
 const d = (s) => new Date(`${s}T00:00:00Z`);
@@ -111,7 +111,7 @@ async function runStatement(session, text, line, state, { signal, limit = 500 })
     if (!t) fail(`Invalid object name '${m[1].replace(/[[\]]/g, '')}'.`, 208);
     return t;
   };
-  const s = text.replace(/;\s*$/, '').trim();
+  const s = withoutLeadingComments(text).replace(/;\s*$/, '').trim();
   let m;
   if (/^SELECT\s+@@TRANCOUNT\b/i.test(s)) state.sets.push(set(['(No column name)'], [[session.tran]], ['IntN']));
   else if (/^BEGIN\s+TRAN(SACTION)?\b/i.test(s)) session.tran++;

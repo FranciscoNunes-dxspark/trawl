@@ -9,7 +9,7 @@ export function splitArgs(s) {
   return out;
 }
 
-export const ADD_USAGE = '/add <name> <server> [database] [--user <login> --password-env <VAR>] [--domain <domain>] [--prod] [--trust-cert]';
+export const ADD_USAGE = '/add <name> <server> [database] [--user <login> --password-env <VAR>] [--domain <domain>] [--prod] [--trust-cert] [--ai off|schema|results]';
 
 /**
  * Reads `/add` arguments into a connection. Without --user it signs in through the Azure CLI.
@@ -31,11 +31,17 @@ export function parseAddArgs(rest) {
     else if (a === '--domain') conn.domain = value();
     else if (a === '--prod') conn.prod = true;
     else if (a === '--trust-cert') conn.trustCert = true;
+    else if (a === '--ai') {
+      conn.ai = value();
+      if (!['off', 'schema', 'results'].includes(conn.ai)) throw new Error(`--ai is off, schema or results. ${ADD_USAGE}`);
+    }
     else if (a.startsWith('--')) throw new Error(`Unknown option ${a}. ${ADD_USAGE}`);
     else positional.push(a);
   }
   const [name, server, database] = positional;
   if (!name || !server) throw new Error(ADD_USAGE);
+  // `trawl --demo` would hide a saved connection with one of its names, and the next save drop it.
+  if (DEMO_CONNECTIONS.some((d) => d.name === name.toLowerCase())) throw new Error(`${name} is the demo's name; pick another.`);
   if (positional.length > 3) throw new Error(`Too many arguments. ${ADD_USAGE}`);
   if (conn.user && !conn.passwordEnv) throw new Error('A SQL login needs --password-env <VAR>: the environment variable holding its password. Trawl never stores passwords.');
   if (conn.passwordEnv && !conn.user) throw new Error('--password-env goes with --user.');

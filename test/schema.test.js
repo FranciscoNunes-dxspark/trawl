@@ -67,6 +67,8 @@ test('/add arguments', () => {
     trustCert: true,
   });
   assert.equal(parseAddArgs('w srv --user me --password-env PW --domain CORP').auth, 'ntlm');
+  assert.equal(parseAddArgs('x srv --ai results').ai, 'results');
+  assert.throws(() => parseAddArgs('x srv --ai everything'), /--ai is off, schema or results/);
   assert.throws(() => parseAddArgs('only-a-name'), { message: ADD_USAGE });
   assert.throws(() => parseAddArgs('x srv --user sa'), /password-env/);
   assert.throws(() => parseAddArgs('x srv --bogus'), /Unknown option/);

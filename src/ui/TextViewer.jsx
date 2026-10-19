@@ -3,8 +3,11 @@ import { useInput } from 'ink';
 import { theme } from '../theme.js';
 import { Panel, Row } from './parts.jsx';
 
-/** Full-height scrollable text: /describe, a record, the last output, help. */
-export function TextViewer({ title, text, loading, width, height, active, onClose }) {
+/**
+ * Full-height scrollable text: /describe, a record, the last output, help. `pageOnly`: a question
+ * below has the other keys, so only page up/down scroll this.
+ */
+export function TextViewer({ title, text, loading, width, height, active, pageOnly = false, onClose }) {
   const lines = useMemo(() => (text ?? '').replace(/\n$/, '').split('\n'), [text]);
   const [offset, setOffset] = useState(0);
   const innerH = height - 2;
@@ -13,6 +16,7 @@ export function TextViewer({ title, text, loading, width, height, active, onClos
 
   useInput(
     (input, key) => {
+      if (pageOnly && !key.pageDown && !key.pageUp) return;
       if (key.escape || input === 'q') return onClose();
       if (key.downArrow || input === 'j') to(offset + 1);
       else if (key.upArrow || input === 'k') to(offset - 1);

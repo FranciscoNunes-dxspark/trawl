@@ -55,11 +55,12 @@ const NAME = String.raw`(?:\[(?:[^\]]|\]\])+\]|"[^"]+"|[A-Za-z_@#][\w@#$]*)`;
 const unquote = (s) => s.replace(/^\[(.*)\]$/s, '$1').replace(/]]/g, ']').replace(/^"(.*)"$/s, '$1');
 
 /**
- * Where a result can be saved back to: { table, keys, columns } or { reason } saying why not.
- * `table` is the schema object; `keys` the result column indexes of its primary key; `columns`
- * maps each result column index to its table column, for the ones that can be edited.
+ * Which table a result's rows are, and which of its columns are that table's as they are:
+ * { table, columns } or { reason } saying why it can't tell. `table` is the schema object, and
+ * `columns` maps each result column index to its table column. Following a foreign key from a cell
+ * needs this much; editing needs the primary key too (editTarget).
  */
-export function editTarget(sql, sets, schema) {
+export function readTarget(sql, sets, schema) {
   if (!schema) return { reason: 'the schema is still loading' };
   if (sets.length !== 1) return { reason: 'only a statement with one result set can be edited' };
   const statements = splitStatements(sql);
@@ -117,6 +118,18 @@ export function editTarget(sql, sets, schema) {
     const tc = table.columns.find((t) => t.name.toLowerCase() === key);
     if (tc && plain.has(key) && seen.get(key) === 1 && (named.get(key) ?? 1) === 1) columns.set(i, tc);
   });
+  return { table, columns };
+}
+
+/**
+ * Where a result can be saved back to: { table, keys, columns } or { reason } saying why not.
+ * `table` is the schema object; `keys` the result column indexes of its primary key; `columns`
+ * maps each result column index to its table column, for the ones that can be edited.
+ */
+export function editTarget(sql, sets, schema) {
+  const target = readTarget(sql, sets, schema);
+  if (!target.table) return target;
+  const { table, columns } = target;
 
   const pk = table.columns.filter((c) => c.pk);
   if (!pk.length) return { reason: `${table.schema}.${table.name} has no primary key to find each row by` };

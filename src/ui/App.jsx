@@ -10,7 +10,7 @@ import { commitMode, describeConn, isReadOnly } from '../connections.js';
 import { copyToClipboard } from '../clipboard.js';
 import { osCredentials } from '../credentials.js';
 import { connect as openSession } from '../db.js';
-import { changesText, editTarget } from '../edit.js';
+import { changesText, editTarget, readTarget } from '../edit.js';
 import { HELP } from '../help.js';
 import { SCHEMA_SQL, buildSchema } from '../schema.js';
 import { qualified, splitStatements, statisticsSummary } from '../sql.js';
@@ -45,7 +45,7 @@ const VIEWS = [
 const HINTS = {
   explorer: '↵ first rows · d describe · s query it in the console · c CREATE script · /find filter',
   query: '↵ run statement · v select several · R run file · e edit in the console · /console',
-  results: 'h/l columns · o sort · f filter · ↵ record · y/Y copy · e edit · n NULL · d delete · s save · x export',
+  results: 'h/l columns · o sort · f filter · ↵ record · y/Y copy · F follow key · e edit · n NULL · d delete · s save · x export',
   history: '↵ run again · e edit in the console · ◆ ran by Claude',
   connections: '↵ connect · n new · p password · f folder · x forget',
   activity: 'R read again · ↵ full SQL · x kill · a idle sessions too',
@@ -448,8 +448,11 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     if (res && !keep) {
       // Whether, and where, the rows can be edited and saved back (edit.js).
       const sc = schemaRef.current;
-      const edit = res.error ? { reason: 'the statement failed' } : sc?.database !== s.database ? { reason: 'the schema is still loading' } : editTarget(sql, res.sets, sc);
-      const shown = { id: nextId.current++, title, sql, ...res, error: res.error?.message ?? null, edit, conn: s.conn.name, database: s.database };
+      const why = res.error ? { reason: 'the statement failed' } : sc?.database !== s.database ? { reason: 'the schema is still loading' } : null;
+      const edit = why ?? editTarget(sql, res.sets, sc);
+      // Which table the rows are, for following a foreign key from a cell (F).
+      const source = why ?? (edit.table ? { table: edit.table, columns: edit.columns } : readTarget(sql, res.sets, sc));
+      const shown = { id: nextId.current++, title, sql, ...res, error: res.error?.message ?? null, edit, source, conn: s.conn.name, database: s.database };
       showResults(shown);
       setResultIndex(0);
       if (res.sets.length && !stay) setView('results');

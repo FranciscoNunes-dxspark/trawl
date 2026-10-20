@@ -8,6 +8,7 @@ import { findDataSources, importPlan, planText } from './datagrip.js';
 import { formatSql } from './format.js';
 import { changesText, insertScript, saveScript, tsvText, withSaved } from './edit.js';
 import { AI_LABELS, AI_LEVELS, aiLevel, askPrompt, canSeeSchema, consoleText, parseAnswer } from './ai.js';
+import { followTargets } from './follow.js';
 import { folderNames, inFolder, inParallel, mergeResults, readOnlyScript } from './fanout.js';
 import { DIFF_SQL, buildExtras, diffText, schemaDiff, syncScript } from './diff.js';
 import { ACTIVITY_SQL, buildActivity, killSql } from './activity.js';
@@ -122,6 +123,25 @@ export async function saveEdits(ctx) {
   const r = await runSql(ctx, script, { title: `save ${what} to ${objectName(table)}`, keep: true });
   // On a failure, nothing was saved: the changes stay staged to fix or undo.
   if (r?.ok && ctx.results === res) ctx.replaceResults({ ...res, sets: [withSaved(res.sets[0], changes, res.edit)] });
+}
+
+/**
+ * F in Results and /follow: from the cell under the cursor along a foreign key, to the row its value
+ * refers to, or to the rows of other tables that refer to it. With several ways to go, it asks which.
+ */
+export async function followKey(ctx, cell = ctx.resultCell) {
+  const res = ctx.results;
+  if (!res || !cell) return ctx.note('Run a query first, and put the cursor on a cell in Results.', 'error');
+  if (!needSession(ctx)) return;
+  if (res.conn !== ctx.session.conn.name || res.database !== ctx.session.database) return ctx.note(`These rows came from ${res.conn} (${res.database}); connect there again to follow their keys.`, 'error');
+  const r = followTargets(res.source, res.sets[0], cell.row, cell.col, ctx.schema, { limit: ctx.config.limit });
+  if (r.reason) return ctx.note(r.reason, 'error');
+  let pick = r.targets[0];
+  if (r.targets.length > 1) {
+    pick = await ctx.confirm({ title: 'Follow which foreign key?', options: [...r.targets.map((t) => ({ label: `${t.label} (${t.fk})`, value: t })), { label: 'Neither', value: null }] });
+    if (!pick) return;
+  }
+  return runSql(ctx, pick.sql);
 }
 
 export async function connect(ctx, name, { database } = {}) {

@@ -73,6 +73,8 @@ export function ResultsView({ results, changes, setIndex, view, ctx, width, heig
   const innerH = height - 2;
   const edit = results?.edit;
   const editable = Boolean(edit?.table) && setIndex === 0;
+  // A cell cursor where a cell means something: rows that can be edited, or whose foreign keys F follows.
+  const hasCursor = editable || (Boolean(results?.source?.table) && setIndex === 0);
   const pending = changes ?? { cells: new Map(), deletes: new Set() };
   // Under the grid: unsaved changes first, then the error and the server's messages.
   const notes = (results?.messages ?? []).map((text) => ({ text, color: theme.dim }));
@@ -82,7 +84,7 @@ export function ResultsView({ results, changes, setIndex, view, ctx, width, heig
   const gridH = Math.max(1, innerH - 2 - noteLines);
   const nav = useListNav(order.length, gridH, { resetKey: `${results?.id}:${setIndex}:${sort?.col}:${sort?.dir}:${filter}` });
   // Editable rows have a cell cursor; other results just scroll, the first column shown standing in for it.
-  const cur = Math.min(editable ? col : colOffset, Math.max(0, widths.length - 1));
+  const cur = Math.min(hasCursor ? col : colOffset, Math.max(0, widths.length - 1));
 
   // The columns that fit, from the first one scrolled to; moving the cursor off screen scrolls.
   const layout = (from) => {
@@ -110,7 +112,7 @@ export function ResultsView({ results, changes, setIndex, view, ctx, width, heig
     colFree.current = false;
     colRef.current = next;
     setColState(next);
-    if (!editable) setColOffset(next);
+    if (!hasCursor) setColOffset(next);
   };
   const key = (row, c) => `${row}:${c}`;
 
@@ -180,7 +182,7 @@ export function ResultsView({ results, changes, setIndex, view, ctx, width, heig
     if (!ctx.viewHasKeys()) return;
     if (nav.handle(input, k)) return;
     const row = order[nav.current()];
-    const cur = Math.min(editable ? colRef.current : colOffset, Math.max(0, widths.length - 1));
+    const cur = Math.min(hasCursor ? colRef.current : colOffset, Math.max(0, widths.length - 1));
     if (k.leftArrow || input === 'h') setCol(cur - 1);
     else if (k.rightArrow || input === 'l') setCol(cur + 1);
     else if (input === '[' && setIndex > 0) (ctx.setResultIndex(setIndex - 1), setColOffset(0), setCol(0));
@@ -192,6 +194,7 @@ export function ResultsView({ results, changes, setIndex, view, ctx, width, heig
     else if (input === 'Y' && set?.rows[row]) ctx.copy(tsvText(set, { header: false, rows: [set.rows[row]] }), `row ${row + 1}, tab-separated`);
     else if (k.return && set?.rows[row]) ctx.showText(`Row ${row + 1} of ${set.rows.length}`, recordText(set, set.rows[row]));
     else if (!set?.rows[row]) return;
+    else if (input === 'F') a.followKey(ctx, { row, col: cur });
     else if (input === 'e' || input === 'i') startEditing(row, cur);
     else if (input === 'n') {
       const refusal = cellRefusal(cur);
@@ -222,7 +225,7 @@ export function ResultsView({ results, changes, setIndex, view, ctx, width, heig
   useEffect(() => () => leaveCell.current(), []);
 
   const scrollCols = (n) => {
-    colFree.current = editable;
+    colFree.current = hasCursor;
     setColOffset((o) => Math.max(0, Math.min(widths.length - 1, o + n)));
   };
   // The grid's rows start under the border, the column names and the line under them; its cells
@@ -236,7 +239,7 @@ export function ResultsView({ results, changes, setIndex, view, ctx, width, heig
       // Under the console: a click there is about the results, so typing stops.
       if (top) ctx.setEditing(false);
       if (!nav.pick(e.y - 3)) return;
-      if (editable) {
+      if (hasCursor) {
         let x = 3;
         const starts = shown.map(({ w }) => {
           const from = x;
@@ -251,6 +254,9 @@ export function ResultsView({ results, changes, setIndex, view, ctx, width, heig
     },
     { top },
   );
+
+  // Where /follow starts from: the cell under the cursor.
+  ctx.resultCell = set && order[nav.index] != null && setIndex === 0 ? { row: order[nav.index], col: cur } : null;
 
   if (!results) {
     return (
@@ -272,7 +278,7 @@ export function ResultsView({ results, changes, setIndex, view, ctx, width, heig
     const at = `${r}:${i}`;
     const staged = pending.cells.has(at);
     const value = staged ? pending.cells.get(at) : v;
-    const here = editable && active && r === order[nav.index] && i === cur;
+    const here = hasCursor && active && r === order[nav.index] && i === cur;
     if (deleted) return { text: formatValue(v), color: theme.del, strike: true, underline: here };
     if (staged) return { text: value === null ? 'NULL' : value, color: theme.warn, bold: true, italic: value === null, underline: here };
     return { text: formatValue(v), color: v == null ? theme.nul : numeric[i] ? theme.number : undefined, italic: v == null, underline: here };
@@ -293,7 +299,7 @@ export function ResultsView({ results, changes, setIndex, view, ctx, width, heig
           <Row
             pointer={false}
             width={innerW}
-            segments={[{ text: '  ' }, ...cells(set.columns.map((c, i) => (sort?.col === i ? `${c.name} ${sort.dir > 0 ? '▲' : '▼'}` : c.name)), (i, v) => ({ text: v, bold: true, color: theme.accent, underline: editable && i === cur }))]}
+            segments={[{ text: '  ' }, ...cells(set.columns.map((c, i) => (sort?.col === i ? `${c.name} ${sort.dir > 0 ? '▲' : '▼'}` : c.name)), (i, v) => ({ text: v, bold: true, color: theme.accent, underline: hasCursor && i === cur }))]}
           />
           <Row pointer={false} width={innerW} segments={[{ text: '  ' }, ...shown.flatMap(({ w }, k) => [...(k ? [{ text: '─┼─', color: theme.border }] : []), { text: '─'.repeat(w), color: theme.border }])]} />
           {order.slice(nav.offset, nav.offset + gridH).map((r, k) => (

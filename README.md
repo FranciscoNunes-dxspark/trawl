@@ -114,7 +114,7 @@ Press `?` inside for every shortcut. The essentials:
 | Explorer | `↵` first rows (on a database: switch to it) · `d` describe · `s` start a query on it in the console · `c` its CREATE script, into the console · `/find <text>` filter |
 | Query, the console | `↵` or `i` start typing · `esc` stop · `ctrl+r` run the selection, or the statement under the cursor · `R` run it all · `f` format · `p` plan · `ctrl+f` find, then `n`/`N` · `ctrl+z`/`ctrl+y` undo/redo · while typing, `tab` takes a suggestion and `ctrl+n` asks for them |
 | Query, a file | `↵` run the statement under the cursor · `v` select several · `R` run the whole file · `e` edit in the console |
-| Results | `h`/`l` columns · `[`/`]` result sets · `o` sort by the column · `f` filter · `y`/`Y` copy the cell/row · `↵` the row as a record · `e` edit · `n` NULL · `d` delete · `u` undo · `s` save · `x` export |
+| Results | `h`/`l` columns · `[`/`]` result sets · `o` sort by the column · `f` filter · `y`/`Y` copy the cell/row · `↵` the row as a record · `F` follow the foreign key · `e` edit · `n` NULL · `d` delete · `u` undo · `s` save · `x` export |
 | History | `↵` run again · `e` edit in the console · `◆` marks what Claude ran |
 | Connections | `↵` connect · `n` new · `p` password · `f` folder · `x` forget |
 | Activity | `R` read again · `↵` the session in full · `x` kill · `a` idle sessions too |
@@ -152,6 +152,10 @@ Each result set stops at the row limit (500 to start with; `/limit <n>` changes 
 
 `y` copies the cell under the cursor and `Y` the row, tab-separated. `/copy` copies the whole result set: tab-separated by default (it pastes into a spreadsheet as cells), or `/copy csv`, `/copy json`, or `/copy insert` for `INSERT` statements into its table. Trawl uses the system clipboard (PowerShell's `Set-Clipboard`, `pbcopy`, `wl-copy`, `xclip` or `xsel`), and over SSH asks the terminal to copy instead (OSC 52, which Windows Terminal, iTerm2, kitty, WezTerm and tmux understand).
 
+### Following foreign keys
+
+When the rows on screen are one table's (as for editing, below, though the primary key needn't be there), `h`/`l` move a cursor between cells, and `F` (or `/follow`) follows the cell's foreign key: on `Players.ClubId`, it opens the club that row refers to (`SELECT TOP (…) * FROM [dbo].[Clubs] WHERE [Id] = 2`); on a key other tables refer to, like `Clubs.Id`, it opens their rows that refer to it. When there are several ways to go, it asks which. A key of several columns takes them all from the row, and a `NULL` refers to nothing. The query runs like any other, so it lands in History and Results, and `F` works there again.
+
 ### Editing results
 
 When the rows on screen are the rows of one table, with its primary key among the columns (`↵` on a table in the Explorer, or a `SELECT … FROM` one table with no join or grouping), you can change them in place, as in DataGrip:
@@ -182,7 +186,7 @@ The list is read when the tab opens, and again on `R`. `↵` shows a session's d
 
 Type `/` and the menu narrows as you type. `tab` completes, `↑`/`↓` picks, `↵` runs. `/connect` completes connection names, `/use` database names and `/describe` tables and views.
 
-`/import datagrip [folder]` `/connect <name>` `/add …` `/forget <name>` `/folder <connection> [folder]` `/password [connection]` `/disconnect` `/use <database>` `/open <file.sql>` `/console` `/new` `/format` `/search <text>` `/save <file.sql>` `/describe <table>` `/script <name>` `/find [text]` `/export <file>` `/filter [text]` `/copy [tsv|csv|json|insert]` `/limit [rows]` `/writes` `/tx [auto|manual]` `/commit` `/rollback` `/ask <question>` `/ai [connection] [level]` `/update` `/settings` `/stats [on|off]` `/plan [sql]` `/diff <connection> [database]` `/fanout <folder> [sql]` `/activity` `/kill <session>` `/last` `/refresh` `/help` `/quit`
+`/import datagrip [folder]` `/connect <name>` `/add …` `/forget <name>` `/folder <connection> [folder]` `/password [connection]` `/disconnect` `/use <database>` `/open <file.sql>` `/console` `/new` `/format` `/search <text>` `/save <file.sql>` `/describe <table>` `/script <name>` `/find [text]` `/export <file>` `/filter [text]` `/follow` `/copy [tsv|csv|json|insert]` `/limit [rows]` `/writes` `/tx [auto|manual]` `/commit` `/rollback` `/ask <question>` `/ai [connection] [level]` `/update` `/settings` `/stats [on|off]` `/plan [sql]` `/diff <connection> [database]` `/fanout <folder> [sql]` `/activity` `/kill <session>` `/last` `/refresh` `/help` `/quit`
 
 ## Claude
 

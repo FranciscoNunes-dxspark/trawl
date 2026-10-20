@@ -117,3 +117,27 @@ test('/diff compares this database with another, and puts the sync script in the
   assert.doesNotMatch(frame(), /ALTER COLUMN.*rows affected/);
   app.unmount();
 });
+
+test('F on a foreign key cell opens the row it refers to, and on a key others refer to asks which way', async () => {
+  const app = start();
+  await until(() => frame().includes('Clubs'), 'the explorer');
+  app.stdin.write('j');
+  await until(() => /❯ T Players/.test(frame()), 'the cursor on Players');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('Rui Costa'), 'the players');
+  app.stdin.write('l');
+  await new Promise((r) => setTimeout(r, 100));
+  app.stdin.write('F');
+  await until(() => frame().includes('SELECT TOP (500) * FROM [dbo].[Clubs] WHERE [Id] = 1;'), 'the club row');
+  // On Clubs.Id, three foreign keys point back: it asks.
+  app.stdin.write('h');
+  await new Promise((r) => setTimeout(r, 100));
+  app.stdin.write('F');
+  await until(() => frame().includes('Follow which foreign key?'), 'the question');
+  assert.match(frame(), /dbo\.Players where ClubId = 1 \(rows referring to this one\) \(FK_Players_Clubs\)/);
+  app.stdin.write(KEYS.down);
+  await until(() => /❯ 2\. dbo\.Matches where HomeId/.test(frame()), 'the second way picked');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('SELECT TOP (500) * FROM [dbo].[Matches] WHERE [HomeId] = 1;'), 'the matches');
+  app.unmount();
+});

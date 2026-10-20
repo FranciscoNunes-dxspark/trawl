@@ -47,7 +47,7 @@ const VIEWS = [
 const HINTS = {
   explorer: '↵ first rows · d describe · s query it in the console · c CREATE script · /find filter',
   query: '↵ run statement · v select several · R run file · e edit in the console · /console',
-  results: 'h/l columns · o sort · f filter · ↵ record · y/Y copy · F follow key · e edit · n NULL · d delete · s save · x export',
+  results: 'h/l columns · o sort · f filter · ↵ record · y/Y copy · F follow key · p pin · c compare · e edit · n NULL · d delete · s save · x export',
   history: '↵ run again · e edit in the console · ◆ ran by Claude',
   connections: '↵ connect · n new · p password · f folder · x forget',
   activity: 'R read again · ↵ full SQL · x kill · a idle sessions too',

@@ -66,6 +66,8 @@ Results
   o                Sort by the column: A to Z, then Z to A, then as it came (the query doesn't run again)
   f                Filter: only rows with a value containing the text (/filter <text>; empty shows them all)
   y  Y             Copy the cell · the row (tab-separated); /copy [tsv|csv|json|insert] copies the whole set
+  p  c             Pin the result set (/pin) · compare the one on screen with it (/compare): ~ changed, + added,
+                   − removed, matched by the primary key when the rows are one table's, else row by row
   F                Follow the cell's foreign key (/follow): the row its value refers to, or on a key other
                    tables refer to, their rows (it asks which when there are several ways to go)
   Editing (the rows of one table, with its primary key: ↵ in the Explorer, or SELECT … FROM one table)
@@ -131,7 +133,7 @@ Slash commands
   /import datagrip [folder]   /import-csv <file.csv> <table> [--run]   /connect <name>   /add <name> <server> [database] [--user u] [--domain d] [--folder f] [--prod] [--commit auto|manual] [--trust-cert]
   /forget <name>   /folder <connection> [folder]   /password [connection]   /disconnect   /use <database>   /open <file.sql>   /console   /tab …   /new   /format   /search <text>   /save <file.sql>
   /describe <table>   /script <name>   /find [text]
-  /export <file>   /filter [text]   /follow   /copy [format]   /limit [rows]   /writes   /tx [auto|manual]   /commit   /rollback   /ask <question>   /ai   /update   /settings   /stats [on|off]   /plan [sql]   /diff <connection> [database]   /fanout <folder> [sql]   /activity   /kill <session>   /last   /refresh   /help   /quit
+  /export <file>   /filter [text]   /follow   /pin   /compare   /copy [format]   /limit [rows]   /writes   /tx [auto|manual]   /commit   /rollback   /ask <question>   /ai   /update   /settings   /stats [on|off]   /plan [sql]   /diff <connection> [database]   /fanout <folder> [sql]   /activity   /kill <session>   /last   /refresh   /help   /quit
 
 Viewer (describe, records, output, this help)
   j k  space  g G  Scroll         esc / q     Close`;

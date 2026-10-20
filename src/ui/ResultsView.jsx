@@ -189,6 +189,8 @@ export function ResultsView({ results, changes, setIndex, view, ctx, width, heig
     else if (input === ']' && setIndex < sets.length - 1) (ctx.setResultIndex(setIndex + 1), setColOffset(0), setCol(0));
     else if (input === 'x') ctx.prefill('/export ');
     else if (input === 'o' && set) ctx.sortResults(cur);
+    else if (input === 'p') a.pinResult(ctx);
+    else if (input === 'c') a.compareResults(ctx);
     else if (input === 'f' && set) ctx.prefill('/filter ');
     else if (input === 'y' && set?.rows[row]) ctx.copy(editText(set.rows[row][cur]), `${set.columns[cur].name}'s value`);
     else if (input === 'Y' && set?.rows[row]) ctx.copy(tsvText(set, { header: false, rows: [set.rows[row]] }), `row ${row + 1}, tab-separated`);

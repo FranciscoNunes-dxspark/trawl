@@ -10,6 +10,7 @@ import { formatSql } from './format.js';
 import { changesText, insertScript, saveScript, tsvText, withSaved } from './edit.js';
 import { AI_LABELS, AI_LEVELS, aiLevel, askPrompt, canSeeSchema, consoleText, parseAnswer } from './ai.js';
 import { followTargets } from './follow.js';
+import { compareSets, comparisonSet, comparisonSummary } from './compare.js';
 import { findTab, freeName, tabNameProblem } from './consoles.js';
 import { findSnippet, snippetNameProblem, snippetsFor, withSnippet, withoutSnippet } from './snippets.js';
 import { folderNames, inFolder, inParallel, mergeResults, readOnlyScript } from './fanout.js';
@@ -908,6 +909,37 @@ export async function saveConsoleAs(ctx, path) {
   } catch (e) {
     ctx.note(`Couldn't write ${full}: ${e.message}`, 'error');
   }
+}
+
+/** p in Results and /pin: keeps the result set on screen to compare a later run with (c, /compare). */
+export function pinResult(ctx) {
+  const res = ctx.results;
+  const set = ctx.currentSet();
+  if (!set) return ctx.note('Run a query first: there is nothing to pin.', 'error');
+  if (res.compared) return ctx.note('This is a comparison; pin a result of a query.', 'error');
+  // The primary key's columns, when the rows are one table's, match rows up by key.
+  const keys = res.edit?.keys && set === res.sets[0] ? res.edit.keys.map((i) => set.columns[i].name) : [];
+  ctx.pinned = { set, title: res.title, keys, id: res.id };
+  ctx.note(`Pinned ${set.rows.length} row${set.rows.length === 1 ? '' : 's'} of ${res.title}. Run it again, then c in Results (/compare) shows what changed${keys.length ? `, rows matched by ${keys.join(', ')}` : ''}.`, 'ok');
+}
+
+/** c in Results and /compare: the result set on screen against the pinned one, as a result set of its own. */
+export function compareResults(ctx) {
+  const pin = ctx.pinned;
+  if (!pin) return ctx.note('Pin a result first: p in Results (or /pin), then run again and compare.', 'error');
+  const res = ctx.results;
+  const set = ctx.currentSet();
+  if (!set || res.compared) return ctx.note('Run the query again first: the result on screen is what gets compared with the pinned one.', 'error');
+  if (res.id === pin.id && set === pin.set) return ctx.note('This is the pinned result itself: run the query again, then compare.', 'error');
+  let diff;
+  try {
+    diff = compareSets(pin.set, set, { keys: pin.keys });
+  } catch (e) {
+    return ctx.note(e.message, 'error');
+  }
+  const summary = comparisonSummary(diff, pin.keys);
+  ctx.present({ title: `Compared: ${pin.title} → now`, sql: res.sql, sets: [comparisonSet(diff)], messages: [summary], ms: null, edit: { reason: 'it is a comparison' }, compared: true, conn: res.conn, database: res.database });
+  ctx.note(summary, 'ok');
 }
 
 const COPY_FORMATS = ['tsv', 'csv', 'json', 'insert'];

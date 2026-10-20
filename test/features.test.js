@@ -218,3 +218,23 @@ test('/import-csv opens the INSERTs in a console tab of their own, and --run goe
   await until(() => frame().includes('demo-prod is read-only (production)'), 'refused on a read-only connection');
   app.unmount();
 });
+
+test('p pins a result, and c after another run shows the rows added, removed and the same', async () => {
+  const app = start();
+  await until(() => frame().includes('Clubs'), 'the explorer');
+  await command(app, '!SELECT 1 AS a');
+  await until(() => frame().includes('─ SELECT 1 AS a ─'), 'the first result');
+  app.stdin.write('c');
+  await until(() => frame().includes('Pin a result first'), 'nothing pinned yet');
+  app.stdin.write('p');
+  await until(() => frame().includes('Pinned 1 row of SELECT 1 AS a'), 'pinned');
+  await command(app, '!SELECT 2 AS a');
+  await until(() => frame().includes('─ SELECT 2 AS a ─'), 'the second result');
+  app.stdin.write('c');
+  await until(() => frame().includes('Compared: SELECT 1 AS a → now'), 'the comparison');
+  assert.match(frame(), /change │ a\s+│ was/);
+  assert.match(frame(), /\+\s+│ 2\s+│ NULL/);
+  assert.match(frame(), /−\s+│ 1\s+│ NULL/);
+  assert.match(frame(), /0 changed · 1 added · 1 removed · 0 the same \(whole rows compared\)/);
+  app.unmount();
+});

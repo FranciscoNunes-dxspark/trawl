@@ -1,6 +1,7 @@
 // An in-memory stand-in for SQL Server, for `trawl --demo` and the tests. It has no SQL engine:
 // it knows the catalog query, SELECT [TOP (n)] … FROM a table, simple SELECT lists, USE,
-// transactions, WAITFOR DELAY (to try cancelling), RAISERROR/THROW, and counts what writes would
+// transactions, WAITFOR DELAY (to try cancelling), RAISERROR/THROW, a few other sessions for the
+// Activity view (and KILL for them), and counts what writes would
 // touch without changing anything.
 import { DbError, runScript } from './db.js';
 import { findObject } from './schema.js';
@@ -91,6 +92,30 @@ function schemaSets(dbName) {
   ];
 }
 
+// Other sessions on the demo's "server", for the Activity view: a blocking chain (an idle session
+// holding a transaction open, blocking an update, blocking a read), a busy report and an idle one.
+// Each demo session has its own copy, so KILL in one test leaves the next one's alone.
+function fakeActivity() {
+  const t = (s) => new Date(Date.now() - s * 1000);
+  return [
+    { id: 53, login: 'app_user', host: 'WEB01', program: 'Club website', database: 'ClubA', status: 'sleeping', command: '', wait: null, waitMs: null, elapsedMs: null, blockedBy: 0, openTran: 1, cpuMs: 120, reads: 840, started: t(95), sql: "BEGIN TRAN;\nUPDATE dbo.Clubs SET Active = 0 WHERE Id = 3;" },
+    { id: 61, login: 'etl', host: 'BATCH02', program: 'Nightly load', database: 'ClubA', status: 'suspended', command: 'UPDATE', wait: 'LCK_M_U', waitMs: 81_200, elapsedMs: 81_350, blockedBy: 53, openTran: 1, cpuMs: 15, reads: 12, started: t(81), sql: 'UPDATE dbo.Clubs SET Founded = Founded WHERE Country = N\'FR\';' },
+    { id: 64, login: 'report_reader', host: 'BI01', program: 'Power BI', database: 'ClubA', status: 'suspended', command: 'SELECT', wait: 'LCK_M_S', waitMs: 42_000, elapsedMs: 42_010, blockedBy: 61, openTran: 0, cpuMs: 2, reads: 4, started: t(42), sql: 'SELECT c.Name, COUNT(*) AS Players\nFROM dbo.Clubs c JOIN dbo.Players p ON p.ClubId = c.Id\nGROUP BY c.Name;' },
+    { id: 70, login: 'analyst', host: 'LAPTOP-7', program: 'Microsoft SQL Server Management Studio', database: 'ClubB', status: 'running', command: 'SELECT', wait: 'CXPACKET', waitMs: 3, elapsedMs: 12_500, blockedBy: 0, openTran: 0, cpuMs: 24_800, reads: 1_204_331, started: t(12), sql: 'SELECT * FROM dbo.Matches m CROSS JOIN dbo.Players p;' },
+    { id: 72, login: 'app_user', host: 'WEB02', program: 'Club website', database: 'ClubA', status: 'sleeping', command: '', wait: null, waitMs: null, elapsedMs: null, blockedBy: 0, openTran: 0, cpuMs: 4, reads: 30, started: t(600), sql: 'SELECT TOP (10) * FROM dbo.Matches ORDER BY PlayedOn DESC;' },
+  ];
+}
+
+const ACTIVITY_COLUMNS = ['session_id', 'login_name', 'host_name', 'program_name', 'database_name', 'status', 'command', 'wait_type', 'wait_time', 'elapsed_ms', 'blocking_session_id', 'open_transaction_count', 'cpu_ms', 'logical_reads', 'last_request_start_time', 'sql_text'];
+
+function activitySets(session) {
+  const self = { id: session.spid, login: 'demo', host: 'localhost', program: 'Trawl', database: session.database, status: 'running', command: 'SELECT', wait: null, waitMs: 0, elapsedMs: 0, blockedBy: 0, openTran: session.tran, cpuMs: 0, reads: 0, started: new Date(), sql: 'SELECT … FROM sys.dm_exec_sessions …' };
+  const rows = [...session.others, self]
+    .sort((x, y) => x.id - y.id)
+    .map((s) => [s.id, s.login, s.host, s.program, s.database, s.status, s.command || null, s.wait, s.waitMs, s.elapsedMs, s.blockedBy, s.openTran, s.cpuMs, s.reads, s.started, s.sql]);
+  return [set(['me'], [[session.spid]]), set(ACTIVITY_COLUMNS, rows)];
+}
+
 const sleep = (ms, signal) =>
   new Promise((resolve, reject) => {
     const t = setTimeout(resolve, ms);
@@ -152,6 +177,16 @@ async function runStatement(session, text, line, state, { signal, limit = 500 })
     return;
   }
   if ((m = s.match(/^SET\s+STATISTICS\s+(IO|TIME)\s+(ON|OFF)$/i))) return void (session[`stats${m[1].toUpperCase()}`] = m[2].toUpperCase() === 'ON');
+  if ((m = s.match(/^KILL\s+(\d+)$/i))) {
+    const id = Number(m[1]);
+    if (id === session.spid) fail('Cannot use KILL to kill your own process.', 6104);
+    const victim = session.others.find((o) => o.id === id);
+    if (!victim) fail(`Process ID ${id} is not an active process ID.`, 6106);
+    session.others = session.others.filter((o) => o !== victim);
+    // Whatever it was blocking can go on.
+    for (const o of session.others) if (o.blockedBy === id) Object.assign(o, { blockedBy: 0, status: 'running', wait: null, waitMs: null });
+    return;
+  }
   if (/^SELECT\s+@@TRANCOUNT\b/i.test(s)) state.sets.push(set(['(No column name)'], [[session.tran]], ['IntN']));
   else if (/^BEGIN\s+TRAN(SACTION)?\b/i.test(s)) session.tran++;
   else if (/^COMMIT\b/i.test(s)) {
@@ -208,12 +243,15 @@ export function demoSession(conn, { database } = {}) {
     closed: false,
     onEnd: null,
     tran: 0,
+    spid: 52,
+    others: fakeActivity(),
     run: (script, opts = {}) =>
       runScript(
         session,
         script,
         async (batch, line, state) => {
           if (batch.startsWith('-- trawl:schema')) return void state.sets.push(...schemaSets(session.database));
+          if (batch.startsWith('-- trawl:activity')) return void state.sets.push(...activitySets(session));
           if (batch.startsWith('-- trawl:definition')) {
             const name = batch.match(/OBJECT_ID\(N'(.*)'\)\)/)[1].replace(/''/g, "'");
             const t = findObject({ objects: DATABASES[session.database].tables }, name);

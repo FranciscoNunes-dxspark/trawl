@@ -18,6 +18,7 @@ import { BULLET, theme } from '../theme.js';
 import { fitSegments, stringWidth } from '../text.js';
 import { useTerminalSize } from './hooks.js';
 import { Confirm, Panel, PromptBox, Row, SecretPrompt, Spinner, Suggestions, confirmHeight } from './parts.jsx';
+import { ActivityView } from './ActivityView.jsx';
 import { ConnectionsView } from './ConnectionsView.jsx';
 import { SettingsView } from './SettingsView.jsx';
 import { ConsoleView } from './ConsoleView.jsx';
@@ -38,6 +39,7 @@ const VIEWS = [
   { id: 'results', label: 'Results' },
   { id: 'history', label: 'History' },
   { id: 'connections', label: 'Connections' },
+  { id: 'activity', label: 'Activity' },
 ];
 
 const HINTS = {
@@ -46,6 +48,7 @@ const HINTS = {
   results: 'h/l columns · o sort · f filter · ↵ record · y/Y copy · e edit · n NULL · d delete · s save · x export',
   history: '↵ run again · e edit in the console · ◆ ran by Claude',
   connections: '↵ connect · n new · p password · f folder · x forget',
+  activity: 'R read again · ↵ full SQL · x kill · a idle sessions too',
 };
 
 // Typed at the prompt without "!", these still run as SQL.
@@ -161,6 +164,9 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
   const [tranCount, setTranCountState] = useState(0);
   const [writesAllowed, setWritesAllowedState] = useState(false);
   const [results, setResults] = useState(null);
+  // The Activity view's sessions ({ me, sessions, at, conn, error }), read when it opens and on R.
+  const [activity, setActivityState] = useState(null);
+  const activityRef = useRef(null);
   const [changes, setChangesState] = useState(NO_CHANGES);
   const [resultIndex, setResultIndexState] = useState(0);
   const [file, setFile] = useState(null);
@@ -228,6 +234,10 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
   const setSession = (s) => {
     sessionRef.current = s;
     setSessionState(s);
+  };
+  const setActivity = (a) => {
+    activityRef.current = a;
+    setActivityState(a);
   };
   const setSchemaBoth = (s) => {
     schemaRef.current = s;
@@ -349,6 +359,7 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     setSchemaBoth(null);
     setTranCount(0);
     setWritesAllowed(false);
+    setActivity(null);
   };
 
   // A login with no password to hand (or a turned-down one) asks for it, then tries again. A
@@ -460,9 +471,11 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
       confirmRef.current = full;
       setConfirmReq(full);
     });
+  // The answer's key reaches App's own dispatcher after the Confirm's: the question stays in the ref
+  // until then, or a digit answering it would also switch views.
   const onConfirm = (value) => {
     const req = confirmRef.current;
-    confirmRef.current = null;
+    queueMicrotask(() => confirmRef.current === req && (confirmRef.current = null));
     setConfirmReq(null);
     req?.done(value);
   };
@@ -622,6 +635,9 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
       get changes() {
         return changesRef.current;
       },
+      get activity() {
+        return activityRef.current;
+      },
       // What useMouse registers: the component on screen takes the main area's clicks and wheel.
       mouseHandlers: [],
     };
@@ -637,6 +653,7 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
       note(`Disconnected from ${name}.`);
     },
     setConfig,
+    setActivity,
     setWritesAllowed,
     setResultIndex,
     // o in Results: by this column, A to Z, then Z to A, then as the server sent them.
@@ -998,6 +1015,8 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     main = <QueryView file={file} ctx={ctx} width={W} height={mainH} active={viewActive} />;
   } else if (view === 'results') {
     main = <ResultsView results={results} changes={changes} setIndex={resultIndex} view={resultView} ctx={ctx} width={W} height={mainH} active={viewActive || (focus === 'cell' && !confirmReq)} />;
+  } else if (view === 'activity') {
+    main = <ActivityView activity={activity} session={session} ctx={ctx} width={W} height={mainH} active={viewActive} />;
   } else if (view === 'history') {
     // Claude's queries come from trawl mcp's log, read each time the tab draws (it's small).
     const ran = [...config.ran, ...loadClaudeHistory()].sort((x, y) => y.at - x.at);

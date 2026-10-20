@@ -8,6 +8,7 @@ import { findDataSources, importPlan, planText } from './datagrip.js';
 import { formatSql } from './format.js';
 import { changesText, insertScript, saveScript, tsvText, withSaved } from './edit.js';
 import { AI_LABELS, AI_LEVELS, aiLevel, askPrompt, canSeeSchema, consoleText, parseAnswer } from './ai.js';
+import { ACTIVITY_SQL, buildActivity, killSql } from './activity.js';
 import { createTableScript, definitionSql, describeObject, findObject, objectName } from './schema.js';
 import { classifyScript, countQuery, oneLine, selectTop, splitStatements, statementAt, toCsv, toJson, withoutLeadingComments } from './sql.js';
 
@@ -376,6 +377,58 @@ export async function showPlan(ctx, sql) {
     ctx.showText(title, plan);
     ctx.rememberOutput(title, plan);
   }
+}
+
+/**
+ * The Activity view's list: the server's sessions and requests, read again. `quiet` keeps it out of
+ * the activity log (opening the tab, R); errors (no VIEW SERVER STATE, say) still show.
+ */
+export async function loadActivity(ctx, { quiet = true } = {}) {
+  if (!needSession(ctx)) return;
+  const session = ctx.session;
+  let act = null;
+  const r = await ctx.task(
+    "read the server's sessions",
+    async (signal) => {
+      act = buildActivity((await session.run(ACTIVITY_SQL, { signal, limit: 10_000 })).sets);
+      return [`${act.sessions.length} session${act.sessions.length === 1 ? '' : 's'}`];
+    },
+    { label: "Reading the server's sessions", quiet },
+  );
+  if (act) return ctx.setActivity({ ...act, at: Date.now(), conn: session.conn.name, error: null });
+  if (!r.ok && r.error?.message !== 'busy' && !r.error?.cancelled) ctx.setActivity({ me: null, sessions: [], at: Date.now(), conn: session.conn.name, error: r.error.message });
+}
+
+/**
+ * x in Activity and /kill <session>: ends another session with KILL, after asking. A read-only
+ * connection refuses it (until /writes), and so does an open transaction, inside which KILL can't run.
+ */
+export async function killSession(ctx, id) {
+  if (!needSession(ctx)) return;
+  if (!String(id ?? '').trim()) return ctx.prefill('/kill ');
+  let sql;
+  try {
+    sql = killSql(String(id).trim());
+  } catch (e) {
+    return ctx.note(e.message, 'error');
+  }
+  const n = Number(String(id).trim());
+  const { conn } = ctx.session;
+  if (isReadOnly(conn) && !ctx.writesAllowed) return ctx.note(`${conn.name} is read-only${conn.prod ? ' (production)' : ''}, and KILL ends someone's session. /writes allows it until you disconnect.`, 'error');
+  if (ctx.tranCount) return ctx.note('A transaction is open, and KILL can’t run inside one: /commit or /rollback first.', 'error');
+  const act = ctx.activity;
+  if (act?.me === n) return ctx.note(`Session ${n} is Trawl's own; /disconnect ends it.`, 'error');
+  const s = act?.sessions.find((x) => x.id === n);
+  const who = s ? ` (${[s.login, s.host, s.program].filter(Boolean).join(' · ')})` : '';
+  const ok = await ctx.confirm({
+    title: `Kill session ${n}${who}?`,
+    detail: `On ${conn.name}${conn.prod ? ' (production)' : ''}. What it hasn't committed is rolled back, which can take as long as it ran.`,
+    options: YES_NO('Yes, kill it'),
+    danger: true,
+  });
+  if (!ok) return;
+  const r = await ctx.query(sql, { title: `KILL ${n}`, keep: true });
+  if (r?.ok) await loadActivity(ctx);
 }
 
 export function setLimit(ctx, value) {

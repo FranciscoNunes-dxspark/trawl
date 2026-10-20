@@ -6,7 +6,7 @@ A keyboard-driven SQL Server client for the terminal, built the same way as [Til
 
 ```
 ><((•> Trawl  │  club-a  myserver.database.windows.net/ClubA   PROD   read-only
- 1 Explorer   2 Query   3 Results   4 History   5 Connections
+ 1 Explorer   2 Query   3 Results   4 History   5 Connections   6 Activity
 ╭─ SELECT TOP (500) * FROM [dbo].[Matches]; ─────────────────────────────── 8 rows · 6 ms ─╮
 │    Id │ HomeId │ AwayId │ PlayedOn   │ HomeGoals │ AwayGoals                             │
 │  ─────┼────────┼────────┼────────────┼───────────┼──────────                             │
@@ -97,7 +97,7 @@ Press `?` inside for every shortcut. The essentials:
 
 | Where | Keys |
 | --- | --- |
-| Anywhere | `1`–`5` or `tab` switch views · `/` commands · `!` SQL · `r` reload the schema · `,` settings · `esc` cancel the running query · `q` quit |
+| Anywhere | `1`–`6` or `tab` switch views · `/` commands · `!` SQL · `r` reload the schema · `,` settings · `esc` cancel the running query · `q` quit |
 | Lists | `j`/`k` or arrows · `g`/`G` top/bottom · `ctrl+d`/`ctrl+u` page |
 | Explorer | `↵` first rows (on a database: switch to it) · `d` describe · `s` start a query on it in the console · `c` its CREATE script, into the console · `/find <text>` filter |
 | Query, the console | `↵` or `i` start typing · `esc` stop · `ctrl+r` run the selection, or the statement under the cursor · `R` run it all · `f` format · `p` plan · `ctrl+f` find, then `n`/`N` · `ctrl+z`/`ctrl+y` undo/redo · while typing, `tab` takes a suggestion and `ctrl+n` asks for them |
@@ -105,6 +105,7 @@ Press `?` inside for every shortcut. The essentials:
 | Results | `h`/`l` columns · `[`/`]` result sets · `o` sort by the column · `f` filter · `y`/`Y` copy the cell/row · `↵` the row as a record · `e` edit · `n` NULL · `d` delete · `u` undo · `s` save · `x` export |
 | History | `↵` run again · `e` edit in the console · `◆` marks what Claude ran |
 | Connections | `↵` connect · `n` new · `p` password · `f` folder · `x` forget |
+| Activity | `R` read again · `↵` the session in full · `x` kill · `a` idle sessions too |
 | Settings (`,`) | `↵` or space changes the row limit, the accent colour, the mouse, and whether Trawl checks for and installs updates · `esc` closes |
 
 One-liners can also go straight in the prompt: SQL there runs with `!`, or without it when it starts with a SQL keyword (`select …`, `exec …`).
@@ -151,6 +152,12 @@ When the rows on screen are the rows of one table, with its primary key among th
 
 Columns that are expressions or renamed in the query, identity columns and `rowversion` can't be edited. If something can't be edited, `e` says why.
 
+### Activity
+
+The Activity tab (`6`, or `/activity`) lists the server's sessions, as SSMS's Activity Monitor does, read from `sys.dm_exec_sessions` and `sys.dm_exec_requests`: each one's status, what it waits on (`LCK_M_S`, `CXPACKET`…), how long it has run, its login and the SQL it is running (or ran last). Blocking chains come first, drawn as a tree: the session at the head (often one sitting idle with a transaction open), then the sessions waiting on it, and those waiting on them, with `▲` and a count on each session that blocks others. Sessions that are only sleeping are left out; `a` shows them too.
+
+The list is read when the tab opens, and again on `R`. `↵` shows a session's details and its SQL in full. `x` (or `/kill <session>`) ends a session with `KILL`, after asking: what it hasn't committed is rolled back. A read-only connection refuses it until `/writes`, and so does an open transaction (KILL can't run inside one). Reading the sessions needs `VIEW SERVER STATE` (`VIEW DATABASE STATE` on Azure SQL Database, which lists that database's sessions only).
+
 ### Safety
 
 - **Production is read-only.** On a connection added with `--prod`, anything that changes data is refused until `/writes`, which asks first and lasts until you disconnect.
@@ -163,7 +170,7 @@ Columns that are expressions or renamed in the query, identity columns and `rowv
 
 Type `/` and the menu narrows as you type. `tab` completes, `↑`/`↓` picks, `↵` runs. `/connect` completes connection names, `/use` database names and `/describe` tables and views.
 
-`/import datagrip [folder]` `/connect <name>` `/add …` `/forget <name>` `/folder <connection> [folder]` `/password [connection]` `/disconnect` `/use <database>` `/open <file.sql>` `/console` `/new` `/format` `/search <text>` `/save <file.sql>` `/describe <table>` `/script <name>` `/find [text]` `/export <file>` `/filter [text]` `/copy [tsv|csv|json|insert]` `/limit [rows]` `/writes` `/tx [auto|manual]` `/commit` `/rollback` `/ask <question>` `/ai [connection] [level]` `/update` `/settings` `/stats [on|off]` `/plan [sql]` `/last` `/refresh` `/help` `/quit`
+`/import datagrip [folder]` `/connect <name>` `/add …` `/forget <name>` `/folder <connection> [folder]` `/password [connection]` `/disconnect` `/use <database>` `/open <file.sql>` `/console` `/new` `/format` `/search <text>` `/save <file.sql>` `/describe <table>` `/script <name>` `/find [text]` `/export <file>` `/filter [text]` `/copy [tsv|csv|json|insert]` `/limit [rows]` `/writes` `/tx [auto|manual]` `/commit` `/rollback` `/ask <question>` `/ai [connection] [level]` `/update` `/settings` `/stats [on|off]` `/plan [sql]` `/activity` `/kill <session>` `/last` `/refresh` `/help` `/quit`
 
 ## Claude
 
@@ -234,4 +241,3 @@ The logo and the Windows icon in `assets/` are drawn from the same pixels (`src/
 - Postgres and MySQL (the driver layer is one interface, so they'd be new adapters).
 - Running one query across a group of databases, with each row tagged by database.
 - Schema diff between two databases.
-- An Activity view: sessions, blocking, kill.

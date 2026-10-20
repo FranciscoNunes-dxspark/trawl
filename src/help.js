@@ -1,5 +1,5 @@
 export const HELP = `Anywhere
-  1-5 / tab        Explorer, Query, Results, History, Connections (shift+tab goes back)
+  1-6 / tab        Explorer, Query, Results, History, Connections, Activity (shift+tab goes back)
   / or :           Command prompt (slash commands, with completion)
   !                Run SQL typed at the prompt, e.g.  !SELECT COUNT(*) FROM dbo.Players
   r                Reload the schema
@@ -72,6 +72,12 @@ Connections (in folders; /import datagrip brings in DataGrip's data sources and 
   f                Move to a folder (/folder <connection> [folder])
   x                Forget (and its saved password)
 
+Activity (the server's sessions: blocking chains first, as a tree under the session at their head)
+  R                Read them again (opening the tab reads them too)
+  ↵                The session's details and SQL in full
+  x                Kill the session (/kill <session>): asks first; refused on a read-only connection until /writes
+  a                Show the idle sessions too, or only what's running, waiting or holding a transaction
+
 Settings (, or /settings: Trawl's own; a connection's are on Connections)
   ↵ or space       Change it: the row limit, the accent colour, checking for and installing updates
   esc / q          Close
@@ -97,7 +103,7 @@ Slash commands
   /import datagrip [folder]   /connect <name>   /add <name> <server> [database] [--user u] [--domain d] [--folder f] [--prod] [--commit auto|manual] [--trust-cert]
   /forget <name>   /folder <connection> [folder]   /password [connection]   /disconnect   /use <database>   /open <file.sql>   /console   /new   /format   /search <text>   /save <file.sql>
   /describe <table>   /script <name>   /find [text]
-  /export <file>   /filter [text]   /copy [format]   /limit [rows]   /writes   /tx [auto|manual]   /commit   /rollback   /ask <question>   /ai   /update   /settings   /stats [on|off]   /plan [sql]   /last   /refresh   /help   /quit
+  /export <file>   /filter [text]   /copy [format]   /limit [rows]   /writes   /tx [auto|manual]   /commit   /rollback   /ask <question>   /ai   /update   /settings   /stats [on|off]   /plan [sql]   /activity   /kill <session>   /last   /refresh   /help   /quit
 
 Viewer (describe, records, output, this help)
   j k  space  g G  Scroll         esc / q     Close`;

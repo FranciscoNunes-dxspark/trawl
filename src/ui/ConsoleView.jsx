@@ -9,11 +9,11 @@ import { theme } from '../theme.js';
 import { Panel, Row } from './parts.jsx';
 
 const COLORS = () => ({ keyword: theme.accent, string: theme.warn, comment: theme.dim, number: theme.number, variable: theme.routine });
-const KIND_COLORS = () => ({ join: theme.ok, keyword: theme.accent, function: theme.routine, procedure: theme.routine, table: theme.table, view: theme.view, schema: theme.schema, database: theme.schema });
+const KIND_COLORS = () => ({ join: theme.ok, expand: theme.ok, keyword: theme.accent, function: theme.routine, procedure: theme.routine, table: theme.table, view: theme.view, schema: theme.schema, database: theme.schema });
 const MENU_ROWS = 8;
 // Typing one of these keeps the suggestions coming; anything else (a comma, a bracket) closes them.
 // A space asks too, though only "ON " has anything to offer before a word is typed.
-const WORD_CHAR = /^[\w@#$.[ ]$/;
+const WORD_CHAR = /^[\w@#$.[ *]$/;
 
 /** Lays `add` over a row of segments from column `x`, padding the row when it's shorter. */
 function overlay(segs, x, add) {
@@ -138,7 +138,12 @@ export function ConsoleView({ editor, editing, ctx, width, height, active }) {
       if (key.end || (key.ctrl && input === 'e')) return set(ed.lineEnd(editor));
       if (key.ctrl && input === 'u') return set(ed.killLine(editor));
       if (key.ctrl && input === 'k') return set(ed.killLine(editor, { toEnd: true }));
-      if (key.tab) return set(ed.insert(editor, '  '));
+      if (key.tab) {
+        // Right after SELECT *, tab writes out the columns (once the FROM is there to say which).
+        const c = completeAt(editor, ctx.schema, { force: true });
+        if (c?.items[0]?.kind === 'expand') return set(accept(editor, c, c.items[0]));
+        return set(ed.insert(editor, '  '));
+      }
       if (key.ctrl || key.meta || !input) return;
       const typed = input.replace(/[\x00-\x08\x0b-\x0c\x0e-\x1f\x7f]/g, '');
       if (!typed) return;

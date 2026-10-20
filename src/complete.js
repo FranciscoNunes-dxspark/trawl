@@ -123,6 +123,32 @@ export function completeAt(editor, schema, { force = false } = {}) {
     if (text[i] !== '[' && text[i] !== '"') return null;
   }
   if (word.startsWith('@')) return null;
+  const statementAt = (src) => splitStatements(src).filter((s) => s.line <= row + 1 && row + 1 <= s.endLine);
+
+  // SELECT * (or p.*) just typed: its columns, written out, in place of the star.
+  const star = head.match(new RegExp(String.raw`(?:^|[^\w@#$\]"*])((?:${NAME}\.)?)\*$`));
+  if (star && schema) {
+    const starAt = col - star[1].length - 1;
+    const pre = m.slice(0, lineStartOffset(lines, row) + starAt);
+    const prev = pre.match(/([\w@#$]+|[^\s\u0001])[\s\u0001]*$/)?.[1].toUpperCase();
+    const clause = [...pre.matchAll(/\b(SELECT|FROM|WHERE|JOIN|ON|GROUP|ORDER|HAVING|SET|VALUES)\b/gi)].at(-1)?.[1].toUpperCase();
+    const listStart = prev === 'SELECT' || prev === 'DISTINCT' || prev === ',' || /\bTOP\s*\(?\s*\d+\s*\)?[\s\u0001]*$/i.test(pre);
+    if (clause !== 'SELECT' || !listStart) return { from: col, word, items: [] };
+    const scope = tablesIn(statementAt(text).map((s) => s.text).join('\n'), schema);
+    const owner = (t) => ident(t.alias ?? t.object.name);
+    let refs = scope;
+    if (star[1]) {
+      const q = bare(star[1].slice(0, -1)).toLowerCase();
+      refs = scope.filter((t) => t.alias?.toLowerCase() === q || (!t.alias && t.object?.name.toLowerCase() === q));
+    }
+    // A table Trawl doesn't know (a temp table, a CTE) would lose its columns, so then nothing.
+    if (!refs.length || refs.some((t) => !t.object)) return { from: col, word, items: [] };
+    const qualify = Boolean(star[1]) || refs.length > 1;
+    const names = refs.flatMap((t) => t.object.columns.map((c) => (qualify ? `${owner(t)}.${ident(c.name)}` : ident(c.name))));
+    if (!names.length) return { from: col, word, items: [] };
+    const insert = names.join(', ');
+    return { from: starAt, word: head.slice(starAt), items: [{ label: insert, insert, kind: 'expand', detail: `all ${names.length} columns` }] };
+  }
 
   const qualifier = head.slice(0, from).match(new RegExp(String.raw`((?:${NAME}\.)+)$`))?.[1] ?? '';
   const before = m.slice(0, at - qualifier.length);
@@ -134,7 +160,7 @@ export function completeAt(editor, schema, { force = false } = {}) {
   const bracket = word.startsWith('[');
   // A [name] still being typed would hide the rest of the statement, so close it to read the scope.
   const closed = bracket && line[col] !== ']' ? [...lines.slice(0, row), `${head}]${line.slice(col)}`, ...lines.slice(row + 1)].join('\n') : text;
-  const here = splitStatements(closed).filter((s) => s.line <= row + 1 && row + 1 <= s.endLine);
+  const here = statementAt(closed);
   const statement = here.map((s) => s.text).join('\n');
   const scope = schema ? tablesIn(statement, schema) : [];
   const joins = prev === 'ON' && !qualifier && schema ? joinConditions(text.slice(lineStartOffset(lines, (here[0]?.line ?? row + 1) - 1), at), schema) : [];

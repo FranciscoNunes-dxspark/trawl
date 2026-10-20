@@ -103,3 +103,19 @@ test('after ON: the join condition, from the foreign keys to the tables before i
   // No key between them: nothing until a word is typed.
   assert.deepEqual(offered('SELECT * FROM i18n.Translations t JOIN dbo.Clubs c ON |'), []);
 });
+
+test('after SELECT *: the columns written out, qualified when there are several tables', () => {
+  assert.deepEqual(offered('SELECT *| FROM dbo.Clubs'), ['Id, Name, Country, Founded, Active']);
+  assert.deepEqual(offered('SELECT TOP (5) *| FROM dbo.Clubs c'), ['Id, Name, Country, Founded, Active']);
+  assert.deepEqual(offered('SELECT c.*| FROM dbo.Clubs c JOIN dbo.Players p ON p.ClubId = c.Id'), ['c.Id, c.Name, c.Country, c.Founded, c.Active']);
+  const both = offered('SELECT *| FROM dbo.Clubs c JOIN dbo.vTopScorers t ON 1 = 1')[0];
+  assert.equal(both, 'c.Id, c.Name, c.Country, c.Founded, c.Active, t.Name, t.Goals');
+  const e = at('SELECT p.*| FROM dbo.Players p');
+  const c = completeAt(e, schema);
+  assert.equal(accept(e, c, c.items[0]).lines[0], 'SELECT p.Id, p.ClubId, p.Name, p.Position, p.Shirt, p.Goals FROM dbo.Players p');
+  // Not a multiplication, COUNT(*), a table Trawl doesn't know, or before there's a FROM.
+  assert.deepEqual(offered('SELECT Goals *| 2 FROM dbo.Players'), []);
+  assert.deepEqual(offered('SELECT COUNT(*| FROM dbo.Players'), []);
+  assert.deepEqual(offered('SELECT *| FROM #tmp'), []);
+  assert.deepEqual(offered('SELECT *|'), []);
+});

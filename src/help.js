@@ -66,6 +66,11 @@ History (every statement that ran, newest first; ◆ marks what Claude ran throu
   ↵                Run it again (the same checks apply)
   e                Copy it into the console to edit
 
+Fan-out (one read-only query on every connection in a folder)
+  /fanout <folder> [sql]   Runs it on each (and those in folders under it), four at a time; the rows come back
+                   as one result set led by connection and database; a failing one says why and the rest go on.
+                   Without sql: the console's selection, or its statement under the cursor. Writes are refused.
+
 Connections (in folders; /import datagrip brings in DataGrip's data sources and folders)
   ↵                Connect         n           New (/add …)
   p                Password: saved in the OS credential store (Trawl also asks when you connect)
@@ -103,7 +108,7 @@ Slash commands
   /import datagrip [folder]   /connect <name>   /add <name> <server> [database] [--user u] [--domain d] [--folder f] [--prod] [--commit auto|manual] [--trust-cert]
   /forget <name>   /folder <connection> [folder]   /password [connection]   /disconnect   /use <database>   /open <file.sql>   /console   /new   /format   /search <text>   /save <file.sql>
   /describe <table>   /script <name>   /find [text]
-  /export <file>   /filter [text]   /copy [format]   /limit [rows]   /writes   /tx [auto|manual]   /commit   /rollback   /ask <question>   /ai   /update   /settings   /stats [on|off]   /plan [sql]   /activity   /kill <session>   /last   /refresh   /help   /quit
+  /export <file>   /filter [text]   /copy [format]   /limit [rows]   /writes   /tx [auto|manual]   /commit   /rollback   /ask <question>   /ai   /update   /settings   /stats [on|off]   /plan [sql]   /fanout <folder> [sql]   /activity   /kill <session>   /last   /refresh   /help   /quit
 
 Viewer (describe, records, output, this help)
   j k  space  g G  Scroll         esc / q     Close`;

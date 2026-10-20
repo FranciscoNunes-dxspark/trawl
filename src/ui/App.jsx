@@ -665,6 +665,16 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
       setView('results');
     },
     currentSet: () => resultsRef.current?.sets[resultIndexRef.current] ?? null,
+    // A session of its own on another connection (fan-out, schema diff); the caller closes it.
+    openSession: (conn, opts = {}) => open(conn, { credentials, password: typed.current.get(conn.name), ...opts }),
+    // Results that didn't come from running SQL on this session: fan-out's merged rows, a comparison.
+    present: (res) => {
+      showResults({ id: nextId.current++, error: null, messages: [], ...res });
+      setResultIndex(0);
+      setView('results');
+    },
+    // A line in History for SQL that ran somewhere other than this session.
+    recordRun: (entry) => setConfig((c) => withRan(c, entry)),
     note,
     confirm,
     // A password field in place of the prompt: resolves { value, remember } or null.

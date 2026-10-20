@@ -80,6 +80,12 @@ Connections live in `~/.trawl/config.json` (or `TRAWL_HOME`), along with the pro
 
 The Connections tab groups connections by folder, as DataGrip does: each folder's heading, its connections under it, and the ones in no folder last. `--folder` puts a connection in one when adding it, and `f` in Connections or `/folder <connection> <folder>` moves it; `/folder <connection>` with no folder takes it out. Nested folders are written with `/`, like `Clubs/PROD`.
 
+### One query on a folder of databases
+
+`/fanout <folder> <sql>` runs one query on every connection in a folder (and in the folders under it), as when the same schema lives in a database per client: `/fanout Clubs SELECT COUNT(*) AS Players FROM dbo.Players`. Without the SQL, it runs the console's selection, or the statement under its cursor. Each connection gets a session of its own, four at a time, and the rows come back as one result set in Results, each led by a `connection` and a `database` column; columns are matched by name, so a database missing one shows `NULL` there. A connection that fails (a missing table, no saved password) says why under the grid, and the others carry on. `esc` stops them all.
+
+It only reads: anything that would change data or schema is refused, and what runs is rolled back afterwards, as `trawl mcp` does. Each connection's run is in History. A login that has never connected has no saved password yet: connect to it once in Trawl first.
+
 ### From DataGrip
 
 `/import datagrip` brings in your DataGrip data sources as connections. It reads the places DataGrip keeps them (its projects in `DataGripProjects`, its global data sources, and the per-project history newer versions use) and shows what it would add before adding anything. `/import datagrip <folder>` reads one project's `.idea` instead.
@@ -170,7 +176,7 @@ The list is read when the tab opens, and again on `R`. `↵` shows a session's d
 
 Type `/` and the menu narrows as you type. `tab` completes, `↑`/`↓` picks, `↵` runs. `/connect` completes connection names, `/use` database names and `/describe` tables and views.
 
-`/import datagrip [folder]` `/connect <name>` `/add …` `/forget <name>` `/folder <connection> [folder]` `/password [connection]` `/disconnect` `/use <database>` `/open <file.sql>` `/console` `/new` `/format` `/search <text>` `/save <file.sql>` `/describe <table>` `/script <name>` `/find [text]` `/export <file>` `/filter [text]` `/copy [tsv|csv|json|insert]` `/limit [rows]` `/writes` `/tx [auto|manual]` `/commit` `/rollback` `/ask <question>` `/ai [connection] [level]` `/update` `/settings` `/stats [on|off]` `/plan [sql]` `/activity` `/kill <session>` `/last` `/refresh` `/help` `/quit`
+`/import datagrip [folder]` `/connect <name>` `/add …` `/forget <name>` `/folder <connection> [folder]` `/password [connection]` `/disconnect` `/use <database>` `/open <file.sql>` `/console` `/new` `/format` `/search <text>` `/save <file.sql>` `/describe <table>` `/script <name>` `/find [text]` `/export <file>` `/filter [text]` `/copy [tsv|csv|json|insert]` `/limit [rows]` `/writes` `/tx [auto|manual]` `/commit` `/rollback` `/ask <question>` `/ai [connection] [level]` `/update` `/settings` `/stats [on|off]` `/plan [sql]` `/fanout <folder> [sql]` `/activity` `/kill <session>` `/last` `/refresh` `/help` `/quit`
 
 ## Claude
 
@@ -239,5 +245,4 @@ The logo and the Windows icon in `assets/` are drawn from the same pixels (`src/
 ## Not yet
 
 - Postgres and MySQL (the driver layer is one interface, so they'd be new adapters).
-- Running one query across a group of databases, with each row tagged by database.
 - Schema diff between two databases.

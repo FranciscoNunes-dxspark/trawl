@@ -1,4 +1,5 @@
 import * as a from './actions.js';
+import { folderNames } from './fanout.js';
 import { objectName } from './schema.js';
 
 // Slash commands. `args` in square brackets are optional, so picking the command runs it straight away.
@@ -35,6 +36,7 @@ export const COMMANDS = [
   { name: 'ai', args: '[connection] [off|schema|results]', desc: 'What Claude may see of a connection (schema only by default)', complete: 'connections', run: (ctx, s) => a.setAi(ctx, s) },
   { name: 'stats', args: '[on|off]', desc: 'Pages read per table and server time after each run (STATISTICS IO, TIME)', run: (ctx, s) => a.setStats(ctx, s.trim().toLowerCase()) },
   { name: 'plan', args: '[sql]', desc: 'The estimated plan of the statement under the cursor in the console (nothing runs)', run: (ctx, s) => a.showPlan(ctx, s) },
+  { name: 'fanout', args: '<folder> [sql]', desc: "One read-only query on every connection in a folder, the rows merged (the console's statement without sql)", complete: 'folders', run: (ctx, s) => a.fanOut(ctx, s) },
   { name: 'activity', desc: "The server's sessions: what runs, what waits, who blocks whom (6)", run: (ctx) => (ctx.setView('activity'), ctx.session && a.loadActivity(ctx)) },
   { name: 'kill', args: '<session>', desc: 'End another session (KILL), after asking; read-only connections refuse it', run: (ctx, s) => a.killSession(ctx, s) },
   { name: 'last', desc: 'Show the full output of the last run', run: (ctx) => ctx.showLast() },
@@ -54,6 +56,7 @@ export function findCommand(name) {
 
 function completions(kind, { config, schema }) {
   if (kind === 'connections') return config.connections.map((c) => c.name);
+  if (kind === 'folders') return folderNames(config.connections);
   if (!schema) return [];
   if (kind === 'databases') return schema.databases;
   if (kind === 'everything') return schema.objects.map(objectName);

@@ -78,3 +78,27 @@ test('/kill is refused on a read-only connection', async () => {
   assert.match(frame(), /blocked by 53/);
   app.unmount();
 });
+
+test('/fanout runs one query on every connection in a folder, rows tagged by connection, failures said', async () => {
+  const connections = [
+    ...DEMO_CONNECTIONS,
+    { name: 'club-a', demo: true, server: 'demo', database: 'ClubA', folder: 'Clubs' },
+    { name: 'club-b', demo: true, server: 'demo', database: 'ClubB', folder: 'Clubs/North' },
+    { name: 'club-gone', demo: true, server: 'demo', database: 'ClubZ', folder: 'Clubs' },
+  ];
+  const app = start('demo', {}, { connections });
+  await until(() => frame().includes('Clubs'), 'the explorer');
+  await command(app, '/fanout Clubs DELETE FROM dbo.Clubs WHERE Id = 1');
+  await until(() => frame().includes('/fanout only reads'), 'the write refused');
+  await command(app, '/fanout clubs SELECT TOP (3) * FROM dbo.Clubs');
+  await until(() => frame().includes('Club B FC') && frame().includes('Club A FC'), 'the merged rows');
+  assert.match(frame(), /connection │ database │\s+Id/);
+  assert.match(frame(), /club-a\s+│ ClubA\s+│\s+1 │ Club A FC/);
+  assert.match(frame(), /club-b\s+│ ClubB\s+│\s+1 │ Club B FC/);
+  assert.match(frame(), /2 of 3 connections answered/);
+  assert.match(frame(), /club-gone \(ClubZ\): Cannot open database "ClubZ"/);
+  // Each connection's run is in History.
+  app.stdin.write('4');
+  await until(() => frame().includes('club-b/ClubB'), 'History');
+  app.unmount();
+});

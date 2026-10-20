@@ -8,6 +8,7 @@ import { findDataSources, importPlan, planText } from './datagrip.js';
 import { formatSql } from './format.js';
 import { changesText, insertScript, saveScript, tsvText, withSaved } from './edit.js';
 import { AI_LABELS, AI_LEVELS, aiLevel, askPrompt, canSeeSchema, consoleText, parseAnswer } from './ai.js';
+import { folderNames, inFolder, inParallel, mergeResults, readOnlyScript } from './fanout.js';
 import { ACTIVITY_SQL, buildActivity, killSql } from './activity.js';
 import { createTableScript, definitionSql, describeObject, findObject, objectName } from './schema.js';
 import { classifyScript, countQuery, oneLine, selectTop, splitStatements, statementAt, toCsv, toJson, withoutLeadingComments } from './sql.js';
@@ -429,6 +430,72 @@ export async function killSession(ctx, id) {
   if (!ok) return;
   const r = await ctx.query(sql, { title: `KILL ${n}`, keep: true });
   if (r?.ok) await loadActivity(ctx);
+}
+
+/** The console's selection, or the statement under its cursor: what ctrl+r would run. */
+function consoleStatement(ctx) {
+  const e = ctx.console;
+  return ed.selectedText(e)?.text.trim() || statementAt(splitStatements(ed.toText(e)), e.row + 1)?.text || '';
+}
+
+// Connections a fan-out works on at once.
+const FAN_OUT = 4;
+
+/**
+ * /fanout <folder> [sql]: one read-only query on every connection in a folder (and the folders under
+ * it), each on a connection of its own, at most four at a time. The rows come back as one result set
+ * led by the connection and database; a connection that fails says why under it, and the rest go on.
+ * Without SQL, it's the console's selection or the statement under its cursor. Writes are refused, and
+ * what runs is rolled back, as trawl mcp does.
+ */
+export async function fanOut(ctx, rest) {
+  const m = String(rest ?? '').trim().match(/^(?:"([^"]+)"|(\S+))\s*([\s\S]*)$/);
+  if (!m) return ctx.prefill('/fanout ');
+  const folder = m[1] ?? m[2];
+  const conns = inFolder(ctx.config.connections, folder);
+  if (!conns.length) {
+    const known = folderNames(ctx.config.connections);
+    return ctx.note(`No connections in a folder called ${folder}.${known.length ? ` Folders: ${known.join(', ')}.` : ' /folder <connection> <folder> files one.'}`, 'error');
+  }
+  const text = m[3].trim() || consoleStatement(ctx);
+  if (!text) return ctx.note('Nothing to run: /fanout <folder> <sql>, or put the cursor on a statement in the console.', 'error');
+  const { write, danger } = classifyScript(text);
+  if (write) return ctx.note(`/fanout only reads, and this changes data or schema${danger.length ? ` (${danger.join('; ')})` : ''}. Run writes on one connection at a time.`, 'error');
+  const limit = ctx.config.limit;
+  const { sql, offset } = readOnlyScript(text);
+  let parts = null;
+  const started = Date.now();
+  const title = `${folder}/ (${conns.length}): ${oneLine(withoutLeadingComments(text))}`;
+  await ctx.task(
+    title,
+    async (signal) => {
+      parts = await inParallel(conns, FAN_OUT, async (conn) => {
+        let s = null;
+        try {
+          s = await ctx.openSession(conn, { signal });
+          const res = await s.run(sql, { signal, limit });
+          return { conn: conn.name, database: s.database, sets: res.sets };
+        } catch (e) {
+          if (signal.aborted) throw Object.assign(new Error('Cancelled'), { cancelled: true });
+          const why = e.needsPassword ? `needs its password: connect to it once in Trawl to save it` : `${e.line ? `Line ${Math.max(1, e.line - offset)}: ` : ''}${e.message}`;
+          return { conn: conn.name, database: s?.database ?? conn.database ?? null, error: why };
+        } finally {
+          if (s && !s.closed) {
+            if (await s.tranCount().catch(() => 0)) await s.run('ROLLBACK TRANSACTION;').catch(() => {});
+            s.close();
+          }
+        }
+      });
+      const merged = mergeResults(parts);
+      return [`${merged.sets.map((x) => `${x.rows.length} rows`).join(' · ') || 'no rows'} · ${merged.messages[0]}`, ...merged.messages.slice(1)];
+    },
+    { label: `Running on ${conns.length} connection${conns.length === 1 ? '' : 's'}` },
+  );
+  if (!parts) return;
+  const merged = mergeResults(parts);
+  const at = Date.now();
+  for (const p of parts) ctx.recordRun({ sql: text, conn: p.conn, database: p.database, at, ok: !p.error, summary: p.error ?? `${p.sets.map((x) => `${x.rows.length} rows`).join(' · ') || 'no rows'} (/fanout ${folder})` });
+  ctx.present({ title, sql: text, sets: merged.sets, messages: merged.messages, ms: Date.now() - started, edit: { reason: 'these rows come from several databases' }, conn: `${folder}/`, database: null });
 }
 
 export function setLimit(ctx, value) {

@@ -1,12 +1,33 @@
-import React, { useMemo, useRef } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 import * as a from '../actions.js';
+import { accept, completeAt } from '../complete.js';
 import * as ed from '../editor.js';
 import { highlight, oneLine, splitStatements, statementAt, withoutLeadingComments } from '../sql.js';
+import { fit } from '../text.js';
 import { theme } from '../theme.js';
 import { Panel, Row } from './parts.jsx';
 
 const COLORS = () => ({ keyword: theme.accent, string: theme.warn, comment: theme.dim, number: theme.number, variable: theme.routine });
+const KIND_COLORS = () => ({ keyword: theme.accent, function: theme.routine, procedure: theme.routine, table: theme.table, view: theme.view, schema: theme.schema, database: theme.schema });
+const MENU_ROWS = 8;
+// Typing one of these keeps the suggestions coming; anything else (a space, a comma) closes them.
+const WORD_CHAR = /^[\w@#$.[]$/;
+
+/** Lays `add` over a row of segments from column `x`, padding the row when it's shorter. */
+function overlay(segs, x, add) {
+  const cells = segs.flatMap((s) => [...s.text].map((ch) => ({ ...s, text: ch })));
+  while (cells.length < x) cells.push({ text: ' ' });
+  const top = add.flatMap((s) => [...s.text].map((ch) => ({ ...s, text: ch })));
+  cells.splice(x, top.length, ...top);
+  const out = [];
+  for (const c of cells) {
+    const last = out.at(-1);
+    if (last && last.color === c.color && last.bg === c.bg && last.bold === c.bold && !last.cursor && !c.cursor) last.text += c.text;
+    else out.push({ ...c });
+  }
+  return out;
+}
 
 /** The statement ctrl+r would run: the one the cursor is on, or the nearest above it. */
 export function currentStatement(editor) {
@@ -45,6 +66,15 @@ export function ConsoleView({ editor, editing, ctx, width, height, active }) {
 
   const set = (next) => ctx.setConsole(next);
 
+  // The suggestions under the cursor while typing: { index, force, moved } or null when closed.
+  // The list itself is worked out from the text each time, so it can't fall behind the typing.
+  const [menu, setMenuState] = useState(null);
+  const menuRef = useRef(null);
+  const setMenu = (next) => {
+    menuRef.current = next;
+    setMenuState(next);
+  };
+
   // Keys while not typing: start typing, run, and move between statements.
   useInput(
     (input, key) => {
@@ -67,10 +97,32 @@ export function ConsoleView({ editor, editing, ctx, width, height, active }) {
       if (!ctx.editorHasKeys()) return;
       // Edit the latest text, not this render's: fast typing outruns re-rendering.
       const editor = ctx.console;
+      const open = menuRef.current;
+      const completion = open && completeAt(editor, ctx.schema, { force: open.force });
+      const items = completion?.items ?? [];
+      if (items.length) {
+        // tab takes the suggestion; ↵ only once one was picked with ↑↓ (or asked for with ctrl+space),
+        // so ↵ after a word still starts a new line.
+        const pick = items[Math.min(open.index, items.length - 1)];
+        if (key.escape) return setMenu(null);
+        if (key.upArrow || key.downArrow) return setMenu({ ...open, index: (open.index + (key.upArrow ? items.length - 1 : 1)) % items.length, moved: true });
+        if (key.tab || (key.return && (open.moved || open.force))) {
+          set(accept(editor, completion, pick));
+          // Taking "dbo." goes straight on to that schema's tables.
+          return setMenu(pick.insert.endsWith('.') ? { index: 0 } : null);
+        }
+      }
+      // ctrl+space arrives as NUL, which Ink reports as ctrl+`.
+      if (key.ctrl && (input === '`' || input === ' ' || input === '@')) return setMenu({ index: 0, force: true });
+      // Any other key closes the list; typing a name (or backspacing over one) opens it again below.
+      if (open) setMenu(null);
       if (key.escape || (key.ctrl && input === 'c')) return ctx.setEditing(false);
       if (key.ctrl && input === 'r') return runConsole(ctx, editor);
       if (key.return) return set(ed.newline(editor));
-      if (key.backspace || key.delete) return set(ed.backspace(editor));
+      if (key.backspace || key.delete) {
+        set(ed.backspace(editor));
+        return open ? setMenu({ index: 0, force: open.force }) : undefined;
+      }
       if (key.leftArrow) return set(ed.move(editor, { cols: -1 }));
       if (key.rightArrow) return set(ed.move(editor, { cols: 1 }));
       if (key.upArrow) return set(ed.move(editor, { rows: -1 }));
@@ -84,10 +136,43 @@ export function ConsoleView({ editor, editing, ctx, width, height, active }) {
       if (key.tab) return set(ed.insert(editor, '  '));
       if (key.ctrl || key.meta || !input) return;
       const typed = input.replace(/[\x00-\x08\x0b-\x0c\x0e-\x1f\x7f]/g, '');
-      if (typed) set(ed.insert(editor, typed));
+      if (!typed) return;
+      set(ed.insert(editor, typed));
+      if (WORD_CHAR.test(typed)) setMenu({ index: 0 });
     },
     { isActive: active && editing },
   );
+
+  // The suggestions, drawn over the text under the word being typed (above it near the bottom).
+  const completion = editing && menu ? completeAt(editor, ctx.schema, { force: menu.force }) : null;
+  const items = completion?.items ?? [];
+  let popup = null;
+  if (items.length) {
+    const y = editor.row - top.current;
+    const room = Math.max(innerH - y - 1, y);
+    const shown = Math.min(MENU_ROWS, items.length, room);
+    const sel = Math.min(menu.index, items.length - 1);
+    const first = Math.max(0, Math.min(sel - shown + 1, items.length - shown));
+    const visible = items.slice(first, first + shown);
+    const labelW = Math.min(36, Math.max(...visible.map((i) => i.label.length)));
+    const detailW = Math.min(28, Math.max(...visible.map((i) => i.detail.length)));
+    const w = Math.min(textW, labelW + detailW + 4);
+    const kinds = KIND_COLORS();
+    popup = {
+      y: innerH - y - 1 >= shown ? y + 1 : y - shown,
+      x: gutterW + Math.max(0, Math.min(completion.from - left.current, textW - w)),
+      lines: visible.map((item, k) => {
+        const on = first + k === sel;
+        const bg = on ? theme.accent : theme.selBg;
+        const label = fit(item.label, Math.max(1, Math.min(labelW, w - 2)));
+        const detail = fit(item.detail, Math.max(0, w - 3 - label.length));
+        return [
+          { text: ` ${label} `, color: on ? theme.ink : kinds[item.kind], bg, bold: on },
+          { text: `${detail} `, color: on ? theme.ink : theme.dim, bg },
+        ];
+      }),
+    };
+  }
 
   const empty = editor.lines.length === 1 && !editor.lines[0];
   const rows = [];
@@ -113,23 +198,41 @@ export function ConsoleView({ editor, editing, ctx, width, height, active }) {
       }
     }
     if (editing && i === editor.row && editor.col >= x) segs.push({ text: ' ', cursor: true });
+    let all = [...gutter, ...segs];
+    const over = popup?.lines[i - top.current - popup.y];
+    if (over) all = overlay(all, popup.x, over);
     rows.push(
       <Text key={i} wrap="truncate">
-        {gutter.map((g, k) => (
-          <Text key={`g${k}`} color={g.color}>
-            {g.text}
-          </Text>
-        ))}
-        {segs.map((s, k) => (
-          <Text key={k} color={s.color} inverse={s.cursor}>
+        {all.map((s, k) => (
+          <Text key={k} color={s.color} backgroundColor={s.bg} bold={s.bold} inverse={s.cursor}>
             {s.text}
           </Text>
         ))}
       </Text>,
     );
   }
+  // A list under the last line runs on into the empty space below it.
+  if (popup) {
+    for (let k = rows.length; k < Math.min(innerH, popup.y + popup.lines.length); k++) {
+      const over = popup.lines[k - popup.y];
+      const all = over ? overlay([], popup.x, over) : [{ text: '' }];
+      rows.push(
+        <Text key={`m${k}`} wrap="truncate">
+          {all.map((s, j) => (
+            <Text key={j} color={s.color} backgroundColor={s.bg} bold={s.bold}>
+              {s.text}
+            </Text>
+          ))}
+        </Text>,
+      );
+    }
+  }
 
-  const hint = editing ? 'typing · ctrl+r run statement · esc stop' : `${editor.lines.length} lines · ↵ type · ctrl+r run · R run all`;
+  const hint = items.length
+    ? 'tab take it · ↑↓ pick · esc close'
+    : editing
+      ? 'typing · ctrl+space suggest · ctrl+r run statement · esc stop'
+      : `${editor.lines.length} lines · ↵ type · ctrl+r run · R run all`;
   return (
     <Panel title="Console" hint={hint} width={width} height={height} focused={active}>
       {empty && !editing ? (

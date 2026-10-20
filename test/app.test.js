@@ -366,6 +366,26 @@ test('shift+arrows select in the console, and ctrl+r runs just the selection', a
   app.unmount();
 });
 
+test('ctrl+f finds text in the console and n finds the next one', async () => {
+  mkdirSync(process.env.TRAWL_HOME, { recursive: true });
+  writeFileSync(join(process.env.TRAWL_HOME, 'console.sql'), 'SELECT 1\n\nSELECT Name FROM dbo.Clubs\n\nSELECT Name FROM dbo.Players');
+  const app = start();
+  await until(() => frame().includes('Clubs'), 'the explorer');
+  app.stdin.write('2');
+  await until(() => frame().includes('dbo.Players'), 'the console');
+  app.stdin.write('\x06'); // ctrl+f
+  await until(() => frame().includes('> /search'), 'the search prompt');
+  await type(app.stdin, 'name');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('ctrl+r runs just this') && /▌3 SELECT Name/.test(frame()), 'the first match');
+  app.stdin.write('n');
+  await until(() => /▌5 SELECT Name/.test(frame()), 'the next match');
+  await type(app.stdin, '/search nowhere');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('"nowhere" isn\'t in the console.'), 'no match');
+  app.unmount();
+});
+
 test('e in History puts the statement in the console to edit', async () => {
   const app = start();
   await until(() => frame().includes('Clubs'), 'the explorer');

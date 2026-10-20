@@ -365,6 +365,20 @@ export async function newConsole(ctx) {
   ctx.setEditing(true);
 }
 
+/**
+ * /search <text>, and n / N in the console: selects the next (or previous) place it appears.
+ * With no text, the last search again.
+ */
+export function searchConsole(ctx, text, { back = false } = {}) {
+  const query = text || ctx.lastSearch;
+  if (!query) return ctx.prefill('/search ');
+  ctx.lastSearch = query;
+  ctx.showConsole();
+  const next = ed.find(ctx.console, query, { back });
+  if (!next) return ctx.note(`"${query}" isn't in the console.`, 'error');
+  ctx.setConsole(next);
+}
+
 /** Writes the console to a .sql file. */
 export async function saveConsoleAs(ctx, path) {
   if (!path) return ctx.prefill('/save ');

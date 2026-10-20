@@ -15,6 +15,7 @@ export const COMMANDS = [
   { name: 'open', args: '<file.sql>', desc: 'Open a script in Query (reloads when you save it)', run: (ctx, s) => (s ? ctx.openFile(s) : ctx.prefill('/open ')) },
   { name: 'console', desc: 'Back to the console in Query (after /open)', run: (ctx) => ctx.showConsole() },
   { name: 'new', desc: 'Clear the console and start typing', run: (ctx) => a.newConsole(ctx) },
+  { name: 'search', args: '<text>', desc: 'Find text in the console (then n and N: next, previous)', run: (ctx, s) => a.searchConsole(ctx, s) },
   { name: 'save', args: '<file.sql>', desc: 'Write the console to a file', run: (ctx, s) => a.saveConsoleAs(ctx, s) },
   { name: 'describe', args: '<table>', desc: 'Columns, types and keys of a table or view', complete: 'objects', run: (ctx, s) => a.describe(ctx, s) },
   { name: 'find', args: '[text]', desc: 'Filter the Explorer by name (empty clears it)', run: (ctx, s) => ctx.find(s) },

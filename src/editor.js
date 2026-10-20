@@ -198,3 +198,34 @@ export function redo(history, current) {
   if (!next) return null;
   return { editor: next, history: { past: [...history.past, { ...stateOf(current), merge: false, at: 0 }], future: history.future.slice(0, -1) } };
 }
+
+/**
+ * The next place `query` appears (ignoring case) after the cursor, or before it with `back`,
+ * wrapping round the end: the editor with the match selected, or null when it's nowhere.
+ */
+export function find(ed, query, { back = false } = {}) {
+  const q = String(query ?? '').toLowerCase();
+  if (!q) return null;
+  const text = toText(ed).toLowerCase();
+  const starts = [0];
+  for (const l of ed.lines) starts.push(starts.at(-1) + l.length + 1);
+  const offsetOf = (p) => starts[p.row] + p.col;
+  const posOf = (off) => {
+    let row = 0;
+    while (row < ed.lines.length - 1 && starts[row + 1] <= off) row++;
+    return { row, col: off - starts[row] };
+  };
+  const sel = selection(ed);
+  const here = offsetOf(sel ? sel.start : ed);
+  let at;
+  if (back) {
+    at = here > 0 ? text.lastIndexOf(q, here - 1) : -1;
+    if (at < 0) at = text.lastIndexOf(q);
+  } else {
+    at = text.indexOf(q, sel ? here + 1 : here);
+    if (at < 0) at = text.indexOf(q);
+  }
+  if (at < 0) return null;
+  const end = posOf(at + q.length);
+  return { lines: ed.lines, row: end.row, col: end.col, anchor: posOf(at) };
+}

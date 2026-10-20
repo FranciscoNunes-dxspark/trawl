@@ -127,3 +127,14 @@ test('shift selects; typing or backspace replaces the selection, and moving lets
   const back = ed.extend({ lines: ['abcdef'], row: 0, col: 4 }, (x) => ed.wordMove(x, -1));
   assert.deepEqual(ed.selectedText(back), { text: 'abcd', row: 0 });
 });
+
+test('find selects the next match, wraps round, and goes back', () => {
+  const e = { lines: ['SELECT Name', 'FROM t WHERE name = 1'], row: 0, col: 0 };
+  let f = ed.find(e, 'NAME');
+  assert.deepEqual(ed.selectedText(f), { text: 'Name', row: 0 });
+  f = ed.find(f, 'name');
+  assert.deepEqual([f.anchor, f.row, f.col], [{ row: 1, col: 13 }, 1, 17]);
+  assert.deepEqual(ed.find(f, 'name').anchor, { row: 0, col: 7 });
+  assert.deepEqual(ed.find(e, 'name', { back: true }).anchor, { row: 1, col: 13 });
+  assert.equal(ed.find(e, 'nope'), null);
+});

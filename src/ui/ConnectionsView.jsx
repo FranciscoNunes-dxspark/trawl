@@ -5,7 +5,7 @@ import { AI_LABELS, aiLevel } from '../ai.js';
 import { commitMode, connectionRows, describeConn, isReadOnly } from '../connections.js';
 import { theme } from '../theme.js';
 import { fit } from '../text.js';
-import { useListNav } from './hooks.js';
+import { useListNav, useMouse } from './hooks.js';
 import { Lines, Panel, Row } from './parts.jsx';
 
 const AUTH = { 'azure-cli': 'az login', sql: 'SQL login', ntlm: 'Windows (NTLM)' };
@@ -23,19 +23,23 @@ export function ConnectionsView({ connections, current, ctx, width, height, acti
   const nameW = Math.min(24, Math.max(6, ...connections.map((x) => x.name.length)));
   const store = ctx.credentials.name;
 
-  useInput(
-    (input, key) => {
-      if (!ctx.viewHasKeys()) return;
-      if (nav.handle(input, key)) return;
-      if (input === 'n') return ctx.prefill('/add ');
-      if (!c) return;
-      if (key.return) a.connect(ctx, c.name);
-      else if (input === 'x') a.forgetConnection(ctx, c.name);
-      else if (input === 'p') a.setPassword(ctx, c.name);
-      else if (input === 'f') ctx.prefill(`/folder ${c.name} ${c.folder ?? ''}`);
-    },
-    { isActive: active },
-  );
+  const keys = (input, key) => {
+    if (!ctx.viewHasKeys()) return;
+    if (nav.handle(input, key)) return;
+    if (input === 'n') return ctx.prefill('/add ');
+    if (!c) return;
+    if (key.return) a.connect(ctx, c.name);
+    else if (input === 'x') a.forgetConnection(ctx, c.name);
+    else if (input === 'p') a.setPassword(ctx, c.name);
+    else if (input === 'f') ctx.prefill(`/folder ${c.name} ${c.folder ?? ''}`);
+  };
+  useInput(keys, { isActive: active });
+  useMouse(ctx, (e) => {
+    if (e.x >= listW) return;
+    if (e.wheel) return nav.scrollBy(e.wheel * 3);
+    // Rows start under the panel's top border. A double-click connects, as ↵ does.
+    if (nav.pick(e.y - 1) && e.double) keys('', { return: true });
+  });
 
   const details = c
     ? [

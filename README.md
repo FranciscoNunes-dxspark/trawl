@@ -74,7 +74,7 @@ Save connections with `/add`:
 
 Azure SQL gets a fresh token from the Azure CLI each time it connects, so there's no password to keep. A SQL or Windows login asks for its password the first time you connect, shown as `*`. With "Keep it" ticked (`tab` changes it), a password that signs in is saved in the operating system's credential store: **Windows Credential Manager** (as `Trawl:<connection>`), the macOS Keychain, or the Secret Service keyring on Linux (through `secret-tool`). It is never written to Trawl's own files. A saved password the server turns down is asked for again. `p` in Connections, or `/password [connection]`, sets a new one ahead of time; leaving it empty removes the saved one, and forgetting a connection removes its password too. If you'd rather keep a password in an environment variable, `/add … --password-env <VAR>` names it, and the variable comes first when it's set.
 
-Connections live in `~/.trawl/config.json` (or `TRAWL_HOME`), along with the prompt history, the run history and what Settings (`,`) changes: the row limit, the accent colour and updates.
+Connections live in `~/.trawl/config.json` (or `TRAWL_HOME`), along with the prompt history, the run history and what Settings (`,`) changes: the row limit, the accent colour, the mouse and updates.
 
 ### Folders
 
@@ -89,7 +89,7 @@ The Connections tab groups connections by folder, as DataGrip does: each folder'
 - Data sources in a DataGrip folder called PROD (or with prod in the name) become production connections, read-only until `/writes`; DataGrip's own read-only flag and manual commit (Tx: Manual) carry over too.
 - Importing again only adds what's new: one Trawl already has (same server, database and login) is skipped. If that one is in no folder yet, it goes into its DataGrip folder, so connections imported before Trawl had folders get theirs by running `/import datagrip` again.
 
-`/use <database>` switches database by reconnecting. That works on Azure SQL Database too, where `USE` doesn't.
+The Explorer shows the server as a tree, as SSMS's Object Explorer does: every database you can open on it, the one you're in opened up to its schemas, tables, views and routines, and the server's own (`master`, `msdb`, …) last. `↵` on another database switches to it, as `/use <database>` does: by reconnecting, which works on Azure SQL Database too, where `USE` doesn't (and there the server lists only `master` and your database). With a transaction open, it asks first.
 
 ## Use
 
@@ -99,15 +99,17 @@ Press `?` inside for every shortcut. The essentials:
 | --- | --- |
 | Anywhere | `1`–`5` or `tab` switch views · `/` commands · `!` SQL · `r` reload the schema · `,` settings · `esc` cancel the running query · `q` quit |
 | Lists | `j`/`k` or arrows · `g`/`G` top/bottom · `ctrl+d`/`ctrl+u` page |
-| Explorer | `↵` first rows · `d` describe · `s` start a query on it in the console · `c` its CREATE script, into the console · `/find <text>` filter |
+| Explorer | `↵` first rows (on a database: switch to it) · `d` describe · `s` start a query on it in the console · `c` its CREATE script, into the console · `/find <text>` filter |
 | Query, the console | `↵` or `i` start typing · `esc` stop · `ctrl+r` run the selection, or the statement under the cursor · `R` run it all · `f` format · `p` plan · `ctrl+f` find, then `n`/`N` · `ctrl+z`/`ctrl+y` undo/redo · while typing, `tab` takes a suggestion and `ctrl+n` asks for them |
 | Query, a file | `↵` run the statement under the cursor · `v` select several · `R` run the whole file · `e` edit in the console |
 | Results | `h`/`l` columns · `[`/`]` result sets · `o` sort by the column · `f` filter · `y`/`Y` copy the cell/row · `↵` the row as a record · `e` edit · `n` NULL · `d` delete · `u` undo · `s` save · `x` export |
 | History | `↵` run again · `e` edit in the console · `◆` marks what Claude ran |
 | Connections | `↵` connect · `n` new · `p` password · `f` folder · `x` forget |
-| Settings (`,`) | `↵` or space changes the row limit, the accent colour, and whether Trawl checks for and installs updates · `esc` closes |
+| Settings (`,`) | `↵` or space changes the row limit, the accent colour, the mouse, and whether Trawl checks for and installs updates · `esc` closes |
 
 One-liners can also go straight in the prompt: SQL there runs with `!`, or without it when it starts with a SQL keyword (`select …`, `exec …`).
+
+The mouse works too: click a tab, a row or the prompt, and double-click a row to do what `↵` does: connect, switch database, show a table's first rows, a result row as a record, or change a setting. Where `↵` runs a statement (History, a file's statements), a click only picks it. In Results a click picks the cell. In the console a click puts the cursor on the character under it, a double-click selects the word and a triple-click the line, a click in the gutter selects the statement on that line, and a click on a suggestion takes it, as `tab` does; dragging there selects the SQL itself (so `ctrl+r` runs just that, and typing replaces it), and copies it too. The wheel scrolls the list, grid or text under the pointer and leaves the cursor where it was, even out of sight, until the next key moves it from there and brings it back into view; `shift`+wheel scrolls the Results grid sideways. Drag to select text as you would in the terminal: it's copied when you let go (to the system clipboard, as `y` copies) and stays highlighted until the next key or click. While a question is open, only keys answer it. With **Mouse** turned off in Settings, Trawl doesn't ask the terminal for the mouse, which then selects text itself again. On Windows the downloaded Trawl handles the mouse itself; run from a checkout, it needs Node 22.17 or later.
 
 ### The console
 

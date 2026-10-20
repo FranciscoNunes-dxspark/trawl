@@ -4,7 +4,7 @@ import * as a from '../actions.js';
 import { oneLine } from '../sql.js';
 import { theme } from '../theme.js';
 import { fit, relTime } from '../text.js';
-import { useListNav } from './hooks.js';
+import { useListNav, useMouse } from './hooks.js';
 import { Lines, Panel, Row } from './parts.jsx';
 
 export function HistoryView({ ran, ctx, width, height, active }) {
@@ -26,6 +26,12 @@ export function HistoryView({ ran, ctx, width, height, active }) {
     },
     { isActive: active },
   );
+  // ↵ runs the statement again, which a click shouldn't: clicks only pick.
+  useMouse(ctx, (e) => {
+    if (e.x >= listW) return;
+    if (e.wheel) return nav.scrollBy(e.wheel * 3);
+    nav.pick(e.y - 1);
+  });
 
   return (
     <Box width={width} height={height}>

@@ -42,6 +42,37 @@ test('moving keeps the column across short lines', () => {
   assert.deepEqual([e.row, e.col], [1, 0]);
 });
 
+test('a click puts the cursor on the character drawn under it', () => {
+  const e = { lines: ['SELECT 1', '日本 x', 'abcdefgh'], row: 0, col: 0, anchor: { row: 0, col: 3 } };
+  const at = (row, x, opts) => {
+    const r = ed.clickAt(e, row, x, opts);
+    return [r.row, r.col, r.anchor];
+  };
+  assert.deepEqual(at(0, 7), [0, 7, undefined], 'the selection goes');
+  assert.deepEqual(at(0, 30), [0, 8, undefined], 'past the end: the end');
+  // Wide characters take two cells: either half lands on the character.
+  assert.deepEqual(at(1, 1), [1, 0, undefined]);
+  assert.deepEqual(at(1, 2), [1, 1, undefined]);
+  assert.deepEqual(at(1, 5), [1, 3, undefined]);
+  // Scrolled sideways, the line is drawn from `left`; the gutter (x below 0) is the first one shown.
+  assert.deepEqual(at(2, 1, { left: 4 }), [2, 5, undefined]);
+  assert.deepEqual(at(2, -2, { left: 4 }), [2, 4, undefined]);
+  assert.deepEqual(at(9, 0), [2, 8, undefined], 'below the text: its end');
+});
+
+test('a double-click selects the word, the spaces or the one character under it; a triple-click the line', () => {
+  const e = { lines: ['SELECT p.Name,  @Season FROM t', ''], row: 0, col: 0 };
+  const word = (col) => ed.selectedText(ed.selectWord({ ...e, col }))?.text;
+  assert.equal(word(2), 'SELECT');
+  assert.equal(word(9), 'Name');
+  assert.equal(word(8), '.');
+  assert.equal(word(14), '  ');
+  assert.equal(word(18), '@Season');
+  assert.equal(word(99), 't', 'past the end: the last word');
+  assert.equal(ed.selection(ed.selectWord({ ...e, row: 1 })), null, 'nothing on an empty line');
+  assert.equal(ed.selectedText(ed.selectLine({ ...e, col: 5 })).text, 'SELECT p.Name,  @Season FROM t');
+});
+
 test('home goes to the indent, then to column 0; ctrl+u and ctrl+k cut', () => {
   let e = { lines: ['  SELECT'], row: 0, col: 6 };
   e = ed.lineStart(e);

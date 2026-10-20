@@ -3,6 +3,7 @@
 // macOS, wl-copy, xclip or xsel on Linux. Over SSH, or when none of them works, it asks the
 // terminal instead (OSC 52), which Windows Terminal, iTerm2, kitty, WezTerm and tmux understand.
 import { execFile } from 'node:child_process';
+import { osc52 } from './selection.js';
 
 function run(file, args, input) {
   return new Promise((resolve, reject) => {
@@ -23,7 +24,7 @@ function systemCopy(text) {
 
 /** Copies `text`: 'system' when the system's clipboard took it, 'terminal' when it went by OSC 52. */
 export async function copyToClipboard(text, { write = (s) => process.stdout.write(s) } = {}) {
-  const terminal = () => (write(`\x1b]52;c;${Buffer.from(text, 'utf8').toString('base64')}\x07`), 'terminal');
+  const terminal = () => (write(osc52(text)), 'terminal');
   // Over SSH the system clipboard is the far machine's: only the terminal can reach yours.
   if (process.env.SSH_TTY || process.env.SSH_CONNECTION) return terminal();
   try {

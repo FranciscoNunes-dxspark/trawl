@@ -1,13 +1,14 @@
 import React, { useMemo, useState } from 'react';
 import { useInput } from 'ink';
 import { theme } from '../theme.js';
+import { useMouse } from './hooks.js';
 import { Panel, Row } from './parts.jsx';
 
 /**
  * Full-height scrollable text: /describe, a record, the last output, help. `pageOnly`: a question
  * below has the other keys, so only page up/down scroll this.
  */
-export function TextViewer({ title, text, loading, width, height, active, pageOnly = false, onClose }) {
+export function TextViewer({ title, text, loading, ctx, width, height, active, pageOnly = false, onClose }) {
   const lines = useMemo(() => (text ?? '').replace(/\n$/, '').split('\n'), [text]);
   const [offset, setOffset] = useState(0);
   const innerH = height - 2;
@@ -27,6 +28,7 @@ export function TextViewer({ title, text, loading, width, height, active, pageOn
     },
     { isActive: active },
   );
+  useMouse(ctx, (e) => e.wheel && setOffset((o) => Math.max(0, Math.min(max, o + e.wheel * 3))));
 
   const pos = lines.length > innerH ? `${Math.min(lines.length, offset + innerH)}/${lines.length}` : '';
   return (

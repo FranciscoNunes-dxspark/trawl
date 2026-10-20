@@ -55,6 +55,22 @@ test('connects to the demo and lists its tables', async () => {
   app.unmount();
 });
 
+test("the Explorer lists the server's databases, the current one opened up, and ↵ on another switches to it", async () => {
+  const app = start();
+  await until(() => frame().includes('Translations'), 'the explorer');
+  // The cursor starts on the first table; the server's own databases come last.
+  assert.match(frame(), /─ demo ─.*6 objects · 3 databases/);
+  assert.match(frame(), /▾ ClubA +current[\s\S]*❯ T Clubs[\s\S]*Translations[\s\S]*▸ ClubB[\s\S]*▸ master/);
+  app.stdin.write('G');
+  await until(() => /❯ master/.test(frame()) && frame().includes('↵ switch to it'), 'the cursor on master');
+  app.stdin.write('k');
+  await until(() => /❯ ClubB/.test(frame()), 'the cursor on ClubB');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('demo/ClubB') && /▾ ClubB +current/.test(frame()) && /❯ T Clubs/.test(frame()), 'ClubB, opened up');
+  assert.match(frame(), /▸ ClubA/);
+  app.unmount();
+});
+
 test('↵ on a table shows its first rows', async () => {
   const app = start();
   await until(() => frame().includes('Clubs'), 'the explorer');
@@ -232,6 +248,12 @@ test('Settings, an overlay, changes the row limit, the accent and updates, and k
   await until(() => frame().includes('Accent colour') && frame().includes('↵ next colour'), 'the accent row');
   app.stdin.write(' ');
   await until(() => /Accent colour\s+██ teal/.test(frame()), 'teal');
+  // The mouse, which this test terminal can't report.
+  app.stdin.write('j');
+  await until(() => frame().includes('Drag to select text'), 'the mouse row');
+  assert.match(frame(), /Mouse\s+on\s+\(this terminal can't/);
+  app.stdin.write(KEYS.enter);
+  await until(() => /Mouse\s+off/.test(frame()), 'the mouse off');
   // Updates: installing off first, then checking.
   app.stdin.write('j');
   app.stdin.write('j');
@@ -245,6 +267,7 @@ test('Settings, an overlay, changes the row limit, the accent and updates, and k
   const config = JSON.parse(readFileSync(join(process.env.TRAWL_HOME, 'config.json'), 'utf8'));
   assert.equal(config.limit, 200);
   assert.equal(config.accent, '#5fd7d7');
+  assert.equal(config.mouse, false);
   assert.equal(config.autoUpdate, false);
   assert.equal(config.checkUpdates, false);
   // q closes it, and only it: Trawl keeps running.

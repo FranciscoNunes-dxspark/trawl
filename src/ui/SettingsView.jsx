@@ -5,7 +5,7 @@ import { ACCENTS, setAccent, theme } from '../theme.js';
 import { relTime, wrap } from '../text.js';
 import { checksDisabled } from '../update.js';
 import { VERSION } from '../version.js';
-import { useListNav } from './hooks.js';
+import { useListNav, useMouse } from './hooks.js';
 import { Lines, Panel, Row } from './parts.jsx';
 
 const LABEL_W = 20;
@@ -56,6 +56,17 @@ export function SettingsView({ config, ctx, updates, update, width, height, acti
       },
     },
     {
+      label: 'Mouse',
+      value: onOff(config.mouse !== false, ctx.mouseAvailable ? '' : "(this terminal can't report it)"),
+      hint: '↵ turn on or off',
+      about: [
+        'Click a tab, a row or the prompt, double-click for what ↵ does (but never to run a statement), and scroll with the wheel; shift+wheel scrolls the columns in Results. In the console a click puts the cursor there, and a double or triple click selects the word or the line.',
+        'Drag to select text: it is copied when you let go (in the console, the SQL itself is selected). Off, Trawl leaves clicks and selecting to the terminal.',
+        ...(ctx.mouseAvailable ? [] : ['This terminal can’t report the mouse to Trawl: on Windows, run the downloaded Trawl, or Node 22.17 or later.']),
+      ],
+      change: () => toggle('mouse'),
+    },
+    {
       label: 'Check for updates',
       value: onOff(!checksOff, envOff ? '($TRAWL_NO_UPDATE_CHECK is set)' : updates.check ? '' : '(not in a checkout)'),
       hint: '↵ turn on or off',
@@ -88,14 +99,17 @@ export function SettingsView({ config, ctx, updates, update, width, height, acti
   const nav = useListNav(rows.length, innerH);
   const row = rows[nav.index];
 
-  useInput(
-    (input, key) => {
-      if (key.escape || input === 'q') return onClose();
-      if (nav.handle(input, key)) return;
-      if (key.return || input === ' ') row.change();
-    },
-    { isActive: active },
-  );
+  const keys = (input, key) => {
+    if (key.escape || input === 'q') return onClose();
+    if (nav.handle(input, key)) return;
+    if (key.return || input === ' ') row.change();
+  };
+  useInput(keys, { isActive: active });
+  useMouse(ctx, (e) => {
+    if (e.x >= listW) return;
+    if (e.wheel) return nav.scrollBy(e.wheel * 3);
+    if (nav.pick(e.y - 1) && e.double) keys('', { return: true });
+  });
 
   const textW = sideW - 4;
   const about = [

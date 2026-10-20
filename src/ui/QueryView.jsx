@@ -4,7 +4,7 @@ import * as a from '../actions.js';
 import { oneLine, withoutLeadingComments } from '../sql.js';
 import { theme } from '../theme.js';
 import { fit } from '../text.js';
-import { useListNav } from './hooks.js';
+import { useListNav, useMouse } from './hooks.js';
 import { Lines, Panel, Row } from './parts.jsx';
 
 /** The lines of `file` from the first selected statement to the last, GO lines included. */
@@ -43,6 +43,12 @@ export function QueryView({ file, ctx, width, height, active }) {
     },
     { isActive: active },
   );
+  // ↵ runs the statement, which a click shouldn't: clicks only pick.
+  useMouse(ctx, (e) => {
+    if (e.x >= listW) return;
+    if (e.wheel) return nav.scrollBy(e.wheel * 3);
+    nav.pick(e.y - 1);
+  });
 
   if (!file) {
     return (

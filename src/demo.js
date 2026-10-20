@@ -30,14 +30,35 @@ function makeDatabase(club, { extraLanguage = true } = {}) {
       { schema: 'dbo', name: 'Players', kind: 'table', columns: [col('Id', 'int', { pk: true, identity: true }), col('ClubId', 'int'), col('Name', 'nvarchar(100)'), col('Position', 'char(2)'), col('Shirt', 'tinyint', { nullable: true }), col('Goals', 'int')], rows: players },
       { schema: 'dbo', name: 'Matches', kind: 'table', columns: [col('Id', 'int', { pk: true, identity: true }), col('HomeId', 'int'), col('AwayId', 'int'), col('PlayedOn', 'date'), col('HomeGoals', 'tinyint'), col('AwayGoals', 'tinyint')], rows: matches },
       { schema: 'i18n', name: 'Translations', kind: 'table', columns: [col('ResourceKey', 'nvarchar(200)', { pk: true }), col('Value', 'nvarchar(max)'), col('Culture', 'nvarchar(10)', { pk: true }), col('ResourceSet', 'nvarchar(50)')], rows: translations },
-      { schema: 'dbo', name: 'vTopScorers', kind: 'view', columns: [col('Name', 'nvarchar(100)'), col('Goals', 'int')], rows: players.filter((p) => p[5] > 0).map((p) => [p[2], p[5]]) },
-      { schema: 'dbo', name: 'usp_RecalculateTable', kind: 'procedure', columns: [], rows: [] },
+      {
+        schema: 'dbo',
+        name: 'vTopScorers',
+        kind: 'view',
+        columns: [col('Name', 'nvarchar(100)'), col('Goals', 'int')],
+        rows: players.filter((p) => p[5] > 0).map((p) => [p[2], p[5]]),
+        definition: 'CREATE VIEW dbo.vTopScorers AS\nSELECT Name, Goals\nFROM dbo.Players\nWHERE Goals > 0;',
+      },
+      {
+        schema: 'dbo',
+        name: 'usp_RecalculateTable',
+        kind: 'procedure',
+        columns: [],
+        rows: [],
+        params: [col('@Season', 'int'), col('@DryRun', 'bit')],
+        definition: 'CREATE PROCEDURE dbo.usp_RecalculateTable @Season int, @DryRun bit = 0 AS\nBEGIN\n  SET NOCOUNT ON;\n  -- The demo has no body to run.\n  SELECT @Season AS Season, @DryRun AS DryRun;\nEND',
+      },
+    ],
+    // [name, table, column, referenced table, its column]
+    foreignKeys: [
+      ['FK_Players_Clubs', 'Players', 'ClubId', 'Clubs', 'Id'],
+      ['FK_Matches_Home', 'Matches', 'HomeId', 'Clubs', 'Id'],
+      ['FK_Matches_Away', 'Matches', 'AwayId', 'Clubs', 'Id'],
     ],
   };
 }
 
 // ClubB is one language short, so comparing the two shows a difference.
-const DATABASES = { master: { tables: [] }, ClubA: makeDatabase('Club A'), ClubB: makeDatabase('Club B', { extraLanguage: false }) };
+const DATABASES = { master: { tables: [], foreignKeys: [] }, ClubA: makeDatabase('Club A'), ClubB: makeDatabase('Club B', { extraLanguage: false }) };
 
 const set = (names, rows, types = []) => ({ columns: names.map((name, i) => ({ name, type: types[i] ?? '' })), rows, truncated: false });
 
@@ -58,6 +79,14 @@ function schemaSets(dbName) {
           return [t.schema, t.name, c.name, type, max, 0, 0, c.nullable, c.identity, c.pk ? 1 : 0];
         }),
       ),
+    ),
+    set(
+      ['name', 'schema', 'object', 'column', 'ref_schema', 'ref_object', 'ref_column'],
+      db.foreignKeys.map(([name, table, column, refTable, refColumn]) => [name, 'dbo', table, column, 'dbo', refTable, refColumn]),
+    ),
+    set(
+      ['schema', 'object', 'name', 'type', 'max_length', 'precision', 'scale', 'is_output'],
+      db.tables.flatMap((t) => (t.params ?? []).map((p) => [t.schema, t.name, p.name, p.type, 0, 0, 0, false])),
     ),
   ];
 }
@@ -113,6 +142,16 @@ async function runStatement(session, text, line, state, { signal, limit = 500 })
   };
   const s = withoutLeadingComments(text).replace(/;\s*$/, '').trim();
   let m;
+  // With SHOWPLAN on, a server explains statements instead of running them.
+  if ((m = s.match(/^SET\s+SHOWPLAN_TEXT\s+(ON|OFF)$/i))) return void (session.showplan = m[1].toUpperCase() === 'ON');
+  if (session.showplan) {
+    const t = /\b(?:FROM|INTO|UPDATE|TABLE|JOIN)\s+((?:\[[^\]]+\]|[\w#]+)(?:\.(?:\[[^\]]+\]|\w+))?)/i.exec(s);
+    const obj = t && findObject({ objects: db.tables }, t[1]);
+    state.sets.push(set(['StmtText'], [[s]]));
+    state.sets.push(set(['StmtText'], [[obj ? `  |--Clustered Index Scan(OBJECT:([${session.database}].[${obj.schema}].[${obj.name}].[PK_${obj.name}]))` : '  |--Constant Scan']]));
+    return;
+  }
+  if ((m = s.match(/^SET\s+STATISTICS\s+(IO|TIME)\s+(ON|OFF)$/i))) return void (session[`stats${m[1].toUpperCase()}`] = m[2].toUpperCase() === 'ON');
   if (/^SELECT\s+@@TRANCOUNT\b/i.test(s)) state.sets.push(set(['(No column name)'], [[session.tran]], ['IntN']));
   else if (/^BEGIN\s+TRAN(SACTION)?\b/i.test(s)) session.tran++;
   else if (/^COMMIT\b/i.test(s)) {
@@ -130,12 +169,17 @@ async function runStatement(session, text, line, state, { signal, limit = 500 })
   else if (/^PRINT\s+N?'/i.test(s)) state.messages.push(s.replace(/^PRINT\s+N?'(.*)'$/is, '$1'));
   else if (/^(SELECT|WITH)\b/i.test(s)) {
     const t = target(s);
-    if (t) {
+    if (t && /^SELECT\s+COUNT(_BIG)?\s*\(\s*\*\s*\)/i.test(s)) {
+      // Like its writes, the demo takes a WHERE to match one row.
+      state.sets.push(set(['(No column name)'], [[/\bWHERE\b/i.test(s) ? 1 : t.rows.length]], ['IntN']));
+    } else if (t) {
       const top = s.match(/\bTOP\s*\(?\s*(\d+)/i);
       const rows = t.rows.slice(0, top ? Number(top[1]) : undefined);
       const out = set(t.columns.map((c) => c.name), rows.slice(0, limit), t.columns.map((c) => c.type));
       if (rows.length > limit) (out.truncated = true), (state.stopped = true);
       state.sets.push(out);
+      if (session.statsIO) state.messages.push(`Table '${t.name}'. Scan count 1, logical reads ${Math.ceil(t.rows.length / 8) + 1}, physical reads 0, page server reads 0, read-ahead reads 0.`);
+      if (session.statsTIME) state.messages.push(' SQL Server Execution Times:\n   CPU time = 0 ms,  elapsed time = 1 ms.');
       if (!/^SELECT\s+(TOP\s*\(?\s*\d+\s*\)?\s*)?\*\s+FROM\s+\S+$/i.test(s)) state.messages.push('The demo has no SQL engine: this shows the table as it is, without WHERE, JOIN or ORDER BY.');
     } else {
       const items = splitList(s.replace(/^SELECT\s+/i, '')).map((x) => selectItem(x, session));
@@ -170,6 +214,11 @@ export function demoSession(conn, { database } = {}) {
         script,
         async (batch, line, state) => {
           if (batch.startsWith('-- trawl:schema')) return void state.sets.push(...schemaSets(session.database));
+          if (batch.startsWith('-- trawl:definition')) {
+            const name = batch.match(/OBJECT_ID\(N'(.*)'\)\)/)[1].replace(/''/g, "'");
+            const t = findObject({ objects: DATABASES[session.database].tables }, name);
+            return void state.sets.push(set(['definition'], [[t?.definition ?? null]]));
+          }
           // Saved edits (edit.js) come as one TRY/CATCH batch, which the demo has no engine for: it
           // counts the rows, as for other writes. Its own transaction opens and closes inside it.
           const edit = batch.indexOf('-- trawl:edit');

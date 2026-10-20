@@ -99,10 +99,10 @@ Press `?` inside for every shortcut. The essentials:
 | --- | --- |
 | Anywhere | `1`–`5` or `tab` switch views · `/` commands · `!` SQL · `r` reload the schema · `,` settings · `esc` cancel the running query · `q` quit |
 | Lists | `j`/`k` or arrows · `g`/`G` top/bottom · `ctrl+d`/`ctrl+u` page |
-| Explorer | `↵` first rows · `d` describe · `s` start a query on it in the console · `/find <text>` filter |
-| Query, the console | `↵` or `i` start typing · `esc` stop · `ctrl+r` run the statement under the cursor · `R` run it all · while typing, `tab` takes a suggestion and `ctrl+space` asks for them |
+| Explorer | `↵` first rows · `d` describe · `s` start a query on it in the console · `c` its CREATE script, into the console · `/find <text>` filter |
+| Query, the console | `↵` or `i` start typing · `esc` stop · `ctrl+r` run the selection, or the statement under the cursor · `R` run it all · `f` format · `p` plan · `ctrl+f` find, then `n`/`N` · `ctrl+z`/`ctrl+y` undo/redo · while typing, `tab` takes a suggestion and `ctrl+n` asks for them |
 | Query, a file | `↵` run the statement under the cursor · `v` select several · `R` run the whole file · `e` edit in the console |
-| Results | `h`/`l` columns · `[`/`]` result sets · `↵` the row as a record · `e` edit · `n` NULL · `d` delete · `u` undo · `s` save · `x` export |
+| Results | `h`/`l` columns · `[`/`]` result sets · `o` sort by the column · `f` filter · `y`/`Y` copy the cell/row · `↵` the row as a record · `e` edit · `n` NULL · `d` delete · `u` undo · `s` save · `x` export |
 | History | `↵` run again · `e` edit in the console · `◆` marks what Claude ran |
 | Connections | `↵` connect · `n` new · `p` password · `f` folder · `x` forget |
 | Settings (`,`) | `↵` or space changes the row limit, the accent colour, and whether Trawl checks for and installs updates · `esc` closes |
@@ -115,9 +115,13 @@ The Query tab starts as a console: a SQL editor inside Trawl, with keywords, str
 
 The console is saved as you type (in `~/.trawl/console.sql`) and is there again next time. `/save <file.sql>` writes it to a file, and `/new` clears it. `s` on a table in the Explorer starts a `SELECT … WHERE` for it, and `e` in History or on a file's statement copies that SQL into the console to edit.
 
-Editing keys: arrows, `home`/`end` (or `ctrl+a`/`ctrl+e`), `ctrl+u`/`ctrl+k` cut to the start or end of the line, `tab` inserts two spaces, and a new line keeps the indent of the one above. Pasting works, multi-line text included.
+Editing keys: arrows, `home`/`end` (or `ctrl+a`/`ctrl+e`), `ctrl+←`/`ctrl+→` a word at a time, `ctrl+w` deletes the word before the cursor, `ctrl+u`/`ctrl+k` cut to the start or end of the line, `tab` inserts two spaces, and a new line keeps the indent of the one above. Pasting works, multi-line text included. Holding `shift` with any of the movement keys selects text: typing or `backspace` replaces it, `ctrl+r` runs just the selection (the gutter marks its lines), and `esc` lets go of it. `ctrl+f` (or `/search <text>`) finds text in the console, ignoring case, and selects it; `n` and `N` then find the next and previous match, wrapping round the end.
 
-As you type, a list under the cursor suggests what could come next, from the schema of the database you're in, as SSMS's IntelliSense does: tables and views after `FROM`, `JOIN`, `UPDATE` or `INTO` (schema-qualified, so `Pla` becomes `dbo.Players`), a table's columns after its alias or name and a dot (`p.` in `… FROM dbo.Players p`), the columns of the statement's tables, keywords and functions anywhere else, procedures after `EXEC`, and databases after `USE`. `tab` takes the highlighted one; `↑`/`↓` pick another, and then `↵` takes it too (otherwise `↵` is still a new line). `esc` closes the list without leaving the console, and `ctrl+space` brings it up where nothing has been typed yet. Nothing is suggested inside comments or strings, and `/refresh` reloads the schema the suggestions come from.
+`f` (when not typing) or `/format` lays out the statement under the cursor, or the selection: each clause on a line of its own, `AND` and `OR` indented under `WHERE` and `ON`, subqueries indented, and reserved words in capitals. Strings, comments and the spacing inside expressions are left alone, and so are procedures and other blocks. `ctrl+z` undoes it.
+
+`p` (when not typing) or `/plan` shows the estimated plan of the statement under the cursor, or the selection, as text (`SET SHOWPLAN_TEXT`): nothing runs, so it's safe on a write too. `/stats` turns on `SET STATISTICS IO` and `TIME` for the session (the header says `stats on`), and each run then ends with one line, such as `Logical reads: Players 3, Clubs 2 · CPU 16 ms · elapsed 20 ms`, in place of the server's long messages; `/stats off` stops it. `ctrl+z` undoes, a word at a time, and `ctrl+y` redoes; they work while typing or not, and cover everything that changes the console (`/new`, `/ask`, `s` in the Explorer, `e` in History) until you quit.
+
+As you type, a list under the cursor suggests what could come next, from the schema of the database you're in, as SSMS's IntelliSense does: tables and views after `FROM`, `JOIN`, `UPDATE` or `INTO` (schema-qualified, so `Pla` becomes `dbo.Players`), a table's columns after its alias or name and a dot (`p.` in `… FROM dbo.Players p`), the join condition after `ON`, from the foreign keys between the table just joined and those before it (`JOIN dbo.Clubs c ON` offers `c.Id = p.ClubId`), the columns of the statement's tables, keywords and functions anywhere else, procedures after `EXEC` and then their parameters (`@Season = `), and databases after `USE`. You don't have to ask: the list opens as you type a name or a dot, and straight after `FROM `, `JOIN `, `ON `, `EXEC ` and `USE `, where it's clear what comes next. Inside a function's parentheses, the line above shows its syntax with the argument you're on picked out (`DATEADD(datepart, number, date)`), and among a procedure's arguments, its parameters and their types from the schema. With the cursor just after the `*` of `SELECT *` (or `p.*`), `tab` writes out the columns in its place, qualified with their alias when the statement reads more than one table. `tab` takes the highlighted one; `↑`/`↓` pick another, and then `↵` takes it too (otherwise `↵` is still a new line). `esc` closes the list without leaving the console, and `ctrl+n` brings it up where nothing has been typed yet (`ctrl+space` does too, in terminals that send it: the Windows console sends a plain space). Nothing is suggested inside comments or strings, and `/refresh` reloads the schema the suggestions come from.
 
 ### Scripts
 
@@ -128,6 +132,10 @@ Errors say which line of the file they're on.
 ### Results
 
 Each result set stops at the row limit (500 to start with; `/limit <n>` changes it). Trawl cancels the query there instead of pulling the rest of the table over the network. `NULL` is shown as `NULL`, dates as `2026-10-19 15:14:35`, and binary as `0x…` hex. `/export <file.csv>` or `/export <file.json>` saves the result set on screen.
+
+`o` sorts the rows by the column under the cursor, A to Z, then Z to A, then back to the order they came in. `f` (or `/filter <text>`) shows only the rows with a value containing the text, ignoring case; `/filter` with nothing shows them all again. Neither runs the query again, so they work on the rows Trawl has (up to the row limit), and edits stay with their rows.
+
+`y` copies the cell under the cursor and `Y` the row, tab-separated. `/copy` copies the whole result set: tab-separated by default (it pastes into a spreadsheet as cells), or `/copy csv`, `/copy json`, or `/copy insert` for `INSERT` statements into its table. Trawl uses the system clipboard (PowerShell's `Set-Clipboard`, `pbcopy`, `wl-copy`, `xclip` or `xsel`), and over SSH asks the terminal to copy instead (OSC 52, which Windows Terminal, iTerm2, kitty, WezTerm and tmux understand).
 
 ### Editing results
 
@@ -146,13 +154,14 @@ Columns that are expressions or renamed in the query, identity columns and `rowv
 - **Production is read-only.** On a connection added with `--prod`, anything that changes data is refused until `/writes`, which asks first and lasts until you disconnect.
 - **Auto or manual commit, as DataGrip's Tx: Auto/Manual.** With manual commit, the first write starts a transaction, and the header shows `TRANSACTION OPEN` until you `/commit` or `/rollback`. With auto commit, each statement takes effect as it runs. Production connections use manual commit unless you change it. `/tx manual` or `/tx auto` switches the connection you're on and remembers it (switching production to auto asks first), `/add … --commit manual` sets it when adding, and a DataGrip data source set to manual comes across that way. Disconnecting, switching database or quitting with a transaction open asks first, because it rolls back.
 - **Risky statements ask first, on every connection**: `UPDATE` or `DELETE` with no `WHERE`, `DROP` and `TRUNCATE`.
+- **Writes say how many rows they change.** Before an `UPDATE` or `DELETE` runs, Trawl counts its rows with a `SELECT COUNT_BIG(*)` over the same `FROM` and `WHERE` (nothing is written to find out), and puts the number in the question. A `WHERE` that would still change more than 1,000 rows asks first too. `esc` while it counts cancels the write. Statements it can't count safely (`TOP`, `OUTPUT`, several at once) run as before.
 - A statement counts as a write when it has `INSERT`, `UPDATE`, `DELETE`, `MERGE`, `SELECT … INTO`, DDL, `GRANT`/`REVOKE`, `DBCC`, or `EXEC` of anything except the read-only system procedures (`sp_help`, `sp_who2`, `sp_spaceused` and the like).
 
 ### Slash commands
 
 Type `/` and the menu narrows as you type. `tab` completes, `↑`/`↓` picks, `↵` runs. `/connect` completes connection names, `/use` database names and `/describe` tables and views.
 
-`/import datagrip [folder]` `/connect <name>` `/add …` `/forget <name>` `/folder <connection> [folder]` `/password [connection]` `/disconnect` `/use <database>` `/open <file.sql>` `/console` `/new` `/save <file.sql>` `/describe <table>` `/find [text]` `/export <file>` `/limit [rows]` `/writes` `/tx [auto|manual]` `/commit` `/rollback` `/ask <question>` `/ai [connection] [level]` `/update` `/settings` `/last` `/refresh` `/help` `/quit`
+`/import datagrip [folder]` `/connect <name>` `/add …` `/forget <name>` `/folder <connection> [folder]` `/password [connection]` `/disconnect` `/use <database>` `/open <file.sql>` `/console` `/new` `/format` `/search <text>` `/save <file.sql>` `/describe <table>` `/script <name>` `/find [text]` `/export <file>` `/filter [text]` `/copy [tsv|csv|json|insert]` `/limit [rows]` `/writes` `/tx [auto|manual]` `/commit` `/rollback` `/ask <question>` `/ai [connection] [level]` `/update` `/settings` `/stats [on|off]` `/plan [sql]` `/last` `/refresh` `/help` `/quit`
 
 ## Claude
 

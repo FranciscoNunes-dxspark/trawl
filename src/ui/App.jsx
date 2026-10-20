@@ -7,12 +7,13 @@ import { findCommand, suggestionsFor } from '../commands.js';
 import { loadClaudeHistory, loadConsole, saveConfig, saveConsole, withRan } from '../config.js';
 import * as ed from '../editor.js';
 import { commitMode, describeConn, isReadOnly } from '../connections.js';
+import { copyToClipboard } from '../clipboard.js';
 import { osCredentials } from '../credentials.js';
 import { connect as openSession } from '../db.js';
 import { changesText, editTarget } from '../edit.js';
 import { HELP } from '../help.js';
 import { SCHEMA_SQL, buildSchema } from '../schema.js';
-import { qualified, splitStatements } from '../sql.js';
+import { qualified, splitStatements, statisticsSummary } from '../sql.js';
 import { BULLET, theme } from '../theme.js';
 import { fitSegments, stringWidth } from '../text.js';
 import { useTerminalSize } from './hooks.js';
@@ -40,9 +41,9 @@ const VIEWS = [
 ];
 
 const HINTS = {
-  explorer: '↵ first rows · d describe · s query it in the console · /find filter',
+  explorer: '↵ first rows · d describe · s query it in the console · c CREATE script · /find filter',
   query: '↵ run statement · v select several · R run file · e edit in the console · /console',
-  results: 'h/l columns · ↵ record · e edit · n NULL · d delete · u undo · s save · x export',
+  results: 'h/l columns · o sort · f filter · ↵ record · y/Y copy · e edit · n NULL · d delete · s save · x export',
   history: '↵ run again · e edit in the console · ◆ ran by Claude',
   connections: '↵ connect · n new · p password · f folder · x forget',
 };
@@ -58,6 +59,12 @@ const NO_CHANGES = { cells: new Map(), deletes: new Set() };
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
 /** The activity line under a run: "12 rows · 3 rows affected · 41 ms". */
+// STATISTICS IO and TIME (/stats) send several messages a statement: one line says it all.
+function withStatistics(res) {
+  const { summary, messages } = statisticsSummary(res.messages ?? []);
+  return summary ? { ...res, messages: [summary, ...messages] } : res;
+}
+
 function summarize(res, limit) {
   const parts = res.sets.map((s) => (s.truncated ? `first ${s.rows.length} rows (the limit is ${limit})` : plural(s.rows.length, 'row')));
   return [[...parts, ...res.messages.filter((m) => /rows? affected$/.test(m)), `${res.ms} ms`].join(' · '), ...res.messages.filter((m) => !/rows? affected$/.test(m))];
@@ -81,6 +88,7 @@ function Header({ session, tranCount, writesAllowed, file, width, connecting, mo
     // DataGrip's "Tx: Manual": writes wait for /commit.
     if (commitMode(conn) === 'manual') segs.push({ text: '  manual commit', color: theme.dim });
     if (tranCount) segs.push({ text: '  ' }, { text: ` TRANSACTION OPEN `, bg: theme.warn, color: theme.ink, bold: true });
+    if (session.stats) segs.push({ text: '  stats on', color: theme.dim });
   } else {
     segs.push({ text: connecting ? '  connecting…' : '  not connected', color: theme.dim });
   }
@@ -125,7 +133,7 @@ function activityRows(entries) {
  * files by default). `credentials` keeps passwords (the OS store by default) and `open` starts
  * a session (db.js); the tests pass their own. `setTitle(text)` names the terminal window.
  */
-export function App({ config: initialConfig, initialFile, initialConnection, checkLatest, installUpdate, askClaude = askClaudeCli, findDataSources, credentials = osCredentials, open = openSession, setTitle }) {
+export function App({ config: initialConfig, initialFile, initialConnection, checkLatest, installUpdate, askClaude = askClaudeCli, findDataSources, credentials = osCredentials, open = openSession, clipboard = copyToClipboard, setTitle }) {
   const { exit } = useApp();
   const { columns, rows } = useTerminalSize();
   const [config, setConfigState] = useState(initialConfig);
@@ -151,6 +159,8 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
   const [update, setUpdate] = useState(null);
   const [editor, setEditorState] = useState(() => ed.fromText(loadConsole()));
   const [queryMode, setQueryMode] = useState(initialFile ? 'file' : 'console');
+  // How Results shows the set on screen: sorted on a column ({ col, dir }) and narrowed by /filter.
+  const [resultView, setResultView] = useState({ sort: null, filter: '' });
   // Glim looks happy (or worried) for a few seconds after a result; re-render when that wears off.
   const [, setMoodTick] = useState(0);
   useEffect(() => {
@@ -177,6 +187,8 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
   const historyPos = useRef(-1);
   const lastOutput = useRef(null);
   const editorRef = useRef(editor);
+  // The console's undo history, for this session only (console.sql keeps just the text).
+  const historyRef = useRef(ed.newHistory());
   const saveTimer = useRef(null);
   // Passwords typed this session, by connection, so /use and reconnecting don't ask again.
   const typed = useRef(new Map());
@@ -204,6 +216,7 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     setWritesAllowedState(on);
   };
   const setResultIndex = (i) => {
+    if (i !== resultIndexRef.current) setResultView({ sort: null, filter: '' });
     resultIndexRef.current = i;
     setResultIndexState(i);
   };
@@ -218,15 +231,25 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
       note(`Dropped ${changesText(pending)} not saved to ${resultsRef.current?.edit?.table?.name ?? 'the table'}.`);
       setChanges(NO_CHANGES);
     }
+    if (next?.id !== resultsRef.current?.id) setResultView({ sort: null, filter: '' });
     resultsRef.current = next;
     setResults(next);
   };
-  // The console is saved a moment after typing stops, and straight away on quit.
-  const setConsole = (next) => {
+  // The console is saved a moment after typing stops, and straight away on quit. Every change to
+  // its text is a step ctrl+z can undo; `merge` (typing) joins the keystrokes of a word into one.
+  const setConsole = (next, { merge = false, record = true } = {}) => {
+    const prev = editorRef.current;
+    if (record && next.lines !== prev.lines && ed.toText(next) !== ed.toText(prev)) historyRef.current = ed.record(historyRef.current, prev, { merge });
     editorRef.current = next;
     setEditorState(next);
     clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => saveConsole(ed.toText(next)), 400);
+  };
+  const stepConsole = (step, nothing) => {
+    const r = step(historyRef.current, editorRef.current);
+    if (!r) return note(nothing);
+    historyRef.current = r.history;
+    setConsole(r.editor, { record: false });
   };
   const setFocus = (f) => {
     focusRef.current = f;
@@ -377,9 +400,9 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     let res = null;
     const r = await task(title, async (signal) => {
       try {
-        res = await s.run(sql, { signal, limit });
+        res = withStatistics(await s.run(sql, { signal, limit }));
       } catch (e) {
-        if (e.partial) res = { ...e.partial, error: e };
+        if (e.partial) res = withStatistics({ ...e.partial, error: e });
         if (e.line) e.message = `Line ${Math.max(1, lineBase + e.line - 1 - (wrapped ? 1 : 0))}: ${e.message}`;
         throw e;
       }
@@ -588,12 +611,29 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     setConfig,
     setWritesAllowed,
     setResultIndex,
+    // o in Results: by this column, A to Z, then Z to A, then as the server sent them.
+    sortResults: (col) =>
+      setResultView((v) => ({ ...v, sort: v.sort?.col !== col ? { col, dir: 1 } : v.sort.dir > 0 ? { col, dir: -1 } : null })),
+    filterResults: (text) => {
+      if (!resultsRef.current) return note('Run a query first: there is nothing to filter.', 'error');
+      setResultView((v) => ({ ...v, filter: text.trim() }));
+      setView('results');
+    },
     currentSet: () => resultsRef.current?.sets[resultIndexRef.current] ?? null,
     note,
     confirm,
     // A password field in place of the prompt: resolves { value, remember } or null.
     askSecret: (req) => confirm({ ...req, secret: true, options: [] }),
     credentials,
+    // Puts text on the clipboard and says so; `what` is "the cell", "12 rows as CSV"…
+    copy: async (text, what) => {
+      try {
+        const via = await clipboard(text);
+        note(`Copied ${what}${via === 'terminal' ? ' (through the terminal, which has to allow it)' : ''}.`, 'ok');
+      } catch (e) {
+        note(`Couldn't copy: ${firstLine(e.message)}`, 'error');
+      }
+    },
     prefill,
     openFile,
     setView,
@@ -613,6 +653,8 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     viewHasKeys: () => focusRef.current === 'view' && !overlayRef.current && !confirmRef.current,
     editorHasKeys: () => focusRef.current === 'editor' && !overlayRef.current && !confirmRef.current,
     setConsole,
+    undoConsole: () => stepConsole(ed.undo, 'Nothing to undo.'),
+    redoConsole: () => stepConsole(ed.redo, 'Nothing to redo.'),
     // Stopping waits until this key has been handled everywhere, so the esc (or ctrl+c) that
     // ends typing isn't also taken as a global key: clear the log, or quit.
     setEditing: (on) => (on ? setFocus('editor') : queueMicrotask(() => focusRef.current === 'editor' && setFocus('view'))),
@@ -827,13 +869,13 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     main = (
       <Box flexDirection="column" width={W} height={mainH}>
         <ConsoleView editor={editor} editing={editing} ctx={ctx} width={W} height={mainH - under} active={(viewActive || editing) && !overlay && !confirmReq} />
-        {under ? <ResultsView results={results} changes={changes} setIndex={resultIndex} ctx={ctx} width={W} height={under} active={false} /> : null}
+        {under ? <ResultsView results={results} changes={changes} setIndex={resultIndex} view={resultView} ctx={ctx} width={W} height={under} active={false} /> : null}
       </Box>
     );
   } else if (view === 'query') {
     main = <QueryView file={file} ctx={ctx} width={W} height={mainH} active={viewActive} />;
   } else if (view === 'results') {
-    main = <ResultsView results={results} changes={changes} setIndex={resultIndex} ctx={ctx} width={W} height={mainH} active={viewActive || (focus === 'cell' && !confirmReq)} />;
+    main = <ResultsView results={results} changes={changes} setIndex={resultIndex} view={resultView} ctx={ctx} width={W} height={mainH} active={viewActive || (focus === 'cell' && !confirmReq)} />;
   } else if (view === 'history') {
     // Claude's queries come from trawl mcp's log, read each time the tab draws (it's small).
     const ran = [...config.ran, ...loadClaudeHistory()].sort((x, y) => y.at - x.at);
@@ -853,7 +895,7 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     : focus === 'prompt'
       ? 'enter run · tab complete · ↑↓ pick or history · esc back'
       : focus === 'editor'
-        ? 'typing SQL · tab take a suggestion · ctrl+r run the statement · esc stop typing (then 3 for the full results)'
+        ? 'typing SQL · tab take a suggestion · shift+arrows select · ctrl+r run the statement (or selection) · esc stop typing'
         : focus === 'cell'
           ? 'editing the cell · ↵ keep it (s saves) · tab next column · esc leave it as it was · ctrl+u clear'
           : overlay?.settings

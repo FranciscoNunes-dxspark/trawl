@@ -21,7 +21,25 @@ JOIN sys.objects o ON o.object_id = c.object_id
 JOIN sys.schemas s ON s.schema_id = o.schema_id
 JOIN sys.types t ON t.user_type_id = c.user_type_id
 WHERE o.type IN ('U', 'V') AND o.is_ms_shipped = 0
-ORDER BY s.name, o.name, c.column_id;`;
+ORDER BY s.name, o.name, c.column_id;
+SELECT fk.name, ps.name AS [schema], po.name AS [object], pc.name AS [column],
+  rs.name AS ref_schema, ro.name AS ref_object, rc.name AS ref_column
+FROM sys.foreign_key_columns fkc
+JOIN sys.foreign_keys fk ON fk.object_id = fkc.constraint_object_id
+JOIN sys.objects po ON po.object_id = fkc.parent_object_id
+JOIN sys.schemas ps ON ps.schema_id = po.schema_id
+JOIN sys.columns pc ON pc.object_id = fkc.parent_object_id AND pc.column_id = fkc.parent_column_id
+JOIN sys.objects ro ON ro.object_id = fkc.referenced_object_id
+JOIN sys.schemas rs ON rs.schema_id = ro.schema_id
+JOIN sys.columns rc ON rc.object_id = fkc.referenced_object_id AND rc.column_id = fkc.referenced_column_id
+ORDER BY fk.name, fkc.constraint_column_id;
+SELECT s.name AS [schema], o.name AS [object], p.name, t.name AS type, p.max_length, p.precision, p.scale, p.is_output
+FROM sys.parameters p
+JOIN sys.objects o ON o.object_id = p.object_id
+JOIN sys.schemas s ON s.schema_id = o.schema_id
+JOIN sys.types t ON t.user_type_id = p.user_type_id
+WHERE o.type IN ('P', 'FN', 'IF', 'TF') AND o.is_ms_shipped = 0 AND p.parameter_id > 0
+ORDER BY s.name, o.name, p.parameter_id;`;
 
 const KINDS = { U: 'table', V: 'view', P: 'procedure', FN: 'function', IF: 'function', TF: 'function' };
 
@@ -42,15 +60,21 @@ export function typeLabel(type, maxLength, precision, scale) {
   return t;
 }
 
-/** Shapes SCHEMA_SQL's four result sets into { database, databases, objects }. */
+/**
+ * Shapes SCHEMA_SQL's result sets into { database, databases, objects, foreignKeys }. Procedures and
+ * functions have `params` ({ name, type, output }), in order. A foreign key
+ * is { name, from, to, columns }: `from` references `to` ("dbo.Players", "dbo.Clubs"), and each of
+ * `columns` is [column in from, column in to].
+ */
 export function buildSchema(sets) {
-  const [dbSet, dbsSet, objSet, colSet] = sets;
+  const [dbSet, dbsSet, objSet, colSet, fkSet, paramSet] = sets;
   const objects = rowsOf(objSet).map((o) => ({
     schema: o.schema,
     name: o.name,
     kind: KINDS[o.type] ?? 'other',
     rows: o.rows == null ? null : Number(o.rows),
     columns: [],
+    ...(KINDS[o.type] === 'procedure' || KINDS[o.type] === 'function' ? { params: [] } : {}),
   }));
   // Grouped by schema whatever order the catalog came in (the Explorer draws one header per schema).
   objects.sort((x, y) => (x.schema === y.schema ? 0 : x.schema.toLowerCase() < y.schema.toLowerCase() ? -1 : 1));
@@ -64,10 +88,20 @@ export function buildSchema(sets) {
       pk: Boolean(c.pk),
     });
   }
+  for (const p of rowsOf(paramSet)) {
+    byKey.get(`${p.schema}.${p.object}`)?.params?.push({ name: p.name, type: typeLabel(p.type, p.max_length, p.precision, p.scale), output: Boolean(p.is_output) });
+  }
+  const foreignKeys = new Map();
+  for (const f of rowsOf(fkSet)) {
+    const key = `${f.schema}.${f.name}`;
+    if (!foreignKeys.has(key)) foreignKeys.set(key, { name: f.name, from: `${f.schema}.${f.object}`, to: `${f.ref_schema}.${f.ref_object}`, columns: [] });
+    foreignKeys.get(key).columns.push([f.column, f.ref_column]);
+  }
   return {
     database: rowsOf(dbSet)[0]?.db ?? null,
     databases: rowsOf(dbsSet).map((d) => d.name),
     objects,
+    foreignKeys: [...foreignKeys.values()],
   };
 }
 
@@ -86,8 +120,8 @@ export function findObject(schema, text) {
 /** "dbo.Clubs" for completion and titles. */
 export const objectName = (o) => `${o.schema}.${o.name}`;
 
-/** The text /describe shows for a table or view. */
-export function describeObject(o) {
+/** The text /describe shows for a table or view, with its foreign keys when `schema` is given. */
+export function describeObject(o, schema) {
   const nameW = Math.max(6, ...o.columns.map((c) => c.name.length)) + 2;
   const typeW = Math.max(4, ...o.columns.map((c) => c.type.length)) + 2;
   const lines = [`${o.kind} ${objectName(o)}${o.rows != null ? `  ·  about ${o.rows.toLocaleString('en')} rows` : ''}`, ''];
@@ -95,6 +129,49 @@ export function describeObject(o) {
     const flags = [c.pk ? 'primary key' : '', c.identity ? 'identity' : '', c.nullable ? 'null' : 'not null'].filter(Boolean).join(', ');
     lines.push(`${c.pk ? 'PK' : '  '} ${c.name.padEnd(nameW)}${c.type.padEnd(typeW)}${flags}`);
   }
-  if (!o.columns.length) lines.push('(no columns listed for this kind of object)');
+  if (o.params) {
+    const w = Math.max(6, ...o.params.map((p) => p.name.length)) + 2;
+    for (const p of o.params) lines.push(`   ${p.name.padEnd(w)}${p.type}${p.output ? '  output' : ''}`);
+    if (!o.params.length) lines.push('(no parameters)');
+  } else if (!o.columns.length) lines.push('(no columns listed for this kind of object)');
+  const name = objectName(o);
+  const keys = (schema?.foreignKeys ?? []).filter((f) => f.from === name || f.to === name);
+  if (keys.length) lines.push('', 'Foreign keys');
+  for (const f of keys) {
+    const cols = (i) => f.columns.map((c) => c[i]).join(', ');
+    lines.push(f.from === name ? `  ${cols(0)} → ${f.to} (${cols(1)})  ${f.name}` : `  ${f.from} (${cols(0)}) → ${cols(1)}  ${f.name}`);
+  }
   return lines.join('\n');
 }
+
+const bracket = (name) => `[${String(name).replace(/]/g, ']]')}]`;
+const fullName = (o) => `${bracket(o.schema)}.${bracket(o.name)}`;
+
+/**
+ * CREATE TABLE for a table, from what the catalog query read: columns, the primary key and the
+ * foreign keys. Defaults, checks, indexes and an identity's seed aren't read, and the script says so.
+ */
+export function createTableScript(o, schema) {
+  const cols = o.columns.map((c) => `  ${bracket(c.name)} ${c.type}${c.identity ? ' IDENTITY(1,1)' : ''} ${c.nullable ? 'NULL' : 'NOT NULL'}`);
+  const pk = o.columns.filter((c) => c.pk).map((c) => bracket(c.name));
+  if (pk.length) cols.push(`  PRIMARY KEY (${pk.join(', ')})`);
+  const name = objectName(o);
+  const fks = (schema?.foreignKeys ?? [])
+    .filter((f) => f.from === name)
+    .map((f) => {
+      const [toSchema, ...toName] = f.to.split('.');
+      const list = (i) => f.columns.map((c) => bracket(c[i])).join(', ');
+      return `ALTER TABLE ${fullName(o)} ADD CONSTRAINT ${bracket(f.name)}\n  FOREIGN KEY (${list(0)}) REFERENCES ${bracket(toSchema)}.${bracket(toName.join('.'))} (${list(1)});`;
+    });
+  return [
+    `-- ${name}: columns, primary key and foreign keys as Trawl read them (not defaults, checks or indexes).`,
+    `CREATE TABLE ${fullName(o)} (`,
+    cols.join(',\n'),
+    ');',
+    ...fks,
+  ].join('\n');
+}
+
+// The marker comment lets the demo driver recognise this batch.
+/** The query that reads a view's, procedure's or function's own CREATE text. */
+export const definitionSql = (o) => `-- trawl:definition\nSELECT OBJECT_DEFINITION(OBJECT_ID(N'${fullName(o).replace(/'/g, "''")}')) AS definition;`;

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { classify, classifyScript, formatValue, mask, oneLine, quoteIdent, splitBatches, splitStatements, statementAt, toCsv, toJson, withoutLeadingComments } from '../src/sql.js';
+import { classify, classifyScript, countQuery, statisticsSummary, viewOrder, formatValue, mask, oneLine, quoteIdent, splitBatches, splitStatements, statementAt, toCsv, toJson, withoutLeadingComments } from '../src/sql.js';
 
 const texts = (list) => list.map((s) => s.text);
 
@@ -123,4 +123,43 @@ test('IF … ELSE and TRY … CATCH stay one statement', () => {
 test('withoutLeadingComments starts at the first line of code', () => {
   assert.equal(withoutLeadingComments('-- one\n/* two\n */  SELECT 1 -- three'), 'SELECT 1 -- three');
   assert.equal(withoutLeadingComments('-- only a comment'), '');
+});
+
+test('countQuery counts what an UPDATE or DELETE would change, reading only', () => {
+  assert.equal(countQuery('DELETE FROM dbo.Players WHERE Goals = 0;'), 'SELECT COUNT_BIG(*) FROM dbo.Players WHERE Goals = 0;');
+  assert.equal(countQuery('delete dbo.Players where Goals = 0'), 'SELECT COUNT_BIG(*) FROM dbo.Players where Goals = 0;');
+  assert.equal(countQuery('DELETE p FROM dbo.Players p JOIN dbo.Clubs c ON c.Id = p.ClubId WHERE c.Active = 0'), 'SELECT COUNT_BIG(*) FROM dbo.Players p JOIN dbo.Clubs c ON c.Id = p.ClubId WHERE c.Active = 0;');
+  assert.equal(countQuery("UPDATE dbo.Clubs SET Name = 'x' WHERE Id = 1"), 'SELECT COUNT_BIG(*) FROM dbo.Clubs WHERE Id = 1;');
+  assert.equal(countQuery('UPDATE dbo.Clubs SET Active = 0'), 'SELECT COUNT_BIG(*) FROM dbo.Clubs;');
+  // A subquery's FROM and WHERE are its own.
+  assert.equal(countQuery('UPDATE p SET Goals = (SELECT MAX(Goals) FROM dbo.Players WHERE 1 = 1) FROM dbo.Players p WHERE p.Id = 3'), 'SELECT COUNT_BIG(*) FROM dbo.Players p WHERE p.Id = 3;');
+  assert.equal(countQuery('DELETE TOP (5) FROM dbo.Players'), null);
+  assert.equal(countQuery('DELETE FROM dbo.Players OUTPUT deleted.Id WHERE 1 = 1'), null);
+  assert.equal(countQuery('UPDATE a SET x = 1; UPDATE b SET y = 2'), null);
+  assert.equal(countQuery('INSERT INTO t VALUES (1)'), null);
+});
+
+test('viewOrder filters and sorts a result set without touching its rows', () => {
+  const set = { columns: [{ name: 'Name' }, { name: 'Goals' }], rows: [['Rui', 10], ['ana', null], ['Marta', 2], ['Iker', 10]] };
+  assert.deepEqual(viewOrder(set), [0, 1, 2, 3]);
+  assert.deepEqual(viewOrder(set, { sort: { col: 1, dir: 1 } }), [1, 2, 0, 3]);
+  assert.deepEqual(viewOrder(set, { sort: { col: 1, dir: -1 } }), [0, 3, 2, 1]);
+  assert.deepEqual(viewOrder(set, { sort: { col: 0, dir: 1 } }), [1, 3, 2, 0]);
+  assert.deepEqual(viewOrder(set, { filter: 'A' }), [1, 2]);
+  assert.deepEqual(viewOrder(set, { filter: '10', sort: { col: 0, dir: -1 } }), [0, 3]);
+});
+
+test('statisticsSummary makes STATISTICS IO and TIME messages one line', () => {
+  const messages = [
+    'SQL Server parse and compile time: \n   CPU time = 0 ms, elapsed time = 2 ms.',
+    "Table 'Players'. Scan count 1, logical reads 3, physical reads 0, page server reads 0, read-ahead reads 0.",
+    "Table 'Worktable'. Scan count 0, logical reads 0, physical reads 0.",
+    "Table 'Clubs'. Scan count 1, logical reads 12, physical reads 1.",
+    ' SQL Server Execution Times:\n   CPU time = 15 ms,  elapsed time = 21 ms.',
+    "Table 'Players'. Scan count 1, logical reads 3, physical reads 0.",
+    ' SQL Server Execution Times:\n   CPU time = 1 ms,  elapsed time = 4 ms.',
+    '(3 rows affected)',
+  ];
+  assert.deepEqual(statisticsSummary(messages), { summary: 'Logical reads: Clubs 12, Players 6 · CPU 16 ms · elapsed 25 ms', messages: ['(3 rows affected)'] });
+  assert.deepEqual(statisticsSummary(['hello']), { summary: null, messages: ['hello'] });
 });

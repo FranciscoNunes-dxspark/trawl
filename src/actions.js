@@ -5,10 +5,14 @@ import { extname, resolve } from 'node:path';
 import { ADD_USAGE, cleanFolder, commitMode, describeConn, isReadOnly, parseAddArgs } from './connections.js';
 import * as ed from './editor.js';
 import { findDataSources, importPlan, planText } from './datagrip.js';
-import { changesText, saveScript, withSaved } from './edit.js';
+import { formatSql } from './format.js';
+import { changesText, insertScript, saveScript, tsvText, withSaved } from './edit.js';
 import { AI_LABELS, AI_LEVELS, aiLevel, askPrompt, canSeeSchema, consoleText, parseAnswer } from './ai.js';
-import { describeObject, findObject, objectName } from './schema.js';
-import { classifyScript, oneLine, selectTop, toCsv, toJson } from './sql.js';
+import { createTableScript, definitionSql, describeObject, findObject, objectName } from './schema.js';
+import { classifyScript, countQuery, oneLine, selectTop, splitStatements, statementAt, toCsv, toJson, withoutLeadingComments } from './sql.js';
+
+// A WHERE that still changes more rows than this is asked about too.
+const MANY_ROWS = 1000;
 
 const YES_NO = (yes) => [
   { label: yes, value: true },
@@ -21,6 +25,34 @@ function needSession(ctx) {
   return false;
 }
 
+/**
+ * How many rows an UPDATE or DELETE would change, counted first with a SELECT built from it (so
+ * nothing is written to find out). Null when it can't be counted; 'cancelled' after esc.
+ */
+async function countChanges(ctx, text) {
+  const q = countQuery(text);
+  if (!q || classifyScript(q).write) return null;
+  let n = null;
+  const r = await ctx.task(
+    'count the rows it would change',
+    async (signal) => {
+      try {
+        const res = await ctx.session.run(q, { signal, limit: 1 });
+        n = Number(res.sets.at(-1)?.rows[0]?.[0]);
+      } catch (e) {
+        // A count that fails says nothing about the write; the write's own error will.
+        if (e.cancelled) throw e;
+      }
+      return [];
+    },
+    { label: 'Counting the rows it would change', quiet: true },
+  );
+  if (!r.ok) return r.error?.cancelled ? 'cancelled' : null;
+  return Number.isFinite(n) ? n : null;
+}
+
+const rowsText = (n) => `${n.toLocaleString('en')} row${n === 1 ? '' : 's'}`;
+
 /** Runs SQL on the current connection, after the read-only and danger checks. */
 export async function runSql(ctx, sql, { title, lineBase, stay, keep } = {}) {
   if (!needSession(ctx)) return;
@@ -31,10 +63,21 @@ export async function runSql(ctx, sql, { title, lineBase, stay, keep } = {}) {
   if (write && isReadOnly(conn) && !ctx.writesAllowed) {
     return ctx.note(`${conn.name} is read-only${conn.prod ? ' (production)' : ''}, and this changes data. /writes allows writes until you disconnect.`, 'error');
   }
+  const changes = write ? await countChanges(ctx, text) : null;
+  if (changes === 'cancelled') return;
+  const on = `On ${conn.name}${conn.prod ? ' (production)' : ''}`;
   if (danger.length) {
     const ok = await ctx.confirm({
       title: danger.length === 1 ? `${danger[0]}. Run it?` : `This script has ${danger.length} risky statements. Run it?`,
-      detail: danger.length > 1 ? danger.join(' · ') : `On ${conn.name}${conn.prod ? ' (production)' : ''}.`,
+      detail: danger.length > 1 ? danger.join(' · ') : `${on}${changes != null ? `: that's ${rowsText(changes)}` : ''}.`,
+      options: YES_NO('Yes, run it'),
+      danger: true,
+    });
+    if (!ok) return;
+  } else if (changes != null && changes > MANY_ROWS) {
+    const ok = await ctx.confirm({
+      title: `This changes ${rowsText(changes)}. Run it?`,
+      detail: `${on}. Counted with a SELECT over the same FROM and WHERE.`,
       options: YES_NO('Yes, run it'),
       danger: true,
     });
@@ -255,7 +298,84 @@ export function describe(ctx, text) {
   if (!text) return ctx.prefill('/describe ');
   const obj = typeof text === 'string' ? findObject(ctx.schema, text) : text;
   if (!obj) return ctx.note(`No table or view called ${text} in ${ctx.session.database}.`, 'error');
-  ctx.showText(objectName(obj), describeObject(obj));
+  ctx.showText(objectName(obj), describeObject(obj, ctx.schema));
+}
+
+/**
+ * /script <name> and c in the Explorer: the object's CREATE script, into the console to edit. A table's
+ * is written from the catalog; a view's, procedure's or function's is the server's own text.
+ */
+export async function scriptObject(ctx, text) {
+  if (!needSession(ctx)) return;
+  if (!text) return ctx.prefill('/script ');
+  const obj = typeof text === 'string' ? findObject(ctx.schema, text) : text;
+  if (!obj) return ctx.note(`Nothing called ${text} in ${ctx.session.database}.`, 'error');
+  if (obj.kind === 'table') return ctx.editInConsole(createTableScript(obj, ctx.schema));
+  let definition = null;
+  const r = await ctx.task(
+    `script ${objectName(obj)}`,
+    async (signal) => {
+      definition = (await ctx.session.run(definitionSql(obj), { signal, limit: 1 })).sets[0]?.rows[0]?.[0] ?? null;
+      return [definition ? 'In the console.' : "The server gave no definition: it may be encrypted, or the login can't VIEW DEFINITION."];
+    },
+    { label: 'Reading the definition' },
+  );
+  if (r.ok && definition) ctx.editInConsole(String(definition).replace(/\r\n?/g, '\n').trim());
+}
+
+/**
+ * /stats [on|off]: SET STATISTICS IO and TIME for the session, so each run says how many pages it
+ * read from which table and how long the server spent (as one line). With nothing, it toggles.
+ */
+export async function setStats(ctx, mode) {
+  if (!needSession(ctx)) return;
+  if (mode && mode !== 'on' && mode !== 'off') return ctx.note('/stats on shows the pages read and the server time after each run; /stats off stops it.', 'error');
+  const session = ctx.session;
+  const on = mode ? mode === 'on' : !session.stats;
+  const r = await ctx.task(
+    `statistics ${on ? 'on' : 'off'}`,
+    async (signal) => {
+      const v = on ? 'ON' : 'OFF';
+      await session.run(`SET STATISTICS IO ${v};\nSET STATISTICS TIME ${v};`, { signal });
+      return [on ? 'Each run now ends with the logical reads per table and the CPU and elapsed time.' : 'Runs no longer report reads and times.'];
+    },
+    { label: on ? 'Turning statistics on' : 'Turning statistics off' },
+  );
+  if (r.ok) session.stats = on;
+}
+
+/**
+ * /plan [sql] and p in the console: the estimated plan, as text (SHOWPLAN_TEXT), of the SQL given,
+ * the selection, or the statement under the cursor. Nothing runs. SHOWPLAN goes off again whatever
+ * happens, or the session would answer every query with a plan.
+ */
+export async function showPlan(ctx, sql) {
+  if (!needSession(ctx)) return;
+  const e = ctx.console;
+  const text = sql?.trim() || ed.selectedText(e)?.text.trim() || statementAt(splitStatements(ed.toText(e)), e.row + 1)?.text;
+  if (!text) return ctx.note('Nothing to plan: give the SQL (/plan SELECT …) or put the cursor on a statement in the console.', 'error');
+  const session = ctx.session;
+  let plan = null;
+  const title = `Plan: ${oneLine(withoutLeadingComments(text))}`;
+  await ctx.task(
+    title,
+    async (signal) => {
+      await session.run('SET SHOWPLAN_TEXT ON;', { signal });
+      try {
+        const res = await session.run(text, { limit: 10_000 });
+        // Each statement gives two sets: its text, then its plan's rows.
+        plan = res.sets.map((s) => s.rows.map((r) => String(r[0] ?? '').replace(/\s+$/, '')).join('\n')).join('\n\n');
+      } finally {
+        await session.run('SET SHOWPLAN_TEXT OFF;');
+      }
+      return ['The plan is on screen (esc closes it). Nothing ran.'];
+    },
+    { label: 'Asking for the plan' },
+  );
+  if (plan) {
+    ctx.showText(title, plan);
+    ctx.rememberOutput(title, plan);
+  }
 }
 
 export function setLimit(ctx, value) {
@@ -357,12 +477,48 @@ const splitArgsLoose = (s) => String(s ?? '').trim().split(/\s+/).filter(Boolean
 /** Empties the console, asking first when there's something in it. */
 export async function newConsole(ctx) {
   if (ed.toText(ctx.console).trim()) {
-    const ok = await ctx.confirm({ title: 'Clear the console?', detail: 'Its text is gone for good. /save <file.sql> keeps a copy first.', options: YES_NO('Yes, clear it') });
+    const ok = await ctx.confirm({ title: 'Clear the console?', detail: 'ctrl+z in the console brings it back until you quit; /save <file.sql> keeps a copy for good.', options: YES_NO('Yes, clear it') });
     if (!ok) return;
   }
   ctx.setConsole(ed.fromText(''));
   ctx.showConsole();
   ctx.setEditing(true);
+}
+
+/**
+ * /search <text>, and n / N in the console: selects the next (or previous) place it appears.
+ * With no text, the last search again.
+ */
+export function searchConsole(ctx, text, { back = false } = {}) {
+  const query = text || ctx.lastSearch;
+  if (!query) return ctx.prefill('/search ');
+  ctx.lastSearch = query;
+  ctx.showConsole();
+  const next = ed.find(ctx.console, query, { back });
+  if (!next) return ctx.note(`"${query}" isn't in the console.`, 'error');
+  ctx.setConsole(next);
+}
+
+/** /format and f in the console: lays out the selection, or the statement under the cursor (ctrl+z undoes it). */
+export function formatConsole(ctx) {
+  const e = ctx.console;
+  ctx.showConsole();
+  const sel = ed.selectedText(e);
+  const st = sel ? null : statementAt(splitStatements(ed.toText(e)), e.row + 1);
+  const source = sel?.text ?? st?.text;
+  if (!source?.trim()) return ctx.note('Nothing to format: the console is empty.', 'error');
+  const out = formatSql(source);
+  if (out == null) return ctx.note('Trawl formats queries (SELECT, INSERT, UPDATE, DELETE, MERGE), not procedures, blocks or SET options.', 'error');
+  let next;
+  if (sel) next = ed.insert(e, out);
+  else {
+    const [first, last] = [st.line - 1, st.endLine - 1];
+    if (e.lines.slice(first, last + 1).join('\n').trim() !== st.text) return ctx.note('That statement shares a line with another: select it (shift+arrows) to format it.', 'error');
+    const lead = e.lines[first].match(/^\s*/)[0];
+    next = { lines: [...e.lines.slice(0, first), ...out.split('\n').map((l) => lead + l), ...e.lines.slice(last + 1)], row: first, col: lead.length };
+  }
+  if (ed.toText(next) === ed.toText(e)) return ctx.note('It is formatted already.');
+  ctx.setConsole(next);
 }
 
 /** Writes the console to a .sql file. */
@@ -375,6 +531,24 @@ export async function saveConsoleAs(ctx, path) {
   } catch (e) {
     ctx.note(`Couldn't write ${full}: ${e.message}`, 'error');
   }
+}
+
+const COPY_FORMATS = ['tsv', 'csv', 'json', 'insert'];
+
+/**
+ * /copy [tsv|csv|json|insert]: the result set on screen, on the clipboard. Tab-separated (the
+ * default) pastes into a spreadsheet as cells; insert gives INSERT statements for the table.
+ */
+export function copyResults(ctx, format) {
+  const set = ctx.currentSet();
+  if (!set) return ctx.note('Run a query first: there is nothing to copy.', 'error');
+  const f = (format || 'tsv').toLowerCase();
+  if (!COPY_FORMATS.includes(f)) return ctx.note(`/copy takes ${COPY_FORMATS.join(', ')} (tab-separated is the default).`, 'error');
+  const res = ctx.results;
+  const table = res?.edit?.table ? `[${res.edit.table.schema}].[${res.edit.table.name}]` : '[TableName]';
+  const text = f === 'csv' ? toCsv(set) : f === 'json' ? toJson(set) : f === 'insert' ? insertScript(set, table) : tsvText(set);
+  const n = `${set.rows.length} row${set.rows.length === 1 ? '' : 's'}`;
+  return ctx.copy(text, f === 'tsv' ? `${n}, tab-separated` : f === 'insert' ? `${n} as INSERT statements${table === '[TableName]' ? ' (into [TableName]: rename it)' : ''}` : `${n} as ${f.toUpperCase()}`);
 }
 
 /** Writes the result set on screen to a .csv or .json file. */

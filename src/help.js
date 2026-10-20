@@ -16,17 +16,24 @@ Explorer (tables, views and routines of the current database)
   ↵                First rows (SELECT TOP (limit) *)
   d                Describe: columns, types, keys
   s                Start a query on it in the console
+  c                Its CREATE script, into the console (a table's from the catalog; others' from the server)
   /find <text>     Filter by name
 
 Query, the console (a SQL editor, kept between sessions)
   ↵ or i           Start typing; while typing, every key is text (digits and q too)
   esc              Stop typing
-  ctrl+r           Run the statement under the cursor (marked ▌ in the gutter); the results show below
+  ctrl+r           Run the selection, or the statement under the cursor (marked ▌ in the gutter); the results show below
   R                Run the whole console
   j k  g G         Move between lines (when not typing)
+  p                Its estimated plan, as text (/plan): nothing runs
+  f                Format the statement under the cursor (or the selection): a clause a line, keywords in capitals
+  ctrl+f  n N      Find (/search <text>) · the next match · the previous one (n N when not typing)
   Typing           arrows · home/end or ctrl+a/ctrl+e · ctrl+u/ctrl+k cut to start/end · tab two spaces
-  Suggestions      tables, columns, keywords as you type · tab take one · ↑↓ pick (then ↵ takes it too)
-                   esc close · ctrl+space ask for them anywhere
+                   ctrl+←/→ a word at a time · ctrl+w delete a word · shift+movement selects (esc lets go)
+  ctrl+z  ctrl+y   Undo · Redo (a word at a time; also when not typing, and /new can be undone too)
+  Suggestions      tables, columns, keywords, JOIN … ON from foreign keys · tab take one · ↑↓ pick (then ↵ takes it)
+                   they open by themselves after FROM, JOIN, ON, EXEC, USE · inside a call, its syntax shows above
+                   esc close · ctrl+n (or ctrl+space) ask for them anywhere · tab after SELECT * writes out the columns
   /new  /save <file.sql>   Clear it · Write it to a file
 
 Query, a file (opened with /open; Trawl reloads it when you save; /console goes back)
@@ -42,6 +49,9 @@ Results
   [ ]              Previous, next result set
   ↵                The row as a record, one column per line
   x                Export (/export <file.csv|file.json>)
+  o                Sort by the column: A to Z, then Z to A, then as it came (the query doesn't run again)
+  f                Filter: only rows with a value containing the text (/filter <text>; empty shows them all)
+  y  Y             Copy the cell · the row (tab-separated); /copy [tsv|csv|json|insert] copies the whole set
   Editing (the rows of one table, with its primary key: ↵ in the Explorer, or SELECT … FROM one table)
   e or i           Edit the cell: ↵ keeps it, tab keeps it and edits the next column, esc leaves it
   n                Make the cell NULL           d           Mark the row to delete (again: keep it)
@@ -71,7 +81,8 @@ Safety
   A production connection (/add … --prod) is read-only: writes are refused until /writes.
   /tx manual (production's default, as DataGrip's Tx: Manual): a write starts a transaction,
   /commit keeps it, /rollback undoes it. /tx auto commits each statement as it runs.
-  UPDATE or DELETE with no WHERE, DROP and TRUNCATE always ask first.
+  UPDATE or DELETE with no WHERE, DROP and TRUNCATE always ask first. Before an UPDATE or DELETE runs,
+  a SELECT COUNT over its FROM and WHERE says how many rows it changes; over 1,000, it asks first too.
 
 Prompt
   tab              Complete        ↑ ↓         Pick a suggestion, or walk history
@@ -80,9 +91,9 @@ Prompt
 
 Slash commands
   /import datagrip [folder]   /connect <name>   /add <name> <server> [database] [--user u] [--domain d] [--folder f] [--prod] [--commit auto|manual] [--trust-cert]
-  /forget <name>   /folder <connection> [folder]   /password [connection]   /disconnect   /use <database>   /open <file.sql>   /console   /new   /save <file.sql>
-  /describe <table>   /find [text]
-  /export <file>   /limit [rows]   /writes   /tx [auto|manual]   /commit   /rollback   /ask <question>   /ai   /update   /settings   /last   /refresh   /help   /quit
+  /forget <name>   /folder <connection> [folder]   /password [connection]   /disconnect   /use <database>   /open <file.sql>   /console   /new   /format   /search <text>   /save <file.sql>
+  /describe <table>   /script <name>   /find [text]
+  /export <file>   /filter [text]   /copy [format]   /limit [rows]   /writes   /tx [auto|manual]   /commit   /rollback   /ask <question>   /ai   /update   /settings   /stats [on|off]   /plan [sql]   /last   /refresh   /help   /quit
 
 Viewer (describe, records, output, this help)
   j k  space  g G  Scroll         esc / q     Close`;

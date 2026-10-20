@@ -81,6 +81,8 @@ test('DELETE with no WHERE asks first, and No leaves it', async () => {
   await type(app.stdin, '!DELETE FROM dbo.Players');
   app.stdin.write(KEYS.enter);
   await until(() => frame().includes('changes every row of dbo.Players'), 'the confirmation');
+  // Counted first, with a SELECT: the demo's Players has 12 rows.
+  assert.match(frame(), /On demo: that's 12 rows\./);
   app.stdin.write('2');
   await new Promise((r) => setTimeout(r, 200));
   assert.doesNotMatch(frame(), /rows affected/);
@@ -310,10 +312,176 @@ test('the console suggests tables and columns as you type; tab takes one, esc on
   app.stdin.write(KEYS.esc);
   await until(() => !frame().includes('int · Players'), 'the list closed');
   assert.match(frame(), /typing SQL/);
-  app.stdin.write('\x00'); // ctrl+space brings it back
+  app.stdin.write('\x0e'); // ctrl+n brings it back
   await until(() => frame().includes('int · Players'), 'the list again');
   app.stdin.write('\t');
   await until(() => frame().includes('WHERE p.Goals'), 'the column taken');
+  app.unmount();
+});
+
+test('ctrl+z undoes in the console a word at a time, ctrl+y redoes, and /new can be undone', async () => {
+  mkdirSync(process.env.TRAWL_HOME, { recursive: true });
+  writeFileSync(join(process.env.TRAWL_HOME, 'console.sql'), '');
+  const app = start();
+  await until(() => frame().includes('Clubs'), 'the explorer');
+  app.stdin.write('2');
+  await until(() => frame().includes('An empty console'), 'the empty console');
+  app.stdin.write('i');
+  await until(() => frame().includes('typing SQL'), 'typing mode');
+  await type(app.stdin, 'SELECT 42');
+  await until(() => frame().includes('1 SELECT 42'), 'the text');
+  app.stdin.write('\x1a'); // ctrl+z
+  await until(() => frame().includes('1 SELECT ') && !frame().includes('SELECT 42'), 'the last word undone');
+  app.stdin.write('\x19'); // ctrl+y
+  await until(() => frame().includes('1 SELECT 42'), 'redone');
+  app.stdin.write(KEYS.esc);
+  await until(() => frame().includes('↵/i type'), 'out of typing mode');
+  await type(app.stdin, '/new');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('Clear the console?'), 'the question');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('typing SQL') && !frame().includes('SELECT 42'), 'a clear console');
+  app.stdin.write('\x1a');
+  await until(() => frame().includes('1 SELECT 42'), '/new undone');
+  app.unmount();
+});
+
+test('shift+arrows select in the console, and ctrl+r runs just the selection', async () => {
+  mkdirSync(process.env.TRAWL_HOME, { recursive: true });
+  writeFileSync(join(process.env.TRAWL_HOME, 'console.sql'), 'SELECT 1 AS one, 2 AS two');
+  const app = start();
+  await until(() => frame().includes('Clubs'), 'the explorer');
+  app.stdin.write('2');
+  await until(() => frame().includes('SELECT 1 AS one'), 'the console');
+  app.stdin.write('i');
+  await until(() => frame().includes('typing SQL'), 'typing mode');
+  // To the end of "one", then select back to the start of the line.
+  for (let k = 0; k < 4; k++) app.stdin.write('\x1b[1;5C'); // ctrl+→
+  await new Promise((r) => setTimeout(r, 50));
+  app.stdin.write('\x1b[1;2H'); // shift+home
+  await until(() => frame().includes('ctrl+r runs just this'), 'the selection');
+  app.stdin.write('\x12');
+  await until(() => frame().includes('─ SELECT 1 AS one ─'), 'only the selection run');
+  assert.doesNotMatch(frame(), /one\s+│ two/);
+  app.stdin.write(KEYS.esc);
+  await until(() => frame().includes('typing · ctrl+n'), 'the selection let go');
+  app.unmount();
+});
+
+test('ctrl+f finds text in the console and n finds the next one', async () => {
+  mkdirSync(process.env.TRAWL_HOME, { recursive: true });
+  writeFileSync(join(process.env.TRAWL_HOME, 'console.sql'), 'SELECT 1\n\nSELECT Name FROM dbo.Clubs\n\nSELECT Name FROM dbo.Players');
+  const app = start();
+  await until(() => frame().includes('Clubs'), 'the explorer');
+  app.stdin.write('2');
+  await until(() => frame().includes('dbo.Players'), 'the console');
+  app.stdin.write('\x06'); // ctrl+f
+  await until(() => frame().includes('> /search'), 'the search prompt');
+  await type(app.stdin, 'name');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('ctrl+r runs just this') && /▌3 SELECT Name/.test(frame()), 'the first match');
+  app.stdin.write('n');
+  await until(() => /▌5 SELECT Name/.test(frame()), 'the next match');
+  await type(app.stdin, '/search nowhere');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('"nowhere" isn\'t in the console.'), 'no match');
+  app.unmount();
+});
+
+test('f formats the statement under the cursor, and ctrl+z puts it back', async () => {
+  mkdirSync(process.env.TRAWL_HOME, { recursive: true });
+  writeFileSync(join(process.env.TRAWL_HOME, 'console.sql'), 'select Name from dbo.Clubs where Id = 1 and Active = 1');
+  const app = start();
+  await until(() => frame().includes('Clubs'), 'the explorer');
+  app.stdin.write('2');
+  await until(() => frame().includes('select Name from'), 'the console');
+  app.stdin.write('f');
+  await until(() => /1 SELECT Name\s/.test(frame()) && /2 FROM dbo\.Clubs/.test(frame()) && /4\s+AND Active = 1/.test(frame()), 'the statement formatted');
+  app.stdin.write('\x1a');
+  await until(() => frame().includes('select Name from'), 'undone');
+  app.unmount();
+});
+
+test('c in the Explorer, or /script, puts a CREATE script in the console', async () => {
+  mkdirSync(process.env.TRAWL_HOME, { recursive: true });
+  writeFileSync(join(process.env.TRAWL_HOME, 'console.sql'), '');
+  const app = start();
+  await until(() => frame().includes('Clubs'), 'the explorer');
+  app.stdin.write('c');
+  await until(() => frame().includes('CREATE TABLE [dbo].[Clubs]') && frame().includes('typing SQL'), 'the table script');
+  app.stdin.write(KEYS.esc);
+  await until(() => frame().includes('↵/i type'), 'out of typing mode');
+  await type(app.stdin, '/script vTop');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('CREATE VIEW dbo.vTopScorers AS'), 'the view definition');
+  app.unmount();
+});
+
+test('y and Y copy the cell and the row, and /copy the whole result set', async () => {
+  const copied = [];
+  const app = start('demo', { clipboard: async (text) => (copied.push(text), 'system') });
+  await until(() => frame().includes('Clubs'), 'the explorer');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('Club A FC'), 'the rows of Clubs');
+  app.stdin.write('l');
+  app.stdin.write('y');
+  await until(() => frame().includes("Copied Name's value."), 'the cell copied');
+  assert.equal(copied[0], 'Club A FC');
+  app.stdin.write('Y');
+  await until(() => frame().includes('Copied row 1, tab-separated.'), 'the row copied');
+  assert.equal(copied[1], '1\tClub A FC\tPT\t1904-03-14\t1');
+  await type(app.stdin, '/copy insert');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('Copied 3 rows as INSERT statements.'), 'the set copied');
+  assert.match(copied[2], /^INSERT INTO \[dbo\]\.\[Clubs\] \(\[Id\], \[Name\], \[Country\], \[Founded\], \[Active\]\) VALUES\n  \(1, N'Club A FC', 'PT', '1904-03-14', 1\),/);
+  app.unmount();
+});
+
+test('o sorts the result rows by a column and /filter narrows them, without running again', async () => {
+  const app = start();
+  await until(() => frame().includes('Clubs'), 'the explorer');
+  await type(app.stdin, '!SELECT TOP (500) * FROM [dbo].[Players]');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('Rui Costa'), 'the players');
+  for (let k = 0; k < 5; k++) app.stdin.write('l');
+  await new Promise((r) => setTimeout(r, 50));
+  app.stdin.write('o');
+  await until(() => frame().includes('Goals ▲'), 'sorted A to Z');
+  app.stdin.write('o');
+  await until(() => frame().includes('by Goals ▼'), 'sorted Z to A');
+  assert.match(frame(), /❯\s+4 │\s+1 │ João Pinto/);
+  assert.match(frame(), /│ Goals ▼/);
+  await type(app.stdin, '/filter marta');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('"marta": 1 of 12 rows'), 'the filter');
+  assert.match(frame(), /Marta Reis/);
+  assert.doesNotMatch(frame(), /Rui Costa/);
+  app.unmount();
+});
+
+test('/stats sums up reads and times after each run, and p shows the plan without running', async () => {
+  mkdirSync(process.env.TRAWL_HOME, { recursive: true });
+  writeFileSync(join(process.env.TRAWL_HOME, 'console.sql'), 'DELETE FROM dbo.Players WHERE Goals = 0');
+  const app = start();
+  await until(() => frame().includes('Clubs'), 'the explorer');
+  await type(app.stdin, '/stats');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('stats on'), 'statistics on');
+  await type(app.stdin, '!SELECT * FROM dbo.Players');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('Logical reads: Players 3 · CPU 0 ms · elapsed 1 ms'), 'the one-line summary');
+  assert.doesNotMatch(frame(), /Scan count/);
+  app.stdin.write('2');
+  await until(() => frame().includes('DELETE FROM dbo.Players'), 'the console');
+  app.stdin.write('p');
+  await until(() => frame().includes('Clustered Index Scan(OBJECT:([ClubA].[dbo].[Players]'), 'the plan');
+  assert.doesNotMatch(frame(), /rows affected/);
+  app.stdin.write(KEYS.esc);
+  await until(() => !frame().includes('╭─ Plan:'), 'the plan closed');
+  // SHOWPLAN is off again: a query gives rows, not a plan.
+  await type(app.stdin, '!SELECT TOP (2) * FROM dbo.Clubs');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('Club A FC'), 'rows again');
   app.unmount();
 });
 
@@ -331,6 +499,8 @@ test('e in History puts the statement in the console to edit', async () => {
 });
 
 test('/ask puts Claude’s query in the console and runs nothing', async () => {
+  mkdirSync(process.env.TRAWL_HOME, { recursive: true });
+  writeFileSync(join(process.env.TRAWL_HOME, 'console.sql'), '');
   const prompts = [];
   const askClaude = async ({ prompt }) => {
     prompts.push(prompt);

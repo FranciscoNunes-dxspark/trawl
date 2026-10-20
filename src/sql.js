@@ -285,6 +285,35 @@ export function classify(statement) {
   return { write, danger };
 }
 
+/**
+ * A read-only count of the rows an UPDATE or DELETE would change: SELECT COUNT_BIG(*) over its FROM
+ * and WHERE. Null when that can't be worked out safely (TOP, OUTPUT, WHERE CURRENT OF, a CTE, or more
+ * than one statement).
+ */
+export function countQuery(sql) {
+  const src = normalise(sql).trim().replace(/;\s*$/, '');
+  if (splitStatements(src).length !== 1) return null;
+  const toks = tokens(src);
+  const first = toks[0]?.w;
+  if ((first !== 'UPDATE' && first !== 'DELETE') || toks.some((t) => ['TOP', 'OUTPUT', 'CURRENT', 'OPENQUERY'].includes(t.w))) return null;
+  const at = (word, after = 0) => toks.find((t) => t.w === word && t.depth === 0 && t.at >= after)?.at ?? -1;
+  let body;
+  if (first === 'DELETE') {
+    // DELETE [FROM] t [WHERE …], or DELETE t FROM t JOIN … WHERE … (a second FROM says what's read).
+    const from = at('FROM');
+    const second = from >= 0 ? at('FROM', from + 4) : -1;
+    body = second >= 0 ? src.slice(second + 4) : from >= 0 ? src.slice(from + 4) : src.slice(toks[0].at + 6);
+  } else {
+    // UPDATE t SET … [FROM …] [WHERE …]
+    const set = at('SET');
+    if (set < 0) return null;
+    const from = at('FROM', set);
+    const where = at('WHERE', set);
+    body = from >= 0 ? src.slice(from + 4) : `${src.slice(toks[0].at + 6, set).trim()}${where >= 0 ? ` ${src.slice(where)}` : ''}`;
+  }
+  return body.trim() ? `SELECT COUNT_BIG(*) FROM ${body.trim()};` : null;
+}
+
 /** classify() over every statement of a script, merged. */
 export function classifyScript(text) {
   const parts = splitStatements(text).map((s) => classify(s.text));
@@ -401,4 +430,59 @@ export function withoutLeadingComments(text) {
   const src = normalise(text);
   const at = mask(src).search(/[^\s\u0001]/);
   return at < 0 ? '' : src.slice(at);
+}
+
+// Sorting values from the server: NULL first, then by what they are (numbers as numbers, dates
+// by time), text by the user's locale.
+function compareValues(a, b) {
+  if (a == null || b == null) return a == null ? (b == null ? 0 : -1) : 1;
+  if (a instanceof Date && b instanceof Date) return a - b;
+  if ((typeof a === 'number' || typeof a === 'bigint') && (typeof b === 'number' || typeof b === 'bigint')) return a < b ? -1 : a > b ? 1 : 0;
+  if (typeof a === 'boolean' && typeof b === 'boolean') return Number(a) - Number(b);
+  return formatValue(a).localeCompare(formatValue(b), undefined, { numeric: true, sensitivity: 'base' });
+}
+
+/**
+ * The order a result set's rows show in, as indexes into `set.rows`: only those with a value
+ * containing `filter` (ignoring case), sorted on `sort` ({ col, dir: 1 or -1 }) when given.
+ */
+export function viewOrder(set, { sort = null, filter = '' } = {}) {
+  let order = set.rows.map((_, i) => i);
+  const q = filter.trim().toLowerCase();
+  if (q) order = order.filter((i) => set.rows[i].some((v) => formatValue(v).toLowerCase().includes(q)));
+  if (sort) order.sort((x, y) => compareValues(set.rows[x][sort.col], set.rows[y][sort.col]) * sort.dir || x - y);
+  return order;
+}
+
+const IO_LINE = /^Table '([^']+)'\. Scan count \d+, logical reads (\d+)/;
+const TIME_LINE = /SQL Server Execution Times:\s*CPU time = (\d+) ms,\s*elapsed time = (\d+) ms/;
+const COMPILE_LINE = /SQL Server parse and compile time:/;
+
+/**
+ * SET STATISTICS IO and TIME's messages, one or more per statement, made into one line: the
+ * logical reads per table (most first) and the CPU and elapsed time added up. { summary, messages }
+ * with the other messages kept; summary is null when there were none of those.
+ */
+export function statisticsSummary(messages) {
+  const reads = new Map();
+  let cpu = 0;
+  let elapsed = 0;
+  let found = false;
+  const rest = [];
+  for (const msg of messages) {
+    const text = String(msg).trim();
+    let m;
+    if ((m = text.match(IO_LINE))) {
+      found = true;
+      if (m[1] !== 'Worktable' || Number(m[2])) reads.set(m[1], (reads.get(m[1]) ?? 0) + Number(m[2]));
+    } else if ((m = text.match(TIME_LINE))) {
+      found = true;
+      cpu += Number(m[1]);
+      elapsed += Number(m[2]);
+    } else if (COMPILE_LINE.test(text)) found = true;
+    else rest.push(msg);
+  }
+  if (!found) return { summary: null, messages };
+  const tables = [...reads].sort((x, y) => y[1] - x[1]).map(([t, n]) => `${t} ${n.toLocaleString('en')}`);
+  return { summary: `Logical reads: ${tables.join(', ') || 'none'} · CPU ${cpu} ms · elapsed ${elapsed} ms`, messages: rest };
 }

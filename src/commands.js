@@ -15,9 +15,14 @@ export const COMMANDS = [
   { name: 'open', args: '<file.sql>', desc: 'Open a script in Query (reloads when you save it)', run: (ctx, s) => (s ? ctx.openFile(s) : ctx.prefill('/open ')) },
   { name: 'console', desc: 'Back to the console in Query (after /open)', run: (ctx) => ctx.showConsole() },
   { name: 'new', desc: 'Clear the console and start typing', run: (ctx) => a.newConsole(ctx) },
+  { name: 'format', desc: 'Lay out the statement under the cursor in the console (or the selection)', run: (ctx) => a.formatConsole(ctx) },
+  { name: 'search', args: '<text>', desc: 'Find text in the console (then n and N: next, previous)', run: (ctx, s) => a.searchConsole(ctx, s) },
   { name: 'save', args: '<file.sql>', desc: 'Write the console to a file', run: (ctx, s) => a.saveConsoleAs(ctx, s) },
   { name: 'describe', args: '<table>', desc: 'Columns, types and keys of a table or view', complete: 'objects', run: (ctx, s) => a.describe(ctx, s) },
+  { name: 'script', args: '<name>', desc: 'CREATE script of a table, view, procedure or function, into the console', complete: 'everything', run: (ctx, s) => a.scriptObject(ctx, s) },
   { name: 'find', args: '[text]', desc: 'Filter the Explorer by name (empty clears it)', run: (ctx, s) => ctx.find(s) },
+  { name: 'filter', args: '[text]', desc: 'Show only the result rows with a value containing the text (empty shows all)', run: (ctx, s) => ctx.filterResults(s) },
+  { name: 'copy', args: '[tsv|csv|json|insert]', desc: 'Copy the result set on screen (tab-separated pastes into a spreadsheet)', run: (ctx, s) => a.copyResults(ctx, s.trim()) },
   { name: 'export', args: '<file.csv|file.json>', desc: 'Save the result set on screen', run: (ctx, s) => a.exportResults(ctx, s) },
   { name: 'limit', args: '[rows]', desc: 'Rows kept per result set (the query stops there)', run: (ctx, s) => a.setLimit(ctx, s) },
   { name: 'writes', desc: 'Allow writes on a read-only connection until you disconnect', run: (ctx) => a.allowWrites(ctx) },
@@ -28,6 +33,8 @@ export const COMMANDS = [
   { name: 'update', desc: 'Check for a newer Trawl and install it (or say how to get it)', run: (ctx) => ctx.checkUpdates() },
   { name: 'ask', args: '<question>', desc: 'Claude writes a query for it, into the console (nothing runs)', run: (ctx, s) => a.ask(ctx, s) },
   { name: 'ai', args: '[connection] [off|schema|results]', desc: 'What Claude may see of a connection (schema only by default)', complete: 'connections', run: (ctx, s) => a.setAi(ctx, s) },
+  { name: 'stats', args: '[on|off]', desc: 'Pages read per table and server time after each run (STATISTICS IO, TIME)', run: (ctx, s) => a.setStats(ctx, s.trim().toLowerCase()) },
+  { name: 'plan', args: '[sql]', desc: 'The estimated plan of the statement under the cursor in the console (nothing runs)', run: (ctx, s) => a.showPlan(ctx, s) },
   { name: 'last', desc: 'Show the full output of the last run', run: (ctx) => ctx.showLast() },
   { name: 'refresh', desc: 'Reload the schema', run: (ctx) => ctx.refresh() },
   { name: 'help', desc: 'Keyboard shortcuts', run: (ctx) => ctx.showHelp() },
@@ -47,6 +54,7 @@ function completions(kind, { config, schema }) {
   if (kind === 'connections') return config.connections.map((c) => c.name);
   if (!schema) return [];
   if (kind === 'databases') return schema.databases;
+  if (kind === 'everything') return schema.objects.map(objectName);
   return schema.objects.filter((o) => o.kind === 'table' || o.kind === 'view').map(objectName);
 }
 

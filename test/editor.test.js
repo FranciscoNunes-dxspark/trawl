@@ -66,3 +66,75 @@ test('highlighting colours keywords, strings, comments, numbers and variables', 
   assert.equal(lines[1][0].kind, 'comment');
   assert.equal(lines[1].at(-1).kind, 'keyword');
 });
+
+test('undo steps back a word at a time, and redo forward again', () => {
+  let h = ed.newHistory();
+  let e = ed.fromText('');
+  // Each keystroke records the state before it, as App's setConsole does.
+  const key = (ch, at) => {
+    const next = ch === '\n' ? ed.newline(e) : ed.insert(e, ch);
+    h = ed.record(h, e, { merge: ch !== ' ' && ch !== '\n', at });
+    e = next;
+  };
+  [...'SELECT 1'].forEach((ch, i) => key(ch, i * 10));
+  assert.equal(ed.toText(e), 'SELECT 1');
+  let r = ed.undo(h, e);
+  assert.equal(ed.toText(r.editor), 'SELECT ');
+  r = ed.undo(r.history, r.editor);
+  assert.equal(ed.toText(r.editor), 'SELECT');
+  r = ed.undo(r.history, r.editor);
+  assert.deepEqual(r.editor, { lines: [''], row: 0, col: 0 });
+  assert.equal(ed.undo(r.history, r.editor), null);
+  r = ed.redo(r.history, r.editor);
+  assert.equal(ed.toText(r.editor), 'SELECT');
+  r = ed.redo(r.history, r.editor);
+  r = ed.redo(r.history, r.editor);
+  assert.deepEqual([ed.toText(r.editor), r.editor.col], ['SELECT 1', 8]);
+  assert.equal(ed.redo(r.history, r.editor), null);
+});
+
+test('a pause or another line starts a new undo step, and an edit drops what was undone', () => {
+  let h = ed.record(ed.newHistory(), { lines: [''], row: 0, col: 0 }, { merge: true, at: 0 });
+  h = ed.record(h, { lines: ['a'], row: 0, col: 1 }, { merge: true, at: 2000 });
+  assert.equal(h.past.length, 2);
+  h = ed.record(h, { lines: ['ab', ''], row: 1, col: 0 }, { merge: true, at: 2010 });
+  assert.equal(h.past.length, 3);
+  const r = ed.undo(h, { lines: ['ab', 'c'], row: 1, col: 1 });
+  assert.equal(r.history.future.length, 1);
+  assert.equal(ed.record(r.history, r.editor).future.length, 0);
+});
+
+test('ctrl+arrows move a word at a time, and ctrl+w deletes one', () => {
+  const e = { lines: ['SELECT p.Name, x', 'FROM t'], row: 0, col: 16 };
+  assert.equal(ed.wordMove(e, -1).col, 15);
+  assert.equal(ed.wordMove({ ...e, col: 13 }, -1).col, 9);
+  assert.equal(ed.wordMove({ ...e, col: 0 }, 1).col, 6);
+  assert.deepEqual([ed.wordMove(e, 1).row, ed.wordMove(e, 1).col], [1, 0]);
+  assert.deepEqual([ed.wordMove({ ...e, row: 1, col: 0 }, -1).row, ed.wordMove({ ...e, row: 1, col: 0 }, -1).col], [0, 16]);
+  assert.deepEqual(ed.deleteWordBack({ lines: ['SELECT Name  '], row: 0, col: 13 }), { lines: ['SELECT '], row: 0, col: 7 });
+});
+
+test('shift selects; typing or backspace replaces the selection, and moving lets it go', () => {
+  let e = { lines: ['SELECT 1', 'SELECT 2'], row: 0, col: 7 };
+  e = ed.extend(e, (x) => ed.move(x, { rows: 1 }));
+  assert.deepEqual(ed.selection(e), { start: { row: 0, col: 7 }, end: { row: 1, col: 7 } });
+  assert.deepEqual(ed.selectedText(e), { text: '1\nSELECT ', row: 0 });
+  assert.ok(ed.isSelected(ed.selection(e), 1, 0) && !ed.isSelected(ed.selection(e), 1, 7));
+  assert.deepEqual(ed.insert(e, 'x'), { lines: ['SELECT x2'], row: 0, col: 8 });
+  assert.deepEqual(ed.backspace(e), { lines: ['SELECT 2'], row: 0, col: 7 });
+  assert.equal(ed.move(e, { cols: 1 }).anchor, undefined);
+  // Selecting backwards works the same.
+  const back = ed.extend({ lines: ['abcdef'], row: 0, col: 4 }, (x) => ed.wordMove(x, -1));
+  assert.deepEqual(ed.selectedText(back), { text: 'abcd', row: 0 });
+});
+
+test('find selects the next match, wraps round, and goes back', () => {
+  const e = { lines: ['SELECT Name', 'FROM t WHERE name = 1'], row: 0, col: 0 };
+  let f = ed.find(e, 'NAME');
+  assert.deepEqual(ed.selectedText(f), { text: 'Name', row: 0 });
+  f = ed.find(f, 'name');
+  assert.deepEqual([f.anchor, f.row, f.col], [{ row: 1, col: 13 }, 1, 17]);
+  assert.deepEqual(ed.find(f, 'name').anchor, { row: 0, col: 7 });
+  assert.deepEqual(ed.find(e, 'name', { back: true }).anchor, { row: 1, col: 13 });
+  assert.equal(ed.find(e, 'nope'), null);
+});

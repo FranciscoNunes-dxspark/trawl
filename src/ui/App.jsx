@@ -34,6 +34,7 @@ import { FACES, moodFor } from '../glim.js';
 import { checksDisabled, isDue, isNewer, openUrl, updateAdvice } from '../update.js';
 import { askClaude as askClaudeCli } from '../ai.js';
 import { COMPILED, VERSION } from '../version.js';
+import { worthNotifying } from '../notify.js';
 
 const VIEWS = [
   { id: 'explorer', label: 'Explorer' },
@@ -156,8 +157,10 @@ const DOUBLE_CLICK_MS = 400;
  * files by default). `credentials` keeps passwords (the OS store by default) and `open` starts
  * a session (db.js); the tests pass their own. `setTitle(text)` names the terminal window. `mouse` is
  * mouse.js's terminalMouse() from cli.jsx (missing where the terminal can't report it); tests pass their own.
+ * `notify(title, body)` says a long run has finished (cli.jsx rings the terminal's bell and raises a
+ * notification); without it, as in most tests, nothing is said.
  */
-export function App({ config: initialConfig, initialFile, initialConnection, checkLatest, installUpdate, askClaude = askClaudeCli, findDataSources, credentials = osCredentials, open = openSession, clipboard = copyToClipboard, setTitle, mouse }) {
+export function App({ config: initialConfig, initialFile, initialConnection, checkLatest, installUpdate, askClaude = askClaudeCli, findDataSources, credentials = osCredentials, open = openSession, clipboard = copyToClipboard, setTitle, mouse, notify }) {
   const { exit } = useApp();
   const { columns, rows } = useTerminalSize();
   const [config, setConfigState] = useState(initialConfig);
@@ -358,16 +361,20 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     setBusy(b);
     const id = quiet ? null : addEntry({ title, status: 'running' });
     if (!quiet && !title.startsWith('connect ')) setWelcome(false);
+    // A long run that ends says so, for when you've looked away (Settings' "Notify when done").
+    const tell = (lines) => !quiet && notify && worthNotifying(Date.now() - b.started, configRef.current) && notify(`Trawl: ${title}`, lines[0] ?? '');
     try {
       const lines = await start(controller.signal);
       lastOutput.current = { title, text: lines.join('\n') || 'Done' };
       if (id) updateEntry(id, { status: 'ok', lines: lines.length ? lines : ['Done'] });
+      tell(lines.length ? lines : ['Done']);
       return { ok: true };
     } catch (error) {
       const lines = error.cancelled ? ['Cancelled'] : error.message.split('\n');
       lastOutput.current = { title, text: lines.join('\n') };
       if (id) updateEntry(id, { status: 'error', lines });
       else addEntry({ title, status: 'error', lines });
+      if (!error.cancelled) tell(lines);
       return { ok: false, error };
     } finally {
       busyRef.current = null;

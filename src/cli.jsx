@@ -7,6 +7,7 @@ import { DEMO_CONNECTIONS } from './connections.js';
 import { setAccent } from './theme.js';
 import { App } from './ui/App.jsx';
 import { terminalMouse } from './mouse.js';
+import { notification } from './notify.js';
 
 // A title is printed raw, so nothing in it may end or start an escape sequence.
 const clean = (s) => String(s).replace(/[\x00-\x1f\x7f]/g, '');
@@ -82,6 +83,7 @@ async function runApp() {
       installUpdate={COMPILED ? installUpdate : undefined}
       setTitle={setTitle}
       mouse={mouse}
+      notify={(title, body) => process.stdout.write(notification(title, body))}
     />,
     // Through the mouse's stdout, which watches the frames to select text from.
     { exitOnCtrlC: false, stdout: mouse?.stdout ?? process.stdout },

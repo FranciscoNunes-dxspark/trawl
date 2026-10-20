@@ -109,7 +109,8 @@ Activity (the server's sessions: blocking chains first, as a tree under the sess
   a                Show the idle sessions too, or only what's running, waiting or holding a transaction
 
 Settings (, or /settings: Trawl's own; a connection's are on Connections)
-  ↵ or space       Change it: the row limit, the accent colour, checking for and installing updates
+  ↵ or space       Change it: the row limit, the accent colour, the mouse, checking for and installing updates,
+                   and notifying when a run takes over 10 s (a bell and a desktop notification)
   esc / q          Close
 
 Claude

@@ -238,3 +238,28 @@ test('p pins a result, and c after another run shows the rows added, removed and
   assert.match(frame(), /0 changed · 1 added · 1 removed · 0 the same \(whole rows compared\)/);
   app.unmount();
 });
+
+test('a long run ends with a notification, unless Settings turns it off', async () => {
+  const told = [];
+  const app = start('demo', { notify: (title, body) => told.push([title, body]) }, { notifyAfter: 0.5 });
+  await until(() => frame().includes('Clubs'), 'the explorer');
+  await command(app, '!SELECT 1 AS quick');
+  await until(() => frame().includes('quick'), 'a quick run');
+  await command(app, "!WAITFOR DELAY '00:00:01'");
+  await until(() => told.length === 1, 'the notification');
+  assert.equal(told[0][0], "Trawl: WAITFOR DELAY '00:00:01'");
+  assert.match(told[0][1], /\d+ ms/);
+  app.stdin.write(',');
+  await until(() => frame().includes('Row limit'), 'Settings');
+  app.stdin.write('G');
+  await until(() => /❯ Notify when done\s+on\s+after 0\.5 s/.test(frame()), 'the notify row');
+  app.stdin.write(KEYS.enter);
+  await until(() => /Notify when done\s+off/.test(frame()), 'turned off');
+  app.stdin.write(KEYS.esc);
+  await until(() => !frame().includes('Row limit'), 'Settings closed');
+  await command(app, "!WAITFOR DELAY '00:00:01'");
+  await until(() => frame().includes('esc to cancel'), 'the second run');
+  await until(() => !frame().includes('esc to cancel'), 'its end');
+  assert.equal(told.length, 1);
+  app.unmount();
+});

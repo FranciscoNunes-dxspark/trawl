@@ -4,7 +4,8 @@ import { readFileSync, statSync, unwatchFile, watchFile } from 'node:fs';
 import { basename, resolve } from 'node:path';
 import * as a from '../actions.js';
 import { findCommand, suggestionsFor } from '../commands.js';
-import { loadClaudeHistory, loadConsole, saveConfig, saveConsole, withRan } from '../config.js';
+import { loadClaudeHistory, loadConsole, removeConsole, saveConfig, saveConsole, withRan } from '../config.js';
+import { freeFile, tabsOf } from '../consoles.js';
 import * as ed from '../editor.js';
 import { commitMode, describeConn, isReadOnly } from '../connections.js';
 import { copyToClipboard } from '../clipboard.js';
@@ -183,7 +184,13 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
   const [filter, setFilter] = useState('');
   const [welcome, setWelcome] = useState(true);
   const [update, setUpdate] = useState(null);
-  const [editor, setEditorState] = useState(() => ed.fromText(loadConsole()));
+  // The console's tabs, { name, file, editor, history }: the one on screen lives in editorRef and
+  // historyRef below, and goes back into its entry when another tab comes up.
+  const tabsRef = useRef(null);
+  if (!tabsRef.current) tabsRef.current = tabsOf(initialConfig).map((t) => ({ ...t, editor: null, history: ed.newHistory() }));
+  const [tabIndex, setTabIndexState] = useState(() => Math.max(0, Math.min(tabsRef.current.length - 1, Number(initialConfig.consoleTab) || 0)));
+  const tabIndexRef = useRef(tabIndex);
+  const [editor, setEditorState] = useState(() => ed.fromText(loadConsole(tabsRef.current[tabIndexRef.current].file)));
   const [queryMode, setQueryMode] = useState(initialFile ? 'file' : 'console');
   // How Results shows the set on screen: sorted on a column ({ col, dir }) and narrowed by /filter.
   const [resultView, setResultView] = useState({ sort: null, filter: '' });
@@ -280,7 +287,32 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     editorRef.current = next;
     setEditorState(next);
     clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(() => saveConsole(ed.toText(next)), 400);
+    const { file } = tabsRef.current[tabIndexRef.current];
+    saveTimer.current = setTimeout(() => saveConsole(ed.toText(next), file), 400);
+  };
+  // Writes the tab on screen now, rather than when typing stops.
+  const flushConsole = () => {
+    clearTimeout(saveTimer.current);
+    saveConsole(ed.toText(editorRef.current), tabsRef.current[tabIndexRef.current].file);
+  };
+  // The tabs' names and files, and which is open, are kept in the config.
+  const keepTabs = () => setConfig((c) => ({ ...c, consoleTabs: tabsRef.current.map(({ name, file }) => ({ name, file })), consoleTab: tabIndexRef.current }));
+  // Brings tab `i` up in the console. `drop` leaves the one on screen out (it was just closed).
+  const showTab = (i, { drop = false } = {}) => {
+    if (!drop) {
+      flushConsole();
+      Object.assign(tabsRef.current[tabIndexRef.current], { editor: editorRef.current, history: historyRef.current });
+    } else clearTimeout(saveTimer.current);
+    const tab = tabsRef.current[i];
+    tab.editor ??= ed.fromText(loadConsole(tab.file));
+    tabIndexRef.current = i;
+    setTabIndexState(i);
+    historyRef.current = tab.history;
+    editorRef.current = tab.editor;
+    setEditorState(tab.editor);
+    keepTabs();
+    setQueryMode('console');
+    setView('query');
   };
   const stepConsole = (step, nothing) => {
     const r = step(historyRef.current, editorRef.current);
@@ -604,8 +636,7 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
 
   const quit = async () => {
     if (!(await a.leaveSession(ctx))) return;
-    clearTimeout(saveTimer.current);
-    saveConsole(ed.toText(editorRef.current));
+    flushConsole();
     dropSession();
     exit();
   };
@@ -634,6 +665,10 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
       },
       get results() {
         return resultsRef.current;
+      },
+      // The console's tabs: { names, index }.
+      get consoleTabs() {
+        return { names: tabsRef.current.map((t) => t.name), index: tabIndexRef.current };
       },
       // Edits staged in Results, not yet saved.
       get changes() {
@@ -723,6 +758,27 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     editorHasKeys: () => focusRef.current === 'editor' && !overlayRef.current && !confirmRef.current,
     setConsole,
     undoConsole: () => stepConsole(ed.undo, 'Nothing to undo.'),
+    showConsoleTab: (i) => showTab(i),
+    // A new, empty tab after the others, on screen.
+    addConsoleTab: (name) => {
+      const tabs = tabsRef.current;
+      const file = freeFile(tabs, name);
+      saveConsole('', file);
+      tabs.push({ name, file, editor: ed.fromText(''), history: ed.newHistory() });
+      showTab(tabs.length - 1);
+    },
+    // Closes the tab on screen, and its file goes; the one before it comes up.
+    closeConsoleTab: () => {
+      const tabs = tabsRef.current;
+      const i = tabIndexRef.current;
+      const [gone] = tabs.splice(i, 1);
+      removeConsole(gone.file);
+      showTab(Math.max(0, i - 1), { drop: true });
+    },
+    renameConsoleTab: (name) => {
+      tabsRef.current[tabIndexRef.current].name = name;
+      keepTabs();
+    },
     redoConsole: () => stepConsole(ed.redo, 'Nothing to redo.'),
     // Stopping waits until this key has been handled everywhere, so the esc (or ctrl+c) that
     // ends typing isn't also taken as a global key: clear the log, or quit.
@@ -826,14 +882,14 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     if (view !== 'results' && focusRef.current === 'cell') setFocus('view');
   }, [view, queryMode]);
 
-  const lists = { config, schema, conn: session?.conn.name };
+  const lists = { config, schema, conn: session?.conn.name, tabs: tabsRef.current.map((t) => t.name) };
   const suggestions = focus === 'prompt' && !confirmReq ? suggestionsFor(prompt.value, lists) : [];
   const sel = Math.min(sugIndex, Math.max(0, suggestions.length - 1));
 
   // Line editing in the prompt.
   const promptKeys = (input, key) => {
     const { value, cursor } = promptRef.current;
-    const items = suggestionsFor(value, { config: configRef.current, schema: schemaRef.current, conn: sessionRef.current?.conn.name });
+    const items = suggestionsFor(value, { config: configRef.current, schema: schemaRef.current, conn: sessionRef.current?.conn.name, tabs: tabsRef.current.map((t) => t.name) });
     const pick = items[Math.min(sugIndex, items.length - 1)];
     const edit = (v, c) => {
       setPrompt(v, c);
@@ -1027,7 +1083,7 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     const editing = focus === 'editor';
     main = (
       <Box flexDirection="column" width={W} height={mainH}>
-        <ConsoleView editor={editor} editing={editing} ctx={ctx} width={W} height={mainH - under} active={(viewActive || editing) && !overlay && !confirmReq} />
+        <ConsoleView editor={editor} tabs={tabsRef.current.map((t) => t.name)} tab={tabIndex} editing={editing} ctx={ctx} width={W} height={mainH - under} active={(viewActive || editing) && !overlay && !confirmReq} />
         {under ? <ResultsView results={results} changes={changes} setIndex={resultIndex} view={resultView} ctx={ctx} width={W} height={under} top={mainH - under} active={false} /> : null}
       </Box>
     );

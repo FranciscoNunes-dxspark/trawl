@@ -39,6 +39,8 @@ Query, the console (a SQL editor, kept between sessions)
                    they open by themselves after FROM, JOIN, ON, EXEC, USE · inside a call, its syntax shows above
                    esc close · ctrl+n (or ctrl+space) ask for them anywhere · tab after SELECT * writes out the columns
   /new  /save <file.sql>   Clear it · Write it to a file
+  [  ]  +          Console tabs: the one before · the one after · a new one (/tab new [name])
+  /tab …           /tab <name or number> switch · /tab rename <name> · /tab close · /tab alone lists them
   S                Save the statement under the cursor (or the selection) as a snippet (/snippet save <name>)
 
 Snippets and parameters
@@ -122,7 +124,7 @@ Prompt
 
 Slash commands
   /import datagrip [folder]   /connect <name>   /add <name> <server> [database] [--user u] [--domain d] [--folder f] [--prod] [--commit auto|manual] [--trust-cert]
-  /forget <name>   /folder <connection> [folder]   /password [connection]   /disconnect   /use <database>   /open <file.sql>   /console   /new   /format   /search <text>   /save <file.sql>
+  /forget <name>   /folder <connection> [folder]   /password [connection]   /disconnect   /use <database>   /open <file.sql>   /console   /tab …   /new   /format   /search <text>   /save <file.sql>
   /describe <table>   /script <name>   /find [text]
   /export <file>   /filter [text]   /follow   /copy [format]   /limit [rows]   /writes   /tx [auto|manual]   /commit   /rollback   /ask <question>   /ai   /update   /settings   /stats [on|off]   /plan [sql]   /diff <connection> [database]   /fanout <folder> [sql]   /activity   /kill <session>   /last   /refresh   /help   /quit
 

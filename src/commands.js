@@ -16,6 +16,7 @@ export const COMMANDS = [
   { name: 'use', args: '<database>', desc: 'Switch to another database on the same server', complete: 'databases', run: (ctx, s) => a.use(ctx, s) },
   { name: 'open', args: '<file.sql>', desc: 'Open a script in Query (reloads when you save it)', run: (ctx, s) => (s ? ctx.openFile(s) : ctx.prefill('/open ')) },
   { name: 'console', desc: 'Back to the console in Query (after /open)', run: (ctx) => ctx.showConsole() },
+  { name: 'tab', args: '[new [name] | close | rename <name> | <name>]', desc: "The console's tabs: open, switch, rename, close ([ and ] switch, + opens)", complete: 'tabs', run: (ctx, s) => a.consoleTab(ctx, s) },
   { name: 'new', desc: 'Clear the console and start typing', run: (ctx) => a.newConsole(ctx) },
   { name: 'format', desc: 'Lay out the statement under the cursor in the console (or the selection)', run: (ctx) => a.formatConsole(ctx) },
   { name: 'search', args: '<text>', desc: 'Find text in the console (then n and N: next, previous)', run: (ctx, s) => a.searchConsole(ctx, s) },
@@ -59,9 +60,10 @@ export function findCommand(name) {
   return matches.length === 1 ? matches[0] : null;
 }
 
-function completions(kind, { config, schema, conn }) {
+function completions(kind, { config, schema, conn, tabs }) {
   if (kind === 'snippets') return [...snippetsFor(config.snippets, conn).map((s) => s.name), ...SNIPPET_WORDS];
   if (kind === 'connections') return config.connections.map((c) => c.name);
+  if (kind === 'tabs') return [...(tabs ?? []), 'new', 'close', 'rename'];
   if (kind === 'folders') return folderNames(config.connections);
   if (kind === 'diff') return [...config.connections.map((c) => c.name), ...(schema?.databases.filter((d) => d !== schema.database) ?? [])];
   if (!schema) return [];

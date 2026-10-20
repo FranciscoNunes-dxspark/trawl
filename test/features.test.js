@@ -169,3 +169,38 @@ test('S saves the console statement as a snippet; running it asks for its @param
   assert.equal(config.snippets[0].conn, 'demo');
   app.unmount();
 });
+
+test('console tabs: + opens one, [ and ] switch, each keeps its own text and file, /tab renames and closes', async () => {
+  mkdirSync(process.env.TRAWL_HOME, { recursive: true });
+  writeFileSync(join(process.env.TRAWL_HOME, 'console.sql'), 'SELECT 1 AS first');
+  const app = start();
+  await until(() => frame().includes('Clubs'), 'the explorer');
+  app.stdin.write('2');
+  await until(() => frame().includes('SELECT 1 AS first'), 'the console');
+  app.stdin.write('+');
+  await until(() => frame().includes('Console 1 console [2 query]') && frame().includes('typing SQL'), 'a new tab, typing');
+  await type(app.stdin, 'SELECT 2 AS second');
+  app.stdin.write(KEYS.esc);
+  await until(() => frame().includes('↵/i type'), 'out of typing');
+  app.stdin.write('[');
+  await until(() => frame().includes('Console [1 console] 2 query') && frame().includes('SELECT 1 AS first'), 'the first tab');
+  assert.doesNotMatch(frame(), /SELECT 2 AS second/);
+  app.stdin.write(']');
+  await until(() => frame().includes('SELECT 2 AS second'), 'the second tab again');
+  // Undo is per tab: here it takes back the typing, not the first tab's text.
+  app.stdin.write('\x1a');
+  await until(() => !frame().includes('SELECT 2 AS second'), 'undone');
+  app.stdin.write('\x19');
+  await until(() => frame().includes('SELECT 2 AS second'), 'redone');
+  await command(app, '/tab rename scratch');
+  await until(() => frame().includes('[2 scratch]'), 'renamed');
+  await new Promise((r) => setTimeout(r, 500));
+  assert.equal(readFileSync(join(process.env.TRAWL_HOME, 'consoles', 'query.sql'), 'utf8'), 'SELECT 2 AS second');
+  const config = JSON.parse(readFileSync(join(process.env.TRAWL_HOME, 'config.json'), 'utf8'));
+  assert.deepEqual(config.consoleTabs, [{ name: 'console', file: 'console.sql' }, { name: 'scratch', file: 'consoles/query.sql' }]);
+  await command(app, '/tab close');
+  await until(() => frame().includes('Close the console tab scratch?'), 'the question');
+  app.stdin.write('1');
+  await until(() => frame().includes('SELECT 1 AS first') && /╭─ Console ─/.test(frame()), 'back to one tab');
+  app.unmount();
+});

@@ -9,6 +9,7 @@ import { formatSql } from './format.js';
 import { changesText, insertScript, saveScript, tsvText, withSaved } from './edit.js';
 import { AI_LABELS, AI_LEVELS, aiLevel, askPrompt, canSeeSchema, consoleText, parseAnswer } from './ai.js';
 import { followTargets } from './follow.js';
+import { findTab, freeName, tabNameProblem } from './consoles.js';
 import { findSnippet, snippetNameProblem, snippetsFor, withSnippet, withoutSnippet } from './snippets.js';
 import { folderNames, inFolder, inParallel, mergeResults, readOnlyScript } from './fanout.js';
 import { DIFF_SQL, buildExtras, diffText, schemaDiff, syncScript } from './diff.js';
@@ -776,6 +777,44 @@ export async function importConnections(ctx, rest) {
 }
 
 const splitArgsLoose = (s) => String(s ?? '').trim().split(/\s+/).filter(Boolean);
+
+/**
+ * /tab: the console's tabs. /tab new [name] opens one, /tab <name or number> switches, /tab rename
+ * <name> renames the one on screen, /tab close closes it (asking when it has text). /tab alone lists them.
+ */
+export async function consoleTab(ctx, rest) {
+  const [word = '', ...more] = splitArgsLoose(rest);
+  const arg = more.join(' ');
+  const { names, index } = ctx.consoleTabs;
+  const tabs = names.map((name) => ({ name }));
+  const w = word.toLowerCase();
+  if (!w) return ctx.note(`Console tabs: ${names.map((n, i) => (i === index ? `[${i + 1} ${n}]` : `${i + 1} ${n}`)).join('  ')}. [ and ] switch, + opens one; /tab new|close|rename|<name>.`);
+  if (w === 'new') {
+    const name = arg || freeName(tabs);
+    const problem = tabNameProblem(name, tabs);
+    if (problem) return ctx.note(problem, 'error');
+    ctx.addConsoleTab(name);
+    return ctx.setEditing(true);
+  }
+  if (w === 'close') {
+    if (names.length === 1) return ctx.note('This is the only console tab; /new clears it.', 'error');
+    if (ed.toText(ctx.console).trim()) {
+      const ok = await ctx.confirm({ title: `Close the console tab ${names[index]}?`, detail: 'Its text goes with it; /save <file.sql> first keeps a copy.', options: YES_NO('Yes, close it') });
+      if (!ok) return;
+    }
+    return ctx.closeConsoleTab();
+  }
+  if (w === 'rename') {
+    if (!arg) return ctx.prefill(`/tab rename `);
+    const problem = tabNameProblem(arg, tabs, { except: index });
+    if (problem) return ctx.note(problem, 'error');
+    ctx.renameConsoleTab(arg);
+    return ctx.note(`The console tab is ${arg} now.`, 'ok');
+  }
+  const i = findTab(tabs, rest.trim());
+  if (i < 0) return ctx.note(`No console tab called ${rest.trim()}. /tab lists them; /tab new <name> opens one.`, 'error');
+  ctx.showConsoleTab(i);
+}
 
 /** Empties the console, asking first when there's something in it. */
 export async function newConsole(ctx) {

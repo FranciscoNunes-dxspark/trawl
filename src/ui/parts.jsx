@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 import { theme } from '../theme.js';
 import { clean, fit, fitSegments, stringWidth } from '../text.js';
@@ -18,6 +18,9 @@ export function Row({ segments, width, selected = false, focused = true, pointer
           bold={s.bold || (selected && focused && s.strong)}
           dimColor={s.dim}
           italic={s.italic}
+          underline={s.underline}
+          strikethrough={s.strike}
+          inverse={s.inverse}
         >
           {s.text}
         </Text>
@@ -92,7 +95,64 @@ export function Spinner({ label, started, width }) {
 }
 
 export function confirmHeight(req) {
+  if (req.secret) return 4 + (req.detail ? 1 : 0) + (req.remember !== undefined ? 1 : 0);
   return 3 + (req.detail ? 1 : 0) + req.options.length;
+}
+
+/**
+ * A password field in the confirm box: what's typed shows as *. ↵ gives { value, remember },
+ * esc null. With `req.remember` set, tab flips the "keep it" choice under the field.
+ */
+export function SecretPrompt({ req, width, onDone }) {
+  const [value, setValueState] = useState('');
+  const [remember, setRemember] = useState(req.remember);
+  // ↵ can come before the render after the last key, so the text lives in a ref too.
+  const valueRef = useRef('');
+  const setValue = (v) => {
+    valueRef.current = v;
+    setValueState(v);
+  };
+  useInput((input, key) => {
+    if (key.escape) return onDone(null);
+    if (key.return) return onDone({ value: valueRef.current, remember: Boolean(remember) });
+    if (key.tab) return remember !== undefined && setRemember((r) => !r);
+    if (key.backspace || key.delete) return setValue(valueRef.current.slice(0, -1));
+    if (key.ctrl && input === 'u') return setValue('');
+    if (key.ctrl || key.meta || !input) return;
+    const text = input.replace(/[\x00-\x1f\x7f]/g, '');
+    if (text) setValue(valueRef.current + text);
+  });
+  const inner = width - 4;
+  return (
+    <Box flexDirection="column" borderStyle="round" borderColor={req.danger ? theme.del : theme.accent} width={width} paddingX={1}>
+      <Text bold wrap="truncate">
+        {fit(req.title, inner).trimEnd()}
+      </Text>
+      {req.detail ? (
+        <Text color={theme.dim} wrap="truncate">
+          {fit(req.detail, inner).trimEnd()}
+        </Text>
+      ) : null}
+      <Text wrap="truncate">
+        <Text color={theme.accent} bold>
+          {'> '}
+        </Text>
+        {'*'.repeat(Math.min(value.length, Math.max(0, inner - 3)))}
+        <Text inverse> </Text>
+      </Text>
+      {remember !== undefined ? (
+        <Row
+          pointer={false}
+          width={inner}
+          segments={[
+            { text: remember ? '[x] ' : '[ ] ', color: theme.accent, bold: true },
+            { text: req.rememberLabel ?? 'Remember it' },
+            { text: '  (tab changes it · ↵ connect · esc cancel)', color: theme.dim },
+          ]}
+        />
+      ) : null}
+    </Box>
+  );
 }
 
 /** A numbered choice in a box, like Claude Code's permission prompts. Esc picks null. */

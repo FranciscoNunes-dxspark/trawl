@@ -6,15 +6,17 @@ import * as a from '../actions.js';
 import { findCommand, suggestionsFor } from '../commands.js';
 import { loadClaudeHistory, loadConsole, saveConfig, saveConsole, withRan } from '../config.js';
 import * as ed from '../editor.js';
-import { describeConn, isReadOnly } from '../connections.js';
+import { commitMode, describeConn, isReadOnly } from '../connections.js';
+import { osCredentials } from '../credentials.js';
 import { connect as openSession } from '../db.js';
+import { changesText, editTarget } from '../edit.js';
 import { HELP } from '../help.js';
 import { SCHEMA_SQL, buildSchema } from '../schema.js';
 import { qualified, splitStatements } from '../sql.js';
 import { BULLET, theme } from '../theme.js';
 import { fitSegments, stringWidth } from '../text.js';
 import { useTerminalSize } from './hooks.js';
-import { Confirm, Panel, PromptBox, Row, Spinner, Suggestions, confirmHeight } from './parts.jsx';
+import { Confirm, Panel, PromptBox, Row, SecretPrompt, Spinner, Suggestions, confirmHeight } from './parts.jsx';
 import { ConnectionsView } from './ConnectionsView.jsx';
 import { ConsoleView } from './ConsoleView.jsx';
 import { ExplorerView } from './ExplorerView.jsx';
@@ -39,9 +41,9 @@ const VIEWS = [
 const HINTS = {
   explorer: '↵ first rows · d describe · s query it in the console · /find filter',
   query: '↵ run statement · v select several · R run file · e edit in the console · /console',
-  results: 'h/l columns · [ ] result sets · ↵ record · x export',
+  results: 'h/l columns · ↵ record · e edit · n NULL · d delete · u undo · s save · x export',
   history: '↵ run again · e edit in the console · ◆ ran by Claude',
-  connections: '↵ connect · n new · x forget',
+  connections: '↵ connect · n new · p password · f folder · x forget',
 };
 
 // Typed at the prompt without "!", these still run as SQL.
@@ -50,6 +52,8 @@ const SQL_START = /^(select|with|insert|update|delete|merge|exec|execute|create|
 const CHANGES_SCHEMA = /\b(create|alter|drop|sp_rename|use)\b/i;
 
 const firstLine = (s) => String(s ?? '').split('\n')[0];
+// Changes staged in Results: "row:col" → the text typed (null for NULL), and rows to delete.
+const NO_CHANGES = { cells: new Map(), deletes: new Set() };
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
 /** The activity line under a run: "12 rows · 3 rows affected · 41 ms". */
@@ -70,6 +74,8 @@ function Header({ session, tranCount, writesAllowed, file, width, connecting, mo
     segs.push({ text: `  ${describeConn({ ...conn, database: session.database })}`, color: theme.dim });
     if (conn.prod) segs.push({ text: '  ' }, { text: ' PROD ', bg: theme.del, color: theme.ink, bold: true });
     if (isReadOnly(conn)) segs.push({ text: writesAllowed ? '  writes allowed' : '  read-only', color: writesAllowed ? theme.warn : theme.dim });
+    // DataGrip's "Tx: Manual": writes wait for /commit.
+    if (commitMode(conn) === 'manual') segs.push({ text: '  manual commit', color: theme.dim });
     if (tranCount) segs.push({ text: '  ' }, { text: ` TRANSACTION OPEN `, bg: theme.warn, color: theme.ink, bold: true });
   } else {
     segs.push({ text: connecting ? '  connecting…' : '  not connected', color: theme.dim });
@@ -111,9 +117,10 @@ function activityRows(entries) {
  * `checkLatest({ signal })` looks up the latest release (update.js fetchLatest); without it,
  * as in the tests, Trawl never checks for updates. `askClaude({ prompt, signal })` answers /ask
  * (the claude CLI by default) and `findDataSources` feeds /import datagrip (DataGrip's own
- * files by default); the tests pass their own.
+ * files by default). `credentials` keeps passwords (the OS store by default) and `open` starts
+ * a session (db.js); the tests pass their own. `setTitle(text)` names the terminal window.
  */
-export function App({ config: initialConfig, initialFile, initialConnection, checkLatest, askClaude = askClaudeCli, findDataSources }) {
+export function App({ config: initialConfig, initialFile, initialConnection, checkLatest, askClaude = askClaudeCli, findDataSources, credentials = osCredentials, open = openSession, setTitle }) {
   const { exit } = useApp();
   const { columns, rows } = useTerminalSize();
   const [config, setConfigState] = useState(initialConfig);
@@ -122,6 +129,7 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
   const [tranCount, setTranCountState] = useState(0);
   const [writesAllowed, setWritesAllowedState] = useState(false);
   const [results, setResults] = useState(null);
+  const [changes, setChangesState] = useState(NO_CHANGES);
   const [resultIndex, setResultIndexState] = useState(0);
   const [file, setFile] = useState(null);
   const [view, setView] = useState('explorer');
@@ -151,6 +159,7 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
   const tranRef = useRef(0);
   const writesRef = useRef(false);
   const resultsRef = useRef(null);
+  const changesRef = useRef(NO_CHANGES);
   const resultIndexRef = useRef(0);
   const fileRef = useRef(null);
   const busyRef = useRef(null);
@@ -164,6 +173,8 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
   const lastOutput = useRef(null);
   const editorRef = useRef(editor);
   const saveTimer = useRef(null);
+  // Passwords typed this session, by connection, so /use and reconnecting don't ask again.
+  const typed = useRef(new Map());
 
   const setConfig = (update) => {
     const next = update(configRef.current);
@@ -190,6 +201,20 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
   const setResultIndex = (i) => {
     resultIndexRef.current = i;
     setResultIndexState(i);
+  };
+  const setChanges = (next) => {
+    changesRef.current = typeof next === 'function' ? next(changesRef.current) : next;
+    setChangesState(changesRef.current);
+  };
+  // New results replace the grid, and with it any edits not yet saved.
+  const showResults = (next) => {
+    const pending = changesRef.current;
+    if ((pending.cells.size || pending.deletes.size) && next?.id !== resultsRef.current?.id) {
+      note(`Dropped ${changesText(pending)} not saved to ${resultsRef.current?.edit?.table?.name ?? 'the table'}.`);
+      setChanges(NO_CHANGES);
+    }
+    resultsRef.current = next;
+    setResults(next);
   };
   // The console is saved a moment after typing stops, and straight away on quit.
   const setConsole = (next) => {
@@ -272,14 +297,22 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     setWritesAllowed(false);
   };
 
-  const connect = async (conn, { database } = {}) => {
+  // A login with no password to hand (or a turned-down one) asks for it, then tries again. A
+  // typed one (`remember` is then set) that works is kept in the OS store when "keep it" is on.
+  const connect = async (conn, { database, password = typed.current.get(conn.name), remember } = {}) => {
     dropSession();
     setConnecting(true);
     const title = `connect ${conn.name}${database && database !== conn.database ? ` (${database})` : ''}`;
     const r = await task(
       title,
       async (signal) => {
-        const s = await openSession(conn, { database, signal });
+        let s;
+        try {
+          s = await open(conn, { database, signal, password, credentials });
+        } catch (e) {
+          if (e.needsPassword && password == null && !/login failed/i.test(e.message)) e.message = `${conn.name} needs the password for ${conn.user}.`;
+          throw e;
+        }
         s.onEnd = () => {
           if (sessionRef.current !== s) return;
           note(`The connection to ${conn.name} closed.`, 'error');
@@ -298,10 +331,25 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
       setConfig((c) => ({ ...c, last: conn.name }));
       setView((v) => (v === 'connections' ? 'explorer' : v));
     } else dropSession();
+    if (r.ok && remember !== undefined) {
+      typed.current.set(conn.name, password);
+      if (remember) {
+        credentials.set(conn.name, { user: conn.user, password }).then(
+          () => note(`Saved the password for ${conn.name} in ${credentials.name}.`, 'ok'),
+          (e) => note(`Couldn't save the password in ${credentials.name}: ${firstLine(e.message)}`, 'error'),
+        );
+      }
+    }
+    if (!r.ok && r.error?.needsPassword) {
+      typed.current.delete(conn.name);
+      const answer = await a.askPassword(ctx, conn, { failed: /login failed/i.test(r.error.message) });
+      return answer ? connect(conn, { database, password: answer.password, remember: answer.remember }) : false;
+    }
     return r.ok;
   };
 
-  const query = async (sql, { title, wrapped = false, lineBase = 1, stay = false } = {}) => {
+  // `keep` leaves the grid as it is (saving edits shows no rows of its own).
+  const query = async (sql, { title, wrapped = false, lineBase = 1, stay = false, keep = false } = {}) => {
     const s = sessionRef.current;
     const limit = configRef.current.limit;
     let res = null;
@@ -315,10 +363,12 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
       }
       return summarize(res, limit);
     });
-    if (res) {
-      const shown = { id: nextId.current++, title, sql, ...res, error: res.error?.message ?? null };
-      resultsRef.current = shown;
-      setResults(shown);
+    if (res && !keep) {
+      // Whether, and where, the rows can be edited and saved back (edit.js).
+      const sc = schemaRef.current;
+      const edit = res.error ? { reason: 'the statement failed' } : sc?.database !== s.database ? { reason: 'the schema is still loading' } : editTarget(sql, res.sets, sc);
+      const shown = { id: nextId.current++, title, sql, ...res, error: res.error?.message ?? null, edit, conn: s.conn.name, database: s.database };
+      showResults(shown);
       setResultIndex(0);
       if (res.sets.length && !stay) setView('results');
     }
@@ -326,7 +376,7 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     if (s && sessionRef.current === s) {
       setConfig((c) => withRan(c, { sql, conn: s.conn.name, database: s.database, at: Date.now(), ok: r.ok, summary: firstLine(summary) }));
       const n = await s.tranCount().catch(() => tranRef.current);
-      if (n && !tranRef.current && wrapped) note('Started a transaction on production: /commit keeps the change, /rollback undoes it.');
+      if (n && !tranRef.current && wrapped) note(`Started a transaction (${s.conn.name} commits manually): /commit keeps the change, /rollback undoes it.`);
       setTranCount(n);
       if (r.ok && (CHANGES_SCHEMA.test(sql) || s.database !== schemaRef.current?.database)) loadSchema(s).catch(() => {});
     }
@@ -442,6 +492,13 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
       get console() {
         return editorRef.current;
       },
+      get results() {
+        return resultsRef.current;
+      },
+      // Edits staged in Results, not yet saved.
+      get changes() {
+        return changesRef.current;
+      },
     };
   }
   const ctx = ctxRef.current;
@@ -460,6 +517,9 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     currentSet: () => resultsRef.current?.sets[resultIndexRef.current] ?? null,
     note,
     confirm,
+    // A password field in place of the prompt: resolves { value, remember } or null.
+    askSecret: (req) => confirm({ ...req, secret: true, options: [] }),
+    credentials,
     prefill,
     openFile,
     setView,
@@ -482,6 +542,15 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     // Stopping waits until this key has been handled everywhere, so the esc (or ctrl+c) that
     // ends typing isn't also taken as a global key: clear the log, or quit.
     setEditing: (on) => (on ? setFocus('editor') : queueMicrotask(() => focusRef.current === 'editor' && setFocus('view'))),
+    // Typing into a cell in Results is a focus of its own too, with the same microtask on the way out.
+    setCellEditing: (on) => (on ? setFocus('cell') : queueMicrotask(() => focusRef.current === 'cell' && setFocus('view'))),
+    cellHasKeys: () => focusRef.current === 'cell' && !overlayRef.current && !confirmRef.current,
+    setChanges,
+    // After a save: the grid shows the rows as they now are, and nothing is pending.
+    replaceResults: (next) => {
+      setChanges(NO_CHANGES);
+      showResults(next);
+    },
     showConsole: () => {
       setQueryMode('console');
       setView('query');
@@ -561,9 +630,14 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     };
   }, []);
 
+  // The terminal's title says where you are: "Trawl · funds/fundsdb · PROD".
+  const windowTitle = session ? `Trawl · ${session.conn.name}/${session.database ?? session.conn.database ?? ''}${session.conn.prod ? ' · PROD' : ''}`.replace(/\/$/, '') : 'Trawl';
+  useEffect(() => setTitle?.(windowTitle), [windowTitle]);
+
   // Leaving the console stops typing, so keys never go to an editor that isn't on screen.
   useEffect(() => {
     if ((view !== 'query' || queryMode !== 'console') && focusRef.current === 'editor') setFocus('view');
+    if (view !== 'results' && focusRef.current === 'cell') setFocus('view');
   }, [view, queryMode]);
 
   const lists = { config, schema };
@@ -641,8 +715,8 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
   // One dispatcher reading focus from refs, which change the instant focus moves. Handlers that
   // switch on with the next render would let fast typing (or a paste) after "/" leak into the view.
   useInput((input, key) => {
-    // While typing in the console, every key is text (the console's own handler takes them).
-    if (focusRef.current === 'editor') return;
+    // While typing in the console or a cell, every key is text (their own handlers take them).
+    if (focusRef.current === 'editor' || focusRef.current === 'cell') return;
     if (focusRef.current === 'prompt' && !confirmRef.current) return promptKeys(input, key);
     if (key.ctrl && input === 'c') return quit();
     if (confirmRef.current || overlayRef.current) return;
@@ -672,13 +746,13 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     main = (
       <Box flexDirection="column" width={W} height={mainH}>
         <ConsoleView editor={editor} editing={editing} ctx={ctx} width={W} height={mainH - under} active={(viewActive || editing) && !overlay && !confirmReq} />
-        {under ? <ResultsView results={results} setIndex={resultIndex} ctx={ctx} width={W} height={under} active={false} /> : null}
+        {under ? <ResultsView results={results} changes={changes} setIndex={resultIndex} ctx={ctx} width={W} height={under} active={false} /> : null}
       </Box>
     );
   } else if (view === 'query') {
     main = <QueryView file={file} ctx={ctx} width={W} height={mainH} active={viewActive} />;
   } else if (view === 'results') {
-    main = <ResultsView results={results} setIndex={resultIndex} ctx={ctx} width={W} height={mainH} active={viewActive} />;
+    main = <ResultsView results={results} changes={changes} setIndex={resultIndex} ctx={ctx} width={W} height={mainH} active={viewActive || (focus === 'cell' && !confirmReq)} />;
   } else if (view === 'history') {
     // Claude's queries come from trawl mcp's log, read each time the tab draws (it's small).
     const ran = [...config.ran, ...loadClaudeHistory()].sort((x, y) => y.at - x.at);
@@ -693,17 +767,20 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     main = <ExplorerView schema={schema} ctx={ctx} width={W} height={mainH} active={viewActive} filter={filter} />;
   }
 
-  const left =
-    focus === 'prompt'
+  const left = confirmReq?.secret
+    ? 'type the password (shown as *) · ↵ done · esc cancel'
+    : focus === 'prompt'
       ? 'enter run · tab complete · ↑↓ pick or history · esc back'
       : focus === 'editor'
         ? 'typing SQL · ctrl+r run the statement · esc stop typing (then 3 for the full results)'
-        : overlay
+        : focus === 'cell'
+          ? 'editing the cell · ↵ keep it (s saves) · tab next column · esc leave it as it was · ctrl+u clear'
+          : overlay
           ? 'j/k scroll · space page · esc close'
           : view === 'query' && queryMode === 'console'
             ? '↵/i type · ctrl+r run statement · R run all · /save <file> · /open <file>'
             : HINTS[view];
-  const right = focus === 'prompt' || focus === 'editor' ? '' : '  / commands · ! SQL · ? help';
+  const right = focus === 'prompt' || focus === 'editor' || focus === 'cell' || confirmReq?.secret ? '' : '  / commands · ! SQL · ? help';
 
   return (
     <Box flexDirection="column" width={W} height={H}>
@@ -717,7 +794,9 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
         <Row key={i} pointer={false} width={W} segments={segs} />
       ))}
       {busy ? <Spinner label={busy.label} started={busy.started} width={W} /> : null}
-      {confirmReq ? (
+      {confirmReq?.secret ? (
+        <SecretPrompt key={confirmReq.id} req={confirmReq} width={W} onDone={onConfirm} />
+      ) : confirmReq ? (
         <Confirm key={confirmReq.id} req={confirmReq} width={W} onDone={onConfirm} />
       ) : (
         <PromptBox value={prompt.value} cursor={prompt.cursor} focused={focus === 'prompt'} width={W} placeholder='Press / for commands, ! to run SQL (try "!SELECT TOP (10) * FROM dbo.Players"), ? for shortcuts' />

@@ -1,8 +1,10 @@
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import { Box, useInput } from 'ink';
+import * as a from '../actions.js';
+import { canEdit, changesText, editText } from '../edit.js';
 import { formatValue, isNumericType } from '../sql.js';
 import { theme } from '../theme.js';
-import { fit, stringWidth } from '../text.js';
+import { clean, fit, stringWidth } from '../text.js';
 import { useListNav } from './hooks.js';
 import { Lines, Panel, Row } from './parts.jsx';
 
@@ -24,30 +26,174 @@ export function recordText(set, row) {
   return set.columns.map((c, i) => `${c.name.padEnd(nameW)}${formatValue(row[i])}`).join('\n');
 }
 
-export function ResultsView({ results, setIndex, ctx, width, height, active }) {
+/** The text being typed into a cell, `w` wide, scrolled so the cursor shows. */
+function editingSegments({ text, cursor }, w) {
+  const start = Math.max(0, cursor - w + 1);
+  const shown = text.slice(start, start + w);
+  const at = cursor - start;
+  const after = clean(shown.slice(at + 1));
+  return [
+    { text: clean(shown.slice(0, at)), color: theme.warn },
+    { text: shown[at] ?? ' ', inverse: true },
+    { text: after + ' '.repeat(Math.max(0, w - at - 1 - stringWidth(after))) },
+  ];
+}
+
+/**
+ * The grid of the result set on screen. When it is the rows of one table with its key (see
+ * edit.js), cells can be edited and rows deleted: changes are staged (`changes`, kept by App) and
+ * `s` saves them all at once.
+ */
+export function ResultsView({ results, changes, setIndex, ctx, width, height, active }) {
   const sets = results?.sets ?? [];
   const set = sets[setIndex];
   const widths = useMemo(() => (set ? columnWidths(set) : []), [set]);
   const [colOffset, setColOffset] = useState(0);
+  const [col, setColState] = useState(0);
+  // Keys can come faster than renders (l then e), so the handler reads the column from a ref.
+  const colRef = useRef(0);
+  // The cell being typed into: { row, col, text, cursor }. A ref as well, since ↵ can arrive
+  // before the render after the last key.
+  const [editing, setEditingState] = useState(null);
+  const editingRef = useRef(null);
+  const setEditing = (next) => {
+    editingRef.current = next;
+    setEditingState(next);
+  };
   const innerW = width - 2;
   const innerH = height - 2;
-  const notes = [...(results?.messages ?? [])];
-  if (results?.error) notes.unshift(results.error);
+  const edit = results?.edit;
+  const editable = Boolean(edit?.table) && setIndex === 0;
+  const pending = changes ?? { cells: new Map(), deletes: new Set() };
+  // Under the grid: unsaved changes first, then the error and the server's messages.
+  const notes = (results?.messages ?? []).map((text) => ({ text, color: theme.dim }));
+  if (results?.error) notes.unshift({ text: results.error, color: theme.del });
+  if (editable && (pending.cells.size || pending.deletes.size)) notes.unshift({ text: `${changesText(pending)} not saved · s saves · u undoes the row · U all`, color: theme.warn });
   const noteLines = Math.min(3, notes.length);
   const gridH = Math.max(1, innerH - 2 - noteLines);
   const nav = useListNav(set?.rows.length ?? 0, gridH, { resetKey: `${results?.id}:${setIndex}` });
-  const firstCol = Math.min(colOffset, Math.max(0, widths.length - 1));
+  // Editable rows have a cell cursor; other results just scroll, the first column shown standing in for it.
+  const cur = Math.min(editable ? col : colOffset, Math.max(0, widths.length - 1));
+
+  // The columns that fit, from the first one scrolled to; moving the cursor off screen scrolls.
+  const layout = (from) => {
+    const shown = [];
+    let used = 2;
+    for (let i = from; i < widths.length; i++) {
+      const w = Math.min(widths[i], innerW - used);
+      if (w < 4 && shown.length) break;
+      shown.push({ i, w });
+      used += w + SEP.length;
+      if (used >= innerW) break;
+    }
+    return shown;
+  };
+  let firstCol = Math.min(colOffset, Math.max(0, widths.length - 1), cur);
+  let shown = layout(firstCol);
+  while (shown.length && cur > shown.at(-1).i && firstCol < cur) shown = layout(++firstCol);
+  if (firstCol !== colOffset) queueMicrotask(() => setColOffset(firstCol));
+
+  const setCol = (c) => {
+    const next = Math.max(0, Math.min(widths.length - 1, c));
+    colRef.current = next;
+    setColState(next);
+    if (!editable) setColOffset(next);
+  };
+  const key = (row, c) => `${row}:${c}`;
+
+  // Why a cell can't be changed, or null when it can.
+  const cellRefusal = (c) => {
+    if (!edit?.table) return `These rows can't be edited: ${edit?.reason ?? 'nothing to edit'}.`;
+    const tc = edit.columns.get(c);
+    if (!tc) return `${set.columns[c].name} isn't a column of ${edit.table.name} as it is (an expression, or renamed), so it can't be edited.`;
+    if (!canEdit(tc)) return `${tc.name} is ${tc.identity ? 'an identity column' : tc.type}; the server sets it.`;
+    return null;
+  };
+  const stage = (row, c, value) =>
+    ctx.setChanges((ch) => {
+      const cells = new Map(ch.cells);
+      // Typing back what was there undoes the change.
+      if (value === (set.rows[row][c] == null ? null : editText(set.rows[row][c]))) cells.delete(key(row, c));
+      else cells.set(key(row, c), value);
+      return { ...ch, cells };
+    });
+  const startEditing = (row, c) => {
+    const refusal = cellRefusal(c);
+    if (refusal) return ctx.note(refusal, 'error');
+    if (pending.deletes.has(row)) return ctx.note('This row is marked for deletion; u keeps it.', 'error');
+    const staged = pending.cells.get(key(row, c));
+    const text = staged !== undefined ? (staged ?? '') : editText(set.rows[row][c]);
+    setEditing({ row, col: c, text, cursor: text.length });
+    ctx.setCellEditing(true);
+  };
+  // The next column along that can take a value, for tab.
+  const nextEditable = (c) => {
+    for (let i = c + 1; i < set.columns.length; i++) if (!cellRefusal(i)) return i;
+    return null;
+  };
+
+  const cellKeys = (input, k) => {
+    const e = editingRef.current;
+    if (!e) return;
+    const put = (text, cursor) => setEditing({ ...e, text, cursor });
+    if (k.escape) {
+      setEditing(null);
+      return ctx.setCellEditing(false);
+    }
+    if (k.return || k.tab) {
+      stage(e.row, e.col, e.text);
+      setEditing(null);
+      ctx.setCellEditing(false);
+      const next = k.tab ? nextEditable(e.col) : null;
+      if (next != null) {
+        setCol(next);
+        queueMicrotask(() => startEditing(e.row, next));
+      }
+      return;
+    }
+    if (k.leftArrow) return put(e.text, Math.max(0, e.cursor - 1));
+    if (k.rightArrow) return put(e.text, Math.min(e.text.length, e.cursor + 1));
+    if (k.home || (k.ctrl && input === 'a')) return put(e.text, 0);
+    if (k.end || (k.ctrl && input === 'e')) return put(e.text, e.text.length);
+    if (k.ctrl && input === 'u') return put('', 0);
+    if (k.backspace || k.delete) return e.cursor > 0 ? put(e.text.slice(0, e.cursor - 1) + e.text.slice(e.cursor), e.cursor - 1) : undefined;
+    if (k.ctrl || k.meta || !input) return;
+    const text = input.replace(/\r?\n/g, ' ').replace(/[\x00-\x1f\x7f]/g, '');
+    if (text) put(e.text.slice(0, e.cursor) + text + e.text.slice(e.cursor), e.cursor + text.length);
+  };
 
   useInput(
-    (input, key) => {
+    (input, k) => {
+      if (ctx.cellHasKeys()) return cellKeys(input, k);
       if (!ctx.viewHasKeys()) return;
-      if (nav.handle(input, key)) return;
-      if (key.leftArrow || input === 'h') setColOffset(Math.max(0, firstCol - 1));
-      else if (key.rightArrow || input === 'l') setColOffset(Math.min(widths.length - 1, firstCol + 1));
-      else if (input === '[' && setIndex > 0) (ctx.setResultIndex(setIndex - 1), setColOffset(0));
-      else if (input === ']' && setIndex < sets.length - 1) (ctx.setResultIndex(setIndex + 1), setColOffset(0));
+      if (nav.handle(input, k)) return;
+      const row = nav.current();
+      const cur = Math.min(editable ? colRef.current : colOffset, Math.max(0, widths.length - 1));
+      if (k.leftArrow || input === 'h') setCol(cur - 1);
+      else if (k.rightArrow || input === 'l') setCol(cur + 1);
+      else if (input === '[' && setIndex > 0) (ctx.setResultIndex(setIndex - 1), setColOffset(0), setCol(0));
+      else if (input === ']' && setIndex < sets.length - 1) (ctx.setResultIndex(setIndex + 1), setColOffset(0), setCol(0));
       else if (input === 'x') ctx.prefill('/export ');
-      else if (key.return && set?.rows[nav.index]) ctx.showText(`Row ${nav.index + 1} of ${set.rows.length}`, recordText(set, set.rows[nav.index]));
+      else if (k.return && set?.rows[row]) ctx.showText(`Row ${row + 1} of ${set.rows.length}`, recordText(set, set.rows[row]));
+      else if (!set?.rows[row]) return;
+      else if (input === 'e' || input === 'i') startEditing(row, cur);
+      else if (input === 'n') {
+        const refusal = cellRefusal(cur);
+        if (refusal) return ctx.note(refusal, 'error');
+        const tc = edit.columns.get(cur);
+        if (!tc.nullable) return ctx.note(`${tc.name} can't be NULL.`, 'error');
+        stage(row, cur, null);
+      } else if (input === 'd') {
+        if (!edit?.table) return ctx.note(`These rows can't be deleted from here: ${edit?.reason ?? 'nothing to edit'}.`, 'error');
+        ctx.setChanges((ch) => {
+          const deletes = new Set(ch.deletes);
+          deletes.has(row) ? deletes.delete(row) : deletes.add(row);
+          return { ...ch, deletes };
+        });
+      } else if (input === 'u') {
+        ctx.setChanges((ch) => ({ cells: new Map([...ch.cells].filter(([at]) => !at.startsWith(`${row}:`))), deletes: new Set([...ch.deletes].filter((r) => r !== row)) }));
+      } else if (input === 'U') ctx.setChanges({ cells: new Map(), deletes: new Set() });
+      else if (input === 's') a.saveEdits(ctx);
     },
     { isActive: active },
   );
@@ -60,22 +206,23 @@ export function ResultsView({ results, setIndex, ctx, width, height, active }) {
     );
   }
 
-  // The columns that fit, from the first one scrolled to.
-  const shown = [];
-  let used = 2;
-  for (let i = firstCol; i < widths.length; i++) {
-    const w = Math.min(widths[i], innerW - used);
-    if (w < 4 && shown.length) break;
-    shown.push({ i, w });
-    used += w + SEP.length;
-    if (used >= innerW) break;
-  }
   const numeric = set ? set.columns.map((c) => isNumericType(c.type)) : [];
   const cells = (values, style) =>
-    shown.flatMap(({ i, w }, k) => [
-      ...(k ? [{ text: SEP, color: theme.border }] : []),
-      { ...style(i, values[i]), text: fit(style(i, values[i]).text, w, numeric[i] ? 'right' : 'left') },
-    ]);
+    shown.flatMap(({ i, w }, k) => {
+      const s = style(i, values[i]);
+      return [...(k ? [{ text: SEP, color: theme.border }] : []), ...(s.segments ?? [{ ...s, text: fit(s.text, w, numeric[i] ? 'right' : 'left') }])];
+    });
+  const rowCells = (row, r) => (i, v) => {
+    if (editing && editing.row === r && editing.col === i) return { segments: editingSegments(editing, shown.find((x) => x.i === i).w) };
+    const deleted = pending.deletes.has(r);
+    const at = `${r}:${i}`;
+    const staged = pending.cells.has(at);
+    const value = staged ? pending.cells.get(at) : v;
+    const here = editable && active && r === nav.index && i === cur;
+    if (deleted) return { text: formatValue(v), color: theme.del, strike: true, underline: here };
+    if (staged) return { text: value === null ? 'NULL' : value, color: theme.warn, bold: true, italic: value === null, underline: here };
+    return { text: formatValue(v), color: v == null ? theme.nul : numeric[i] ? theme.number : undefined, italic: v == null, underline: here };
+  };
 
   const parts = [];
   if (sets.length > 1) parts.push(`set ${setIndex + 1}/${sets.length}`);
@@ -87,16 +234,14 @@ export function ResultsView({ results, setIndex, ctx, width, height, active }) {
     <Panel title={results.title} hint={parts.join(' · ')} width={width} height={height} focused={active}>
       {set ? (
         <Box flexDirection="column">
-          <Row pointer={false} width={innerW} segments={[{ text: '  ' }, ...cells(set.columns.map((c) => c.name), (i, v) => ({ text: v, bold: true, color: theme.accent }))]} />
+          <Row
+            pointer={false}
+            width={innerW}
+            segments={[{ text: '  ' }, ...cells(set.columns.map((c) => c.name), (i, v) => ({ text: v, bold: true, color: theme.accent, underline: editable && i === cur }))]}
+          />
           <Row pointer={false} width={innerW} segments={[{ text: '  ' }, ...shown.flatMap(({ w }, k) => [...(k ? [{ text: '─┼─', color: theme.border }] : []), { text: '─'.repeat(w), color: theme.border }])]} />
           {set.rows.slice(nav.offset, nav.offset + gridH).map((row, r) => (
-            <Row
-              key={nav.offset + r}
-              width={innerW}
-              selected={nav.offset + r === nav.index}
-              focused={active}
-              segments={cells(row, (i, v) => ({ text: formatValue(v), color: v == null ? theme.nul : numeric[i] ? theme.number : undefined, italic: v == null }))}
-            />
+            <Row key={nav.offset + r} width={innerW} selected={nav.offset + r === nav.index} focused={active} segments={cells(row, rowCells(row, nav.offset + r))} />
           ))}
           {set.rows.length === 0 ? <Row pointer={false} width={innerW} segments={[{ text: '  (no rows)', color: theme.dim }]} /> : null}
           {Array.from({ length: Math.max(0, gridH - Math.max(1, set.rows.length - nav.offset)) }, (_, k) => (
@@ -109,7 +254,7 @@ export function ResultsView({ results, setIndex, ctx, width, height, active }) {
       <Lines
         width={innerW}
         height={noteLines}
-        lines={notes.slice(0, noteLines).map((m, k) => [{ text: `  ${m}`, color: results.error && k === 0 ? theme.del : theme.dim }])}
+        lines={notes.slice(0, noteLines).map((m) => [{ text: `  ${m.text}`, color: m.color }])}
       />
     </Panel>
   );

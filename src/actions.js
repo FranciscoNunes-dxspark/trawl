@@ -2,9 +2,10 @@
 // `ctx` is the app's handle: session, schema, query, confirm, note, prefill, and so on (see App.jsx).
 import { writeFile } from 'node:fs/promises';
 import { extname, resolve } from 'node:path';
-import { ADD_USAGE, isReadOnly, parseAddArgs } from './connections.js';
+import { ADD_USAGE, cleanFolder, commitMode, describeConn, isReadOnly, parseAddArgs } from './connections.js';
 import * as ed from './editor.js';
 import { findDataSources, importPlan, planText } from './datagrip.js';
+import { changesText, saveScript, withSaved } from './edit.js';
 import { AI_LABELS, AI_LEVELS, aiLevel, askPrompt, canSeeSchema, consoleText, parseAnswer } from './ai.js';
 import { describeObject, findObject, objectName } from './schema.js';
 import { classifyScript, oneLine, selectTop, toCsv, toJson } from './sql.js';
@@ -21,7 +22,7 @@ function needSession(ctx) {
 }
 
 /** Runs SQL on the current connection, after the read-only and danger checks. */
-export async function runSql(ctx, sql, { title, lineBase, stay } = {}) {
+export async function runSql(ctx, sql, { title, lineBase, stay, keep } = {}) {
   if (!needSession(ctx)) return;
   const text = sql.trim();
   if (!text) return;
@@ -39,9 +40,42 @@ export async function runSql(ctx, sql, { title, lineBase, stay } = {}) {
     });
     if (!ok) return;
   }
-  // Writes on production start a transaction, so nothing sticks until /commit.
-  const wrap = write && conn.prod && !ctx.tranCount;
-  return ctx.query(wrap ? `BEGIN TRANSACTION;\n${text}` : text, { title: title ?? oneLine(text), wrapped: wrap, lineBase, stay });
+  // With manual commit (production's default), a write starts a transaction, so nothing sticks until /commit.
+  const wrap = write && commitMode(conn) === 'manual' && !ctx.tranCount;
+  return ctx.query(wrap ? `BEGIN TRANSACTION;\n${text}` : text, { title: title ?? oneLine(text), wrapped: wrap, lineBase, stay, keep });
+}
+
+/**
+ * Saves the edits staged in Results: shows the script, asks, then runs it through runSql (so a
+ * read-only connection refuses it and production keeps it in a transaction until /commit).
+ */
+export async function saveEdits(ctx) {
+  const res = ctx.results;
+  const { changes } = ctx;
+  if (!changes.cells.size && !changes.deletes.size) return ctx.note('Nothing to save: e edits a cell, n makes it NULL, d marks a row to delete.');
+  const { session } = ctx;
+  if (!session || session.conn.name !== res.conn || session.database !== res.database) return ctx.note(`These rows came from ${res.conn} (${res.database}); connect there again to save them.`, 'error');
+  const { table } = res.edit;
+  let script;
+  try {
+    script = saveScript(res.edit, res.sets[0], changes);
+  } catch (e) {
+    return ctx.note(e.message, 'error');
+  }
+  const what = changesText(changes);
+  ctx.showText(`Save to ${objectName(table)}`, script);
+  const ok = await ctx.confirm({
+    title: `Save ${what} to ${objectName(table)} on ${session.conn.name}${session.conn.prod ? ' (production)' : ''}?`,
+    detail: 'The script is above (pgup/pgdn scroll it). Each change must find exactly its row, unchanged since it was read, or nothing is saved.',
+    scrollsOverlay: true,
+    options: YES_NO('Yes, save'),
+    danger: changes.deletes.size > 0 || Boolean(session.conn.prod),
+  });
+  ctx.closeOverlay();
+  if (!ok) return;
+  const r = await runSql(ctx, script, { title: `save ${what} to ${objectName(table)}`, keep: true });
+  // On a failure, nothing was saved: the changes stay staged to fix or undo.
+  if (r?.ok && ctx.results === res) ctx.replaceResults({ ...res, sets: [withSaved(res.sets[0], changes, res.edit)] });
 }
 
 export async function connect(ctx, name, { database } = {}) {
@@ -79,7 +113,8 @@ export function addConnection(ctx, rest) {
   }
   const replaced = ctx.config.connections.some((c) => c.name.toLowerCase() === conn.name.toLowerCase());
   ctx.setConfig((c) => ({ ...c, connections: [...c.connections.filter((x) => x.name.toLowerCase() !== conn.name.toLowerCase()), conn] }));
-  ctx.note(`${replaced ? 'Updated' : 'Added'} ${conn.name}${conn.prod ? ' (production, read-only)' : ''}. ${conn.auth === 'azure-cli' ? 'Signs in with your az login.' : `Password from $${conn.passwordEnv}.`} /connect ${conn.name}`, 'ok');
+  const signIn = conn.auth === 'azure-cli' ? 'Signs in with your az login.' : conn.passwordEnv ? `Password from $${conn.passwordEnv}.` : `Asks for the password when you connect, and keeps it in ${ctx.credentials.name}.`;
+  ctx.note(`${replaced ? 'Updated' : 'Added'} ${conn.name}${conn.folder ? ` in ${conn.folder}/` : ''}${conn.prod ? ' (production, read-only)' : ''}. ${signIn} /connect ${conn.name}`, 'ok');
 }
 
 export async function forgetConnection(ctx, name) {
@@ -89,7 +124,62 @@ export async function forgetConnection(ctx, name) {
   const ok = await ctx.confirm({ title: `Forget the connection ${conn.name}?`, options: YES_NO('Yes, forget it') });
   if (!ok) return;
   ctx.setConfig((c) => ({ ...c, connections: c.connections.filter((x) => x !== conn) }));
-  ctx.note(`Forgot ${conn.name}.`);
+  if (conn.auth !== 'azure-cli') await ctx.credentials.remove(conn.name);
+  ctx.note(`Forgot ${conn.name}${conn.auth !== 'azure-cli' ? ', and any password Trawl saved for it' : ''}.`);
+}
+
+/** /folder <connection> [folder]: files a connection in a folder; with no folder, takes it out. */
+export function moveToFolder(ctx, rest) {
+  const [, name, to] = String(rest ?? '').trim().match(/^(\S*)\s*([\s\S]*)$/);
+  if (!name) return ctx.prefill('/folder ');
+  const conn = ctx.config.connections.find((c) => c.name.toLowerCase() === name.toLowerCase());
+  if (!conn) return ctx.note(`No connection called ${name}.`, 'error');
+  if (conn.demo) return ctx.note('The demo connections only last for this session.', 'error');
+  const folder = cleanFolder(to);
+  ctx.setConfig((c) => ({ ...c, connections: c.connections.map((x) => (x === conn ? withFolder(x, folder) : x)) }));
+  ctx.note(folder ? `Moved ${conn.name} into ${folder}/.` : `Took ${conn.name} out of ${conn.folder ? `${conn.folder}/` : 'its folder'}.`, 'ok');
+}
+
+const withFolder = (conn, folder) => {
+  const { folder: _, ...rest } = conn;
+  return folder ? { ...rest, folder } : rest;
+};
+
+/**
+ * Asks for a login's password: { password, remember } or null on esc. `failed` says the last
+ * one was turned down; `saving` is /password, which only stores it.
+ */
+export async function askPassword(ctx, conn, { failed = false, saving = false } = {}) {
+  const r = await ctx.askSecret({
+    title: `${failed ? 'Login failed. ' : ''}Password for ${conn.domain ? `${conn.domain}\\` : ''}${conn.user} on ${conn.name}`,
+    detail: saving ? `Kept in ${ctx.credentials.name}, never in Trawl's config. Empty removes the saved one.` : describeConn(conn),
+    remember: saving ? undefined : true,
+    rememberLabel: `Keep it in ${ctx.credentials.name}`,
+    danger: failed,
+  });
+  return r ? { password: r.value, remember: r.remember } : null;
+}
+
+/** /password [connection]: saves (or with nothing typed, removes) a login's password in the OS store. */
+export async function setPassword(ctx, name) {
+  const conn = name ? ctx.config.connections.find((c) => c.name.toLowerCase() === name.toLowerCase()) : ctx.session?.conn;
+  if (!conn) return ctx.note(name ? `No connection called ${name}.` : 'Name the connection: /password <connection>', 'error');
+  if (conn.demo || conn.auth === 'azure-cli') return ctx.note(`${conn.name} signs in with ${conn.demo ? 'nothing (it is the demo)' : 'your az login'}, so it has no password.`, 'error');
+  const answer = await askPassword(ctx, conn, { saving: true });
+  if (!answer) return;
+  const { credentials } = ctx;
+  if (!answer.password) {
+    return ctx.task(`forget the password for ${conn.name}`, async () => (await credentials.remove(conn.name), [`Removed from ${credentials.name}.`]), { label: 'Removing the password' });
+  }
+  const env = conn.passwordEnv && process.env[conn.passwordEnv] != null ? [`$${conn.passwordEnv} is set, and it comes first: clear it for this one to count.`] : [];
+  return ctx.task(
+    `save the password for ${conn.name}`,
+    async () => {
+      await credentials.set(conn.name, { user: conn.user, password: answer.password });
+      return [`In ${credentials.name}; Trawl and trawl mcp use it from the next connect.`, ...env];
+    },
+    { label: 'Saving the password' },
+  );
 }
 
 /** Switches database by reconnecting, which works on Azure SQL Database too (USE doesn't there). */
@@ -112,6 +202,33 @@ export async function allowWrites(ctx) {
     danger: true,
   });
   if (ok) ctx.setWritesAllowed(true);
+}
+
+/**
+ * /tx [auto|manual]: DataGrip's transaction modes, for the connection you're on (and kept for it).
+ * With no mode, says which it is.
+ */
+export async function setCommitMode(ctx, mode) {
+  if (!needSession(ctx)) return;
+  const { conn } = ctx.session;
+  const now = commitMode(conn);
+  if (!mode) return ctx.note(`${conn.name} commits ${now === 'auto' ? 'each statement as it runs (auto)' : 'only on /commit (manual): a write opens a transaction'}. /tx ${now === 'auto' ? 'manual' : 'auto'} changes it.`);
+  if (!['auto', 'manual'].includes(mode)) return ctx.note('/tx auto commits each statement as it runs; /tx manual waits for /commit.', 'error');
+  if (mode === now) return ctx.note(`${conn.name} already commits ${mode === 'auto' ? 'automatically' : 'manually'}.`);
+  if (mode === 'auto' && ctx.tranCount) return ctx.note('A transaction is open: /commit or /rollback it first.', 'error');
+  if (mode === 'auto' && conn.prod) {
+    const ok = await ctx.confirm({
+      title: `Commit each write on ${conn.name} (production) as it runs?`,
+      detail: 'Writes then take effect at once, with no /rollback.',
+      options: YES_NO('Yes, auto-commit'),
+      danger: true,
+    });
+    if (!ok) return;
+  }
+  // The session holds the connection it opened with, so that changes too (the demo's only lives there).
+  conn.commit = mode;
+  ctx.setConfig((c) => ({ ...c, connections: c.connections.map((x) => (x.name === conn.name && !x.demo ? { ...x, commit: mode } : x)) }));
+  ctx.note(mode === 'auto' ? `${conn.name} now commits each statement as it runs.` : `${conn.name} now commits manually: a write opens a transaction, and /commit keeps it or /rollback undoes it.`, 'ok');
 }
 
 export async function commit(ctx) {
@@ -210,19 +327,28 @@ export async function importConnections(ctx, rest) {
   if (!sources.length) return ctx.note(dir ? `No DataGrip data sources in ${dir} (looked for .idea/dataSources.xml).` : 'No DataGrip data sources found. Point at a project: /import datagrip <folder>', 'error');
   const plan = importPlan(sources, ctx.config.connections);
   ctx.showText(`Import from DataGrip${dir ? `: ${dir}` : ''}`, planText(plan));
-  if (!plan.add.length) return;
+  if (!plan.add.length && !plan.file.length) return;
+  const n = (k) => `${k} connection${k === 1 ? '' : 's'}`;
+  const [adds, files] = [plan.add.length, plan.file.length];
   const ok = await ctx.confirm({
-    title: `Add ${plan.add.length} connection${plan.add.length === 1 ? '' : 's'} from DataGrip?`,
+    title: [adds ? `Add ${n(adds)} from DataGrip` : '', files ? `${adds ? 'put' : 'Put'} ${n(files)} into DataGrip's folders` : ''].filter(Boolean).join(', and ') + '?',
     detail: 'The list is above (pgup/pgdn scroll it). Nothing is sent anywhere; passwords stay in DataGrip.',
     scrollsOverlay: true,
-    options: YES_NO(`Yes, add ${plan.add.length}`),
+    options: YES_NO(adds ? `Yes, add ${adds}` : `Yes, file ${files}`),
   });
   ctx.closeOverlay();
   if (!ok) return;
-  ctx.setConfig((c) => ({ ...c, connections: [...c.connections, ...plan.add] }));
+  const folders = new Map(plan.file.map((f) => [f.name, f.folder]));
+  // Earlier imports named a TRAWL_PW_… variable for each login; unset, it gives way to the credential store.
+  const refile = (x) => {
+    const { passwordEnv, ...rest } = withFolder(x, folders.get(x.name));
+    return passwordEnv && (process.env[passwordEnv] != null || !passwordEnv.startsWith('TRAWL_PW_')) ? { ...rest, passwordEnv } : rest;
+  };
+  ctx.setConfig((c) => ({ ...c, connections: [...c.connections.map((x) => (folders.has(x.name) ? refile(x) : x)), ...plan.add] }));
   ctx.setView('connections');
-  const envs = plan.add.filter((c) => c.passwordEnv).length;
-  ctx.note(`Added ${plan.add.length} connection${plan.add.length === 1 ? '' : 's'} from DataGrip${envs ? `. ${envs} sign in with a password: set each one's TRAWL_PW_… variable before connecting (the import list is in /last)` : ''}.`, 'ok');
+  const logins = plan.add.some((c) => c.auth === 'sql');
+  const done = [adds ? `Added ${n(adds)} from DataGrip` : '', files ? `${adds ? 'filed' : 'Filed'} ${n(files)} in DataGrip's folders` : ''].filter(Boolean).join(', and ');
+  ctx.note(`${done}.${logins ? ' Trawl asks for each login’s password when you first connect.' : ''}`, 'ok');
   ctx.rememberOutput(`Import from DataGrip`, planText(plan));
 }
 

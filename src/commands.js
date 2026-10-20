@@ -5,9 +5,11 @@ import { objectName } from './schema.js';
 // `complete` names the list offered while typing the first argument.
 export const COMMANDS = [
   { name: 'connect', args: '<name>', desc: 'Connect to a saved connection', complete: 'connections', run: (ctx, s) => a.connect(ctx, s) },
-  { name: 'add', args: '<name> <server> [database] [--user u --password-env VAR] [--prod]', desc: 'Save a connection (az login unless --user)', run: (ctx, s) => a.addConnection(ctx, s) },
-  { name: 'import', args: 'datagrip [folder]', desc: 'Add your DataGrip data sources as connections (passwords stay in DataGrip)', run: (ctx, s) => a.importConnections(ctx, s) },
-  { name: 'forget', args: '<name>', desc: 'Remove a saved connection', complete: 'connections', run: (ctx, s) => (s ? a.forgetConnection(ctx, s) : ctx.prefill('/forget ')) },
+  { name: 'add', args: '<name> <server> [database] [--user u] [--folder f] [--prod]', desc: 'Save a connection (az login unless --user)', run: (ctx, s) => a.addConnection(ctx, s) },
+  { name: 'import', args: 'datagrip [folder]', desc: 'Add your DataGrip data sources as connections, in their folders', run: (ctx, s) => a.importConnections(ctx, s) },
+  { name: 'forget', args: '<name>', desc: 'Remove a saved connection (and its saved password)', complete: 'connections', run: (ctx, s) => (s ? a.forgetConnection(ctx, s) : ctx.prefill('/forget ')) },
+  { name: 'folder', args: '<connection> [folder]', desc: 'Put a connection in a folder (no folder takes it out)', complete: 'connections', run: (ctx, s) => a.moveToFolder(ctx, s) },
+  { name: 'password', args: '[connection]', desc: "Save a login's password in the OS credential store", complete: 'connections', run: (ctx, s) => a.setPassword(ctx, s) },
   { name: 'disconnect', desc: 'Close the connection', run: (ctx) => a.disconnect(ctx) },
   { name: 'use', args: '<database>', desc: 'Switch to another database on the same server', complete: 'databases', run: (ctx, s) => a.use(ctx, s) },
   { name: 'open', args: '<file.sql>', desc: 'Open a script in Query (reloads when you save it)', run: (ctx, s) => (s ? ctx.openFile(s) : ctx.prefill('/open ')) },
@@ -19,6 +21,7 @@ export const COMMANDS = [
   { name: 'export', args: '<file.csv|file.json>', desc: 'Save the result set on screen', run: (ctx, s) => a.exportResults(ctx, s) },
   { name: 'limit', args: '[rows]', desc: 'Rows kept per result set (the query stops there)', run: (ctx, s) => a.setLimit(ctx, s) },
   { name: 'writes', desc: 'Allow writes on a read-only connection until you disconnect', run: (ctx) => a.allowWrites(ctx) },
+  { name: 'tx', args: '[auto|manual]', desc: 'Commit each statement as it runs, or only on /commit', run: (ctx, s) => a.setCommitMode(ctx, s.trim().toLowerCase()) },
   { name: 'commit', desc: 'Commit the open transaction', run: (ctx) => a.commit(ctx) },
   { name: 'rollback', desc: 'Roll back the open transaction', run: (ctx) => a.rollback(ctx) },
   { name: 'update', desc: 'Check for a newer Trawl and say how to get it', run: (ctx) => ctx.checkUpdates() },

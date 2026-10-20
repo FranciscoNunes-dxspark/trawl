@@ -21,6 +21,8 @@ export function useTerminalSize() {
 export function useListNav(count, height, { selectable = () => true, resetKey } = {}) {
   const [index, setIndex] = useState(0);
   const offset = useRef(0);
+  // The index as of the last key, which may not have rendered yet (j then d, typed fast).
+  const latest = useRef(0);
   const lastKey = useRef(resetKey);
   let i = index;
   if (lastKey.current !== resetKey) {
@@ -51,22 +53,27 @@ export function useListNav(count, height, { selectable = () => true, resetKey } 
     const t = Math.max(0, Math.min(target, count - 1));
     let j = find(t, dir);
     if (j < 0) j = find(t, -dir);
-    if (j >= 0) setIndex(j);
+    if (j >= 0) {
+      latest.current = j;
+      setIndex(j);
+    }
   };
 
   const handle = (input, key) => {
     if (!count) return false;
-    if (key.downArrow || input === 'j') go(i + 1, 1);
-    else if (key.upArrow || input === 'k') go(i - 1, -1);
-    else if (key.pageDown || (key.ctrl && input === 'd')) go(i + h - 1, 1);
-    else if (key.pageUp || (key.ctrl && input === 'u')) go(i - h + 1, -1);
+    const at = latest.current;
+    if (key.downArrow || input === 'j') go(at + 1, 1);
+    else if (key.upArrow || input === 'k') go(at - 1, -1);
+    else if (key.pageDown || (key.ctrl && input === 'd')) go(at + h - 1, 1);
+    else if (key.pageUp || (key.ctrl && input === 'u')) go(at - h + 1, -1);
     else if (input === 'g' || key.home) go(0, 1);
     else if (input === 'G' || key.end) go(count - 1, -1);
     else return false;
     return true;
   };
 
-  return { index: i, offset: offset.current, handle, setIndex };
+  latest.current = i;
+  return { index: i, offset: offset.current, handle, setIndex, current: () => latest.current };
 }
 
 // Results of slow reads (diffs, commit details), keyed by what was asked, so moving back is instant.

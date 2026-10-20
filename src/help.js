@@ -132,7 +132,8 @@ Prompt
   ctrl+u ctrl+w    Clear the line · Delete a word
 
 Slash commands
-  /import datagrip [folder]   /import-csv <file.csv> <table> [--run]   /connect <name>   /add <name> <server> [database] [--user u] [--domain d] [--folder f] [--prod] [--commit auto|manual] [--trust-cert]
+  /import datagrip [folder]   /import-csv <file.csv> <table> [--run]   /connect <name>
+  /add <name> <server> [database] [--kind sqlserver|postgres|mysql] [--user u] [--domain d] [--folder f] [--prod] [--commit auto|manual] [--trust-cert] [--ssl]
   /forget <name>   /folder <connection> [folder]   /password [connection]   /disconnect   /use <database>   /open <file.sql>   /console   /tab …   /new   /format   /search <text>   /save <file.sql>
   /describe <table>   /script <name>   /find [text]
   /export <file>   /filter [text]   /follow   /pin   /compare   /copy [format]   /limit [rows]   /writes   /tx [auto|manual]   /commit   /rollback   /ask <question>   /explain   /ai   /update   /settings   /stats [on|off]   /plan [sql]   /diff <connection> [database]   /fanout <folder> [sql]   /activity   /kill <session>   /last   /refresh   /help   /quit

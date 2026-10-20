@@ -69,6 +69,8 @@ Save connections with `/add`:
 | A SQL login | `/add local localhost,1433 Dev --user sa --trust-cert` |
 | Windows (NTLM) | `/add corp sqlhost\SQLEXPRESS Dev --user me --domain CORP` |
 | In a folder | `/add club-b srv.database.windows.net ClubB --folder Clubs/PROD` |
+| PostgreSQL | `/add shop db.local:5432 shop --kind postgres --user app` |
+| MySQL or MariaDB | `/add blog db.local:3306 blog --kind mysql --user app --ssl` |
 
 `--trust-cert` trusts the server's certificate without checking it, as SSMS's "Trust server certificate" does. A local SQL Server signs its own, which Trawl can't verify otherwise. If you leave it off and connecting fails on the certificate, Trawl asks whether to trust it, and keeps that on the connection.
 
@@ -77,6 +79,19 @@ Azure SQL gets a fresh token from the Azure CLI each time it connects, so there'
 Connections live in `~/.trawl/config.json` (or `TRAWL_HOME`), along with the prompt history, the run history and what Settings (`,`) changes: the row limit, the accent colour, the mouse, updates and notifications.
 
 When a query (or anything else with the spinner) takes longer than 10 seconds, Trawl rings the terminal's bell and asks it for a desktop notification saying what finished and how (OSC 9, which Windows Terminal, iTerm2, WezTerm and kitty show, or OSC 777 in GNOME Terminal and other VTE terminals), for when you've switched to another window. **Notify when done** in Settings turns it off, and `"notifyAfter": 30` in `config.json` changes the seconds. A run you cancel says nothing.
+
+### PostgreSQL and MySQL
+
+Besides SQL Server, a connection can be to PostgreSQL or MySQL (MariaDB too): `/add … --kind postgres` or `--kind mysql`, with the server as `host` or `host:port` (5432 and 3306 by default) and a login (`--user`), whose password is asked for and kept as for a SQL login. TLS is off unless you add `--ssl`, or `--trust-cert` to use it without checking the server's certificate. Trawl talks to them through the `pg` and `mysql2` drivers, plain JavaScript in the same executable.
+
+Most of Trawl works the same there: the Explorer, the console and its suggestions, scripts, Results with sorting, filters, copying, comparing and following foreign keys, History, the read-only and production rules, manual commit (`BEGIN`/`START TRANSACTION`, then `/commit` or `/rollback`), the questions before risky statements and the row count before an `UPDATE` or `DELETE`, parameters and snippets, `/fanout` (a folder can mix kinds), CSV import, Activity and `/kill` (`pg_terminate_backend` on Postgres), `p` for the plan (`EXPLAIN`, which doesn't run anything) and Claude's explanation of it, `c` for a view's or routine's definition, and `trawl mcp`. The differences:
+
+- A script runs a statement at a time, split at `;` (Postgres's `$$` bodies and MySQL's backslash escapes are understood); there is no `GO`, and MySQL's `DELIMITER` isn't supported.
+- Rows past the row limit are dropped once they arrive, rather than the query being stopped there, so a huge `SELECT` still crosses the network: add a `LIMIT`.
+- Editing results in place is SQL Server only (the save script is T-SQL); `e` says so. So are `/stats` and the sync script of `/diff`, which compares tables, columns and keys only (not indexes or definitions) when either side isn't SQL Server.
+- Activity on MySQL doesn't show who blocks whom.
+- `/ask` writes T-SQL, and the suggestions and `/format` know T-SQL's keywords and functions, not every other one.
+- `/import datagrip` still leaves Postgres and MySQL data sources out.
 
 ### Folders
 
@@ -278,6 +293,3 @@ Glim is Trawl's anglerfish: it carries its own light into the deep, which is rou
 
 The logo and the Windows icon in `assets/` are drawn from the same pixels (`src/glim.js`); `node scripts/logo.js` regenerates them. `glim.svg`, `glim.png` and `glim.ico` sit on the dark rounded square; `glim-transparent.svg`, `glim-transparent.png` (544 × 416) and `glim-transparent@4x.png` are just the fish, cropped (with room for the badge), on transparency, and `glim-transparent.ico` is the fish centred on a transparent square (16 to 256 px). Each one carries an "SQL" pixel-art badge in the bottom-right corner, so Trawl's icon is easy to tell from Tiller's at a glance.
 
-## Not yet
-
-- Postgres and MySQL (the driver layer is one interface, so they'd be new adapters).

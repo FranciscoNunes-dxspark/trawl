@@ -3,7 +3,7 @@
 // the schema's foreign keys and the result's source table (edit.js readTarget) say where to go.
 import { valueLiteral } from './edit.js';
 import { objectName } from './schema.js';
-import { qualified, quoteIdent } from './sql.js';
+import { quoteIdent } from './sql.js';
 
 const same = (a, b) => String(a).toLowerCase() === String(b).toLowerCase();
 const parts = (dotted) => {
@@ -16,7 +16,7 @@ const parts = (dotted) => {
  * { targets } with one { label, sql } per foreign key, those the value refers to first, then the
  * tables that refer to it; or { reason } when there's nowhere to go. `limit` caps the rows read back.
  */
-export function followTargets(source, set, row, col, schema, { limit = 500 } = {}) {
+export function followTargets(source, set, row, col, schema, { limit = 500, quote = quoteIdent, selectTop = (q, n) => `SELECT TOP (${n}) * FROM ${q}` } = {}) {
   if (!source?.table) return { reason: `Trawl can't tell which table these rows are: ${source?.reason ?? 'no result'}` };
   const tc = source.columns.get(col);
   const { table } = source;
@@ -27,7 +27,7 @@ export function followTargets(source, set, row, col, schema, { limit = 500 } = {
   const values = set.rows[row];
   const targets = [];
   let reason = null;
-  const where = (pairs) => pairs.map(([column, v, type]) => (v == null ? `${quoteIdent(column)} IS NULL` : `${quoteIdent(column)} = ${valueLiteral(v, type)}`)).join(' AND ');
+  const where = (pairs) => pairs.map(([column, v, type]) => (v == null ? `${quote(column)} IS NULL` : `${quote(column)} = ${valueLiteral(v, type)}`)).join(' AND ');
   const said = (pairs) => pairs.map(([column, v]) => `${column} = ${v == null ? 'NULL' : v instanceof Date ? v.toISOString().slice(0, 10) : String(v)}`).join(', ');
   for (const f of schema?.foreignKeys ?? []) {
     if (same(f.from, name) && f.columns.some(([c]) => same(c, tc.name))) {
@@ -42,7 +42,7 @@ export function followTargets(source, set, row, col, schema, { limit = 500 } = {
       }
       const pairs = f.columns.map(([, to], k) => [to, values[at[k]], source.columns.get(at[k]).type]);
       const [s, t] = parts(f.to);
-      targets.push({ label: `${f.to} where ${said(pairs)}`, sql: `SELECT TOP (${limit}) * FROM ${qualified(s, t)} WHERE ${where(pairs)};`, fk: f.name, refers: true });
+      targets.push({ label: `${f.to} where ${said(pairs)}`, sql: `${selectTop(`${quote(s)}.${quote(t)}`, limit)} WHERE ${where(pairs)};`, fk: f.name, refers: true });
     }
   }
   for (const f of schema?.foreignKeys ?? []) {
@@ -51,7 +51,7 @@ export function followTargets(source, set, row, col, schema, { limit = 500 } = {
       if (at.some((i) => i === undefined) || at.every((i) => values[i] == null)) continue;
       const pairs = f.columns.map(([from], k) => [from, values[at[k]], source.columns.get(at[k]).type]);
       const [s, t] = parts(f.from);
-      targets.push({ label: `${f.from} where ${said(pairs)} (rows referring to this one)`, sql: `SELECT TOP (${limit}) * FROM ${qualified(s, t)} WHERE ${where(pairs)};`, fk: f.name, refers: false });
+      targets.push({ label: `${f.from} where ${said(pairs)} (rows referring to this one)`, sql: `${selectTop(`${quote(s)}.${quote(t)}`, limit)} WHERE ${where(pairs)};`, fk: f.name, refers: false });
     }
   }
   if (targets.length) return { targets };

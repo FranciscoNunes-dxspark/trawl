@@ -1,11 +1,13 @@
 // The only place queries reach a database. A session is one connection, like an editor tab in
 // SSMS: SET options, temp tables and open transactions carry over from one run to the next.
-// The demo driver (demo.js) implements the same session interface.
+// SQL Server goes through tedious here; Postgres and MySQL through the adapters in db-postgres.js and
+// db-mysql.js, and the demo driver (demo.js), all with the same session interface.
 import { Connection, Request } from 'tedious';
 import { azureSqlToken } from './azure.js';
 import { tediousConfig } from './connections.js';
 import { STORE_NAME, osCredentials } from './credentials.js';
 import { demoSession } from './demo.js';
+import { dialectOf } from './dialects.js';
 import { splitBatches } from './sql.js';
 
 export class DbError extends Error {
@@ -49,22 +51,26 @@ function toDbError(err, lineOffset = 0) {
  */
 export async function connect(conn, { database = conn.database, signal, password, credentials = osCredentials } = {}) {
   if (conn.demo) return demoSession(conn, { database });
+  const dialect = dialectOf(conn);
+  // Postgres and MySQL go through their own adapters (db-postgres.js, db-mysql.js), loaded when first used.
+  if (dialect.kind !== 'sqlserver') {
+    const found = await findPassword(conn, { password, credentials, signal });
+    const adapter = dialect.kind === 'postgres' ? await import('./db-postgres.js') : await import('./db-mysql.js');
+    try {
+      return await adapter.open(conn, { database, password: found.password, signal });
+    } catch (e) {
+      // A wrong password from the environment is yours to fix there; a saved or typed one is asked again.
+      if (e.badLogin && found.from !== 'env') e.needsPassword = true;
+      throw e;
+    }
+  }
   const secrets = {};
   let from = 'given';
   if (conn.auth === 'azure-cli') secrets.token = await azureSqlToken({ signal });
   else {
-    let pw = password;
-    if (pw == null && conn.passwordEnv && process.env[conn.passwordEnv] != null) [pw, from] = [process.env[conn.passwordEnv], 'env'];
-    let storeError = '';
-    if (pw == null) {
-      from = 'store';
-      pw = await credentials.get(conn.name, { signal }).catch((e) => ((storeError = ` (${e.message})`), null));
-    }
-    if (pw == null) {
-      const env = conn.passwordEnv ? `, or set $${conn.passwordEnv}` : '';
-      throw new DbError(`No password saved for ${conn.user} on ${conn.name}${storeError}. Connect in Trawl once to enter it (it keeps it in ${STORE_NAME})${env}.`, { needsPassword: true });
-    }
-    secrets.password = pw;
+    const found = await findPassword(conn, { password, credentials, signal });
+    from = found.from;
+    secrets.password = found.password;
   }
   const connection = new Connection(tediousConfig(conn, { ...secrets, database }));
   await new Promise((resolve, reject) => {
@@ -82,6 +88,21 @@ export async function connect(conn, { database = conn.database, signal, password
     });
   });
   return tediousSession(conn, connection, database);
+}
+
+/**
+ * A login's password: the one given, else its environment variable, else the one saved in the OS
+ * credential store. { password, from } with `from` 'given', 'env' or 'store'; a DbError with
+ * needsPassword when there's none.
+ */
+async function findPassword(conn, { password, credentials, signal }) {
+  if (password != null) return { password, from: 'given' };
+  if (conn.passwordEnv && process.env[conn.passwordEnv] != null) return { password: process.env[conn.passwordEnv], from: 'env' };
+  let storeError = '';
+  const pw = await credentials.get(conn.name, { signal }).catch((e) => ((storeError = ` (${e.message})`), null));
+  if (pw != null) return { password: pw, from: 'store' };
+  const env = conn.passwordEnv ? `, or set $${conn.passwordEnv}` : '';
+  throw new DbError(`No password saved for ${conn.user} on ${conn.name}${storeError}. Connect in Trawl once to enter it (it keeps it in ${STORE_NAME})${env}.`, { needsPassword: true });
 }
 
 function tediousSession(conn, connection, database) {
@@ -117,15 +138,15 @@ function tediousSession(conn, connection, database) {
 }
 
 /**
- * Runs a script batch by batch (split on GO) through `runOne`, collecting result sets and
+ * Runs a script batch by batch (split on GO, or by `split`: the other dialects' statements) through `runOne`, collecting result sets and
  * messages. Errors carry what had already arrived. Shared with the demo driver.
  */
-export async function runScript(session, script, runOne, { signal } = {}) {
+export async function runScript(session, script, runOne, { signal, split = splitBatches } = {}) {
   const started = Date.now();
   const state = { sets: [], messages: [], stopped: false };
   session.collect?.(state.messages);
   try {
-    for (const batch of splitBatches(script)) {
+    for (const batch of split(script)) {
       for (let r = 0; r < batch.repeat; r++) {
         if (signal?.aborted) throw new DbError('Cancelled', { cancelled: true });
         await runOne(batch.text, batch.line, state);

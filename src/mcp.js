@@ -9,7 +9,8 @@ import { AI_LABELS, aiLevel, canSeeResults, canSeeSchema, tableLine } from './ai
 import { configDir, loadConfig } from './config.js';
 import { DEMO_CONNECTIONS, describeConn, isReadOnly } from './connections.js';
 import { connect } from './db.js';
-import { SCHEMA_SQL, buildSchema, describeObject, findObject, objectName } from './schema.js';
+import { buildSchema, describeObject, findObject, objectName } from './schema.js';
+import { dialectOf } from './dialects.js';
 import { classifyScript, formatValue } from './sql.js';
 import { VERSION } from './version.js';
 
@@ -17,7 +18,8 @@ const PROTOCOLS = ['2024-11-05', '2025-03-26', '2025-06-18', '2025-11-25'];
 const MAX_ROWS = 1000;
 const CELL = 200;
 
-const INSTRUCTIONS = `Trawl reads SQL Server / Azure SQL databases through the user's saved Trawl connections.
+const INSTRUCTIONS = `Trawl reads SQL Server / Azure SQL (and PostgreSQL and MySQL) databases through the user's saved Trawl connections.
+list_connections says which kind each is; write the SQL for that kind (TOP for SQL Server, LIMIT for the others).
 Start with list_connections, then list_tables and describe_table before writing a query.
 run_query only reads: writes are refused and everything runs in a transaction that is rolled back.
 Some connections only share their schema; run_query says so when rows can't be returned.`;
@@ -135,7 +137,7 @@ export function createServer({ demo = false, log = logQuery, open = connect } = 
       const hit = schemas.get(key);
       if (hit && Date.now() - hit.at < 60_000) return hit;
       const s = await session(conn, database);
-      const fresh = { at: Date.now(), schema: buildSchema((await s.run(SCHEMA_SQL, { limit: 1_000_000 })).sets) };
+      const fresh = { at: Date.now(), schema: buildSchema((await s.run(dialectOf(conn).schemaSql, { limit: 1_000_000 })).sets) };
       schemas.set(key, fresh);
       return fresh;
     });
@@ -168,7 +170,7 @@ export function createServer({ demo = false, log = logQuery, open = connect } = 
       const text = String(sql ?? '').trim();
       if (!text) throw new ToolError('The query is empty.');
       if (!canSeeResults(conn)) throw new ToolError(`${conn.name} only shares its schema with Claude, not rows. The user can allow rows in Trawl with /ai results (on that connection).`);
-      const { write, danger } = classifyScript(text);
+      const { write, danger } = classifyScript(text, { dialect: dialectOf(conn).kind });
       if (write) throw new ToolError(`Refused: this changes data or schema${danger.length ? ` (${danger.join('; ')})` : ''}. Trawl's MCP tools only read; run writes yourself in Trawl.`);
       const limit = Math.max(1, Math.min(MAX_ROWS, Number(max_rows) || 100));
       return exclusive(conn, database, () => runRead(conn, database, text, limit));
@@ -180,18 +182,18 @@ export function createServer({ demo = false, log = logQuery, open = connect } = 
     const entry = { sql: text, conn: conn.name, database: s.database, at: Date.now(), via: 'claude' };
     try {
       // A second lock behind the write check: whatever runs is rolled back.
-      const res = await s.run(`SET XACT_ABORT ON;\nBEGIN TRANSACTION;\n${text}`, { limit });
+      const res = await s.run(`${dialectOf(conn).readOnlyPrefix}\n${text}`, { limit });
       const parts = res.sets.map((set, i) => `${res.sets.length > 1 ? `Result set ${i + 1}\n` : ''}${setText(set, { truncatedAt: limit })}`);
       const notes = res.messages.filter((m) => !/rows? affected$/.test(m));
       log({ ...entry, ok: true, summary: `${res.sets.map((x) => `${x.rows.length} rows`).join(' · ') || 'no rows'} · ${res.ms} ms` });
       return [...parts, ...notes].join('\n\n') || 'The query ran and returned no result set.';
     } catch (e) {
       // The two lines Trawl adds in front don't count.
-      const message = e.line ? `Line ${Math.max(1, e.line - 2)}: ${e.message}` : e.message;
+      const message = e.line ? `Line ${Math.max(1, e.line - dialectOf(conn).readOnlyPrefix.split('\n').length)}: ${e.message}` : e.message;
       log({ ...entry, ok: false, summary: message.split('\n')[0] });
       throw new ToolError(message);
     } finally {
-      if (!s.closed && (await s.tranCount().catch(() => 0))) await s.run('ROLLBACK TRANSACTION;').catch(() => {});
+      if (!s.closed && (await s.tranCount().catch(() => 0))) await s.run(dialectOf(conn).rollback).catch(() => {});
     }
   }
 

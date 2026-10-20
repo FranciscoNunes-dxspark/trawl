@@ -57,7 +57,7 @@ const norm = (s) => String(s).toLowerCase().replace(/[\s_-]+/g, '');
  * where the column allows it. Throws, saying the row and column, on a value that doesn't fit its type.
  * Returns { script, rows, columns, skipped, missing }.
  */
-export function csvInsertScript(rows, table) {
+export function csvInsertScript(rows, table, { quote } = {}) {
   if (!rows.length) throw new Error('The file is empty.');
   const [header, ...data] = rows;
   if (!data.length) throw new Error('The file has a header and no rows.');
@@ -85,5 +85,5 @@ export function csvInsertScript(rows, table) {
     });
   });
   const set = { columns: used.map(({ col }) => ({ name: col.name, type: col.type })), rows: values };
-  return { script: insertScript(set, qualified(table.schema, table.name)), rows: values.length, columns: used.map(({ col }) => col.name), skipped, missing };
+  return { script: insertScript(set, quote ? `${quote(table.schema)}.${quote(table.name)}` : qualified(table.schema, table.name), quote ? { quote } : {}), rows: values.length, columns: used.map(({ col }) => col.name), skipped, missing };
 }

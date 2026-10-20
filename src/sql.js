@@ -211,6 +211,8 @@ const WRITES = new Set([
   'INSERT', 'UPDATE', 'DELETE', 'MERGE', 'DROP', 'TRUNCATE', 'ALTER', 'CREATE', 'EXEC', 'EXECUTE',
   'GRANT', 'REVOKE', 'DENY', 'INTO', 'BULK', 'DBCC', 'BACKUP', 'RESTORE', 'KILL', 'SHUTDOWN', 'RECONFIGURE',
 ]);
+// Postgres and MySQL take these as statements of their own that change something (classify's `dialect`).
+export const OTHER_WRITES = new Set(['CALL', 'COPY', 'DO', 'VACUUM', 'REINDEX', 'CLUSTER', 'REFRESH', 'LOAD', 'RENAME', 'LOCK', 'COMMENT', 'REPLACE', 'IMPORT', 'HANDLER', 'OPTIMIZE', 'REPAIR', 'FLUSH', 'PURGE', 'INSTALL', 'UNINSTALL', 'REASSIGN', 'DISCARD', 'CHECKPOINT', 'NOTIFY']);
 // System procedures that only read, so running them is fine on a read-only connection.
 const READ_PROCS = new Set([
   'SP_HELP', 'SP_HELPTEXT', 'SP_HELPINDEX', 'SP_HELPCONSTRAINT', 'SP_COLUMNS', 'SP_TABLES', 'SP_WHO', 'SP_WHO2',
@@ -241,8 +243,9 @@ function targetAfter(src, at) {
  * What one statement would do: { write, danger }. `danger` lists the reasons to ask first:
  * UPDATE or DELETE with no WHERE, DROP, TRUNCATE.
  */
-export function classify(statement) {
+export function classify(statement, { dialect = 'sqlserver' } = {}) {
   const src = normalise(statement);
+  const other = dialect !== 'sqlserver';
   const toks = tokens(src);
   const words = toks.slice(0, 4).map((t) => t.w);
   const danger = [];
@@ -250,7 +253,7 @@ export function classify(statement) {
   const module = isModuleHeader(words);
   for (let i = 0; i < toks.length; i++) {
     const { w, depth, at, next } = toks[i];
-    if (!WRITES.has(w)) continue;
+    if (!WRITES.has(w) && !(other && OTHER_WRITES.has(w) && !(w === 'REPLACE' && next === '('))) continue;
     const following = toks[i + 1];
     if (w === 'EXEC' || w === 'EXECUTE') {
       // "EXEC sys.sp_help" arrives as SYS then SP_HELP.
@@ -314,9 +317,9 @@ export function countQuery(sql) {
   return body.trim() ? `SELECT COUNT_BIG(*) FROM ${body.trim()};` : null;
 }
 
-/** classify() over every statement of a script, merged. */
-export function classifyScript(text) {
-  const parts = splitStatements(text).map((s) => classify(s.text));
+/** classify() over every statement of a script, merged. `dialect` ('postgres', 'mysql') adds their own writes. */
+export function classifyScript(text, { dialect } = {}) {
+  const parts = splitStatements(text).map((s) => classify(s.text, { dialect }));
   return { write: parts.some((p) => p.write), danger: parts.flatMap((p) => p.danger) };
 }
 

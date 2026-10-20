@@ -13,7 +13,8 @@ import { osCredentials } from '../credentials.js';
 import { connect as openSession } from '../db.js';
 import { changesText, editTarget, readTarget } from '../edit.js';
 import { HELP } from '../help.js';
-import { SCHEMA_SQL, buildSchema } from '../schema.js';
+import { buildSchema } from '../schema.js';
+import { dialectOf, qualifiedFor } from '../dialects.js';
 import { qualified, splitStatements, statisticsSummary } from '../sql.js';
 import { BULLET, theme } from '../theme.js';
 import { fitSegments, stringWidth } from '../text.js';
@@ -383,7 +384,7 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
   };
 
   const loadSchema = async (s, signal) => {
-    const res = await s.run(SCHEMA_SQL, { signal, limit: 1_000_000 });
+    const res = await s.run(dialectOf(s).schemaSql, { signal, limit: 1_000_000 });
     const next = buildSchema(res.sets);
     if (sessionRef.current === s) setSchemaBoth(next);
     return next;
@@ -489,7 +490,9 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
       // Whether, and where, the rows can be edited and saved back (edit.js).
       const sc = schemaRef.current;
       const why = res.error ? { reason: 'the statement failed' } : sc?.database !== s.database ? { reason: 'the schema is still loading' } : null;
-      const edit = why ?? editTarget(sql, res.sets, sc);
+      // Saving edits writes T-SQL; following keys works everywhere.
+      const native = dialectOf(s).kind === 'sqlserver';
+      const edit = why ?? (native ? editTarget(sql, res.sets, sc) : { reason: `saving edits is for SQL Server only, and this is ${dialectOf(s).label}` });
       // Which table the rows are, for following a foreign key from a cell (F).
       const source = why ?? (edit.table ? { table: edit.table, columns: edit.columns } : readTarget(sql, res.sets, sc));
       const shown = { id: nextId.current++, title, sql, ...res, error: res.error?.message ?? null, edit, source, conn: s.conn.name, database: s.database };
@@ -812,7 +815,11 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
       setView('query');
       setFocus('editor');
     },
-    startQuery: (obj) => ctx.editInConsole(`SELECT TOP (100) *\nFROM ${qualified(obj.schema, obj.name)}\nWHERE `, { atEnd: true }),
+    startQuery: (obj) => {
+      const d = dialectOf(sessionRef.current);
+      if (d.kind !== 'sqlserver') return ctx.editInConsole(`SELECT *\nFROM ${qualifiedFor(d, obj.schema, obj.name)}\nWHERE \nLIMIT 100`, { atEnd: true });
+      return ctx.editInConsole(`SELECT TOP (100) *\nFROM ${qualified(obj.schema, obj.name)}\nWHERE `, { atEnd: true });
+    },
     quit,
     checkUpdates,
     askClaude,

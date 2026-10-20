@@ -25,7 +25,7 @@ export function inFolder(connections, folder) {
  * The query as it runs on each connection: inside a transaction that is rolled back afterwards, as
  * trawl mcp runs Claude's, a second lock behind refusing writes. `offset` is the lines added in front.
  */
-export const readOnlyScript = (text) => ({ sql: `SET XACT_ABORT ON;\nBEGIN TRANSACTION;\n${text}`, offset: 2 });
+export const readOnlyScript = (text, prefix = 'SET XACT_ABORT ON;\nBEGIN TRANSACTION;') => ({ sql: `${prefix}\n${text}`, offset: prefix.split('\n').length });
 
 /**
  * Merges what each connection returned ({ conn, database, sets } or { conn, database, error }) into

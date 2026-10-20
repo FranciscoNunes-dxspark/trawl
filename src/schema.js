@@ -150,18 +150,20 @@ const fullName = (o) => `${bracket(o.schema)}.${bracket(o.name)}`;
 /**
  * CREATE TABLE for a table, from what the catalog query read: columns, the primary key and the
  * foreign keys. Defaults, checks, indexes and an identity's seed aren't read, and the script says so.
+ * `quote` and `identity` write it for another dialect (dialects.js).
  */
-export function createTableScript(o, schema) {
-  const cols = o.columns.map((c) => `  ${bracket(c.name)} ${c.type}${c.identity ? ' IDENTITY(1,1)' : ''} ${c.nullable ? 'NULL' : 'NOT NULL'}`);
-  const pk = o.columns.filter((c) => c.pk).map((c) => bracket(c.name));
+export function createTableScript(o, schema, { quote = bracket, identity = 'IDENTITY(1,1)' } = {}) {
+  const fullName = (x) => `${quote(x.schema)}.${quote(x.name)}`;
+  const cols = o.columns.map((c) => `  ${quote(c.name)} ${c.type}${c.identity ? ` ${identity}` : ''} ${c.nullable ? 'NULL' : 'NOT NULL'}`);
+  const pk = o.columns.filter((c) => c.pk).map((c) => quote(c.name));
   if (pk.length) cols.push(`  PRIMARY KEY (${pk.join(', ')})`);
   const name = objectName(o);
   const fks = (schema?.foreignKeys ?? [])
     .filter((f) => f.from === name)
     .map((f) => {
       const [toSchema, ...toName] = f.to.split('.');
-      const list = (i) => f.columns.map((c) => bracket(c[i])).join(', ');
-      return `ALTER TABLE ${fullName(o)} ADD CONSTRAINT ${bracket(f.name)}\n  FOREIGN KEY (${list(0)}) REFERENCES ${bracket(toSchema)}.${bracket(toName.join('.'))} (${list(1)});`;
+      const list = (i) => f.columns.map((c) => quote(c[i])).join(', ');
+      return `ALTER TABLE ${fullName(o)} ADD CONSTRAINT ${quote(f.name)}\n  FOREIGN KEY (${list(0)}) REFERENCES ${quote(toSchema)}.${quote(toName.join('.'))} (${list(1)});`;
     });
   return [
     `-- ${name}: columns, primary key and foreign keys as Trawl read them (not defaults, checks or indexes).`,

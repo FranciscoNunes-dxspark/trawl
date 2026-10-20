@@ -1,3 +1,5 @@
+import { kindOf } from './dialects.js';
+
 // Saved connections: parsing /add, and turning one into tedious's connection options.
 // config.json holds nothing secret. Azure SQL signs in with your Azure CLI login; a SQL login's
 // password is asked for when connecting and kept in the OS credential store (credentials.js),
@@ -10,7 +12,7 @@ export function splitArgs(s) {
   return out;
 }
 
-export const ADD_USAGE = '/add <name> <server> [database] [--user <login> [--password-env <VAR>]] [--domain <domain>] [--folder <folder>] [--prod] [--commit auto|manual] [--trust-cert] [--ai off|schema|results]';
+export const ADD_USAGE = '/add <name> <server> [database] [--kind sqlserver|postgres|mysql] [--user <login> [--password-env <VAR>]] [--domain <domain>] [--folder <folder>] [--prod] [--commit auto|manual] [--trust-cert] [--ssl] [--ai off|schema|results]';
 
 /**
  * Reads `/add` arguments into a connection. Without --user it signs in through the Azure CLI.
@@ -34,6 +36,11 @@ export function parseAddArgs(rest) {
       const folder = cleanFolder(value());
       if (folder) conn.folder = folder;
     }
+    else if (a === '--kind') {
+      const kind = kindOf(value());
+      if (!kind) throw new Error(`--kind is sqlserver, postgres or mysql. ${ADD_USAGE}`);
+      if (kind !== 'sqlserver') conn.kind = kind;
+    } else if (a === '--ssl') conn.ssl = true;
     else if (a === '--prod') conn.prod = true;
     else if (a === '--trust-cert') conn.trustCert = true;
     else if (a === '--commit') {
@@ -52,6 +59,8 @@ export function parseAddArgs(rest) {
   if (DEMO_CONNECTIONS.some((d) => d.name === name.toLowerCase())) throw new Error(`${name} is the demo's name; pick another.`);
   if (positional.length > 3) throw new Error(`Too many arguments. ${ADD_USAGE}`);
   if (conn.passwordEnv && !conn.user) throw new Error('--password-env goes with --user.');
+  if (conn.kind && !conn.user) throw new Error(`A ${conn.kind === 'postgres' ? 'Postgres' : 'MySQL'} connection signs in with a login: add --user <login>.`);
+  if (conn.kind && conn.domain) throw new Error('--domain (Windows sign-in) is for SQL Server only.');
   return { name, server, ...(database ? { database } : {}), auth: conn.user ? (conn.domain ? 'ntlm' : 'sql') : 'azure-cli', ...conn };
 }
 
@@ -91,7 +100,13 @@ export const isReadOnly = (conn) => conn.readOnly ?? Boolean(conn.prod);
 export const commitMode = (conn) => conn.commit ?? (conn.prod ? 'manual' : 'auto');
 
 /** "server/database", for the header and the Connections list. */
-export const describeConn = (conn) => (conn.demo ? `demo/${conn.database}` : `${conn.server}/${conn.database ?? '(default)'}`);
+export const describeConn = (conn) => (conn.demo ? `demo/${conn.database}` : `${conn.kind ? `${conn.kind}://` : ''}${conn.server}/${conn.database ?? '(default)'}`);
+
+/** "host:5432" or "host,5432" (Postgres, MySQL): { host, port }, `port` the default when not given. */
+export function hostPort(server, port) {
+  const m = String(server).match(/^(.*)[:,](\d+)$/);
+  return m && !m[1].includes(':') ? { host: m[1], port: Number(m[2]) } : { host: String(server), port };
+}
 
 /** "host,1433" and "host\INSTANCE" as SQL Server tools write them. */
 export function parseServer(server) {

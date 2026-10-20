@@ -274,8 +274,8 @@ export function savedValue(text, type) {
 }
 
 /** A result set as INSERT statements into `table` (a name as it's typed), a thousand rows a statement. */
-export function insertScript(set, table) {
-  const cols = set.columns.map((c) => `[${c.name.replace(/]/g, ']]')}]`).join(', ');
+export function insertScript(set, table, { quote = quoteIdent } = {}) {
+  const cols = set.columns.map((c) => quote(c.name)).join(', ');
   const rows = set.rows.map((row) => `(${row.map((v, i) => valueLiteral(v, set.columns[i].type)).join(', ')})`);
   const out = [];
   for (let i = 0; i < rows.length; i += 1000) out.push(`INSERT INTO ${table} (${cols}) VALUES\n  ${rows.slice(i, i + 1000).join(',\n  ')};`);

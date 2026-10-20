@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-Trawl is a keyboard-driven SQL Server client for the terminal, built with Ink (React for the terminal) on Node 22+. It is Tiller's sibling (`C:\Team\Tiller`, a git client): the shared pieces (`text.js`, `ui/parts.jsx`, `ui/hooks.js`, the jsx loader, the build script, the prompt and activity log in `App.jsx`) were copied from there and should stay recognisably the same. Plain JavaScript ES modules with `.jsx` for components; no TypeScript, no linter config. The README is the user-facing spec; when behaviour changes, update it too.
+Trawl is a keyboard-driven SQL Server client for the terminal, built with Ink (React for the terminal) on Node 22+. It is Tiller's sibling (`C:\Team\Tiller`, a git client): the shared pieces (`text.js`, `ui/parts.jsx`, `ui/hooks.js`, the jsx loader, the build script, the prompt and activity log in `App.jsx`) were copied from there and should stay recognisably the same. `scripts/shared-check.js <sibling checkout>` reports how the shared files (its `SHARED` list: `text.js`, `ui/parts.jsx`, `ui/hooks.js`, `mouse.js`, `selection.js`, `clipboard.js`, `jsx-hooks.js`, `register.js`, `version.js`, `scripts/build.js`) differ from Tiller's or Splice's, ignoring the apps' names, and exits with 1 on drift; `--diff` shows the lines. Plain JavaScript ES modules with `.jsx` for components; no TypeScript, no linter config. The README is the user-facing spec; when behaviour changes, update it too.
 
 ## Commands
 
@@ -14,6 +14,7 @@ npm run demo                                                   # run against the
 node bin/trawl.js query.sql --connect club-a                  # open a script on a saved connection
 npm run build                                                  # Bun-compiled executable for this machine → dist/
 node scripts/logo.js                                           # regenerate assets/ from src/glim.js
+node scripts/shared-check.js ../splice [--diff]                # drift in the files shared with a sibling app
 ```
 
 `--import ./src/register.js` is required whenever Node loads `.jsx`: it installs a module hook (`src/jsx-hooks.js`) that compiles `.jsx` with esbuild on import. There is no dev build step. CI runs `npm test` on Linux and Windows, so path handling and line endings must work on both (`.gitattributes` forces LF).

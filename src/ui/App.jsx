@@ -43,7 +43,7 @@ const VIEWS = [
 const HINTS = {
   explorer: '↵ first rows · d describe · s query it in the console · c CREATE script · /find filter',
   query: '↵ run statement · v select several · R run file · e edit in the console · /console',
-  results: 'h/l columns · ↵ record · y/Y copy cell/row · e edit · n NULL · d delete · u undo · s save · x export',
+  results: 'h/l columns · o sort · f filter · ↵ record · y/Y copy · e edit · n NULL · d delete · s save · x export',
   history: '↵ run again · e edit in the console · ◆ ran by Claude',
   connections: '↵ connect · n new · p password · f folder · x forget',
 };
@@ -152,6 +152,8 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
   const [update, setUpdate] = useState(null);
   const [editor, setEditorState] = useState(() => ed.fromText(loadConsole()));
   const [queryMode, setQueryMode] = useState(initialFile ? 'file' : 'console');
+  // How Results shows the set on screen: sorted on a column ({ col, dir }) and narrowed by /filter.
+  const [resultView, setResultView] = useState({ sort: null, filter: '' });
   // Glim looks happy (or worried) for a few seconds after a result; re-render when that wears off.
   const [, setMoodTick] = useState(0);
   useEffect(() => {
@@ -207,6 +209,7 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     setWritesAllowedState(on);
   };
   const setResultIndex = (i) => {
+    if (i !== resultIndexRef.current) setResultView({ sort: null, filter: '' });
     resultIndexRef.current = i;
     setResultIndexState(i);
   };
@@ -221,6 +224,7 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
       note(`Dropped ${changesText(pending)} not saved to ${resultsRef.current?.edit?.table?.name ?? 'the table'}.`);
       setChanges(NO_CHANGES);
     }
+    if (next?.id !== resultsRef.current?.id) setResultView({ sort: null, filter: '' });
     resultsRef.current = next;
     setResults(next);
   };
@@ -600,6 +604,14 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     setConfig,
     setWritesAllowed,
     setResultIndex,
+    // o in Results: by this column, A to Z, then Z to A, then as the server sent them.
+    sortResults: (col) =>
+      setResultView((v) => ({ ...v, sort: v.sort?.col !== col ? { col, dir: 1 } : v.sort.dir > 0 ? { col, dir: -1 } : null })),
+    filterResults: (text) => {
+      if (!resultsRef.current) return note('Run a query first: there is nothing to filter.', 'error');
+      setResultView((v) => ({ ...v, filter: text.trim() }));
+      setView('results');
+    },
     currentSet: () => resultsRef.current?.sets[resultIndexRef.current] ?? null,
     note,
     confirm,
@@ -850,13 +862,13 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     main = (
       <Box flexDirection="column" width={W} height={mainH}>
         <ConsoleView editor={editor} editing={editing} ctx={ctx} width={W} height={mainH - under} active={(viewActive || editing) && !overlay && !confirmReq} />
-        {under ? <ResultsView results={results} changes={changes} setIndex={resultIndex} ctx={ctx} width={W} height={under} active={false} /> : null}
+        {under ? <ResultsView results={results} changes={changes} setIndex={resultIndex} view={resultView} ctx={ctx} width={W} height={under} active={false} /> : null}
       </Box>
     );
   } else if (view === 'query') {
     main = <QueryView file={file} ctx={ctx} width={W} height={mainH} active={viewActive} />;
   } else if (view === 'results') {
-    main = <ResultsView results={results} changes={changes} setIndex={resultIndex} ctx={ctx} width={W} height={mainH} active={viewActive || (focus === 'cell' && !confirmReq)} />;
+    main = <ResultsView results={results} changes={changes} setIndex={resultIndex} view={resultView} ctx={ctx} width={W} height={mainH} active={viewActive || (focus === 'cell' && !confirmReq)} />;
   } else if (view === 'history') {
     // Claude's queries come from trawl mcp's log, read each time the tab draws (it's small).
     const ran = [...config.ran, ...loadClaudeHistory()].sort((x, y) => y.at - x.at);

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { classify, classifyScript, countQuery, formatValue, mask, oneLine, quoteIdent, splitBatches, splitStatements, statementAt, toCsv, toJson, withoutLeadingComments } from '../src/sql.js';
+import { classify, classifyScript, countQuery, viewOrder, formatValue, mask, oneLine, quoteIdent, splitBatches, splitStatements, statementAt, toCsv, toJson, withoutLeadingComments } from '../src/sql.js';
 
 const texts = (list) => list.map((s) => s.text);
 
@@ -137,4 +137,14 @@ test('countQuery counts what an UPDATE or DELETE would change, reading only', ()
   assert.equal(countQuery('DELETE FROM dbo.Players OUTPUT deleted.Id WHERE 1 = 1'), null);
   assert.equal(countQuery('UPDATE a SET x = 1; UPDATE b SET y = 2'), null);
   assert.equal(countQuery('INSERT INTO t VALUES (1)'), null);
+});
+
+test('viewOrder filters and sorts a result set without touching its rows', () => {
+  const set = { columns: [{ name: 'Name' }, { name: 'Goals' }], rows: [['Rui', 10], ['ana', null], ['Marta', 2], ['Iker', 10]] };
+  assert.deepEqual(viewOrder(set), [0, 1, 2, 3]);
+  assert.deepEqual(viewOrder(set, { sort: { col: 1, dir: 1 } }), [1, 2, 0, 3]);
+  assert.deepEqual(viewOrder(set, { sort: { col: 1, dir: -1 } }), [0, 3, 2, 1]);
+  assert.deepEqual(viewOrder(set, { sort: { col: 0, dir: 1 } }), [1, 3, 2, 0]);
+  assert.deepEqual(viewOrder(set, { filter: 'A' }), [1, 2]);
+  assert.deepEqual(viewOrder(set, { filter: '10', sort: { col: 0, dir: -1 } }), [0, 3]);
 });

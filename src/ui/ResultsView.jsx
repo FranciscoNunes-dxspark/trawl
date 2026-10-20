@@ -2,7 +2,7 @@ import React, { useMemo, useRef, useState } from 'react';
 import { Box, useInput } from 'ink';
 import * as a from '../actions.js';
 import { canEdit, changesText, editText, tsvText } from '../edit.js';
-import { formatValue, isNumericType } from '../sql.js';
+import { formatValue, isNumericType, viewOrder } from '../sql.js';
 import { theme } from '../theme.js';
 import { clean, fit, stringWidth } from '../text.js';
 import { useListNav } from './hooks.js';
@@ -44,10 +44,19 @@ function editingSegments({ text, cursor }, w) {
  * edit.js), cells can be edited and rows deleted: changes are staged (`changes`, kept by App) and
  * `s` saves them all at once.
  */
-export function ResultsView({ results, changes, setIndex, ctx, width, height, active }) {
+export function ResultsView({ results, changes, setIndex, view, ctx, width, height, active }) {
   const sets = results?.sets ?? [];
   const set = sets[setIndex];
-  const widths = useMemo(() => (set ? columnWidths(set) : []), [set]);
+  // o sorts and /filter narrows the rows on screen; they stay where they are in `set.rows`, so
+  // staged edits (keyed by those indexes) still find theirs.
+  const sort = view?.sort ?? null;
+  const filter = view?.filter ?? '';
+  const order = useMemo(() => (set ? viewOrder(set, { sort, filter }) : []), [set, sort, filter]);
+  // The sorted column keeps room for its ▲ or ▼.
+  const widths = useMemo(
+    () => (set ? columnWidths(set).map((w, i) => (sort?.col === i ? Math.max(w, Math.min(MAX_COL, stringWidth(set.columns[i].name) + 2)) : w)) : []),
+    [set, sort],
+  );
   const [colOffset, setColOffset] = useState(0);
   const [col, setColState] = useState(0);
   // Keys can come faster than renders (l then e), so the handler reads the column from a ref.
@@ -71,7 +80,7 @@ export function ResultsView({ results, changes, setIndex, ctx, width, height, ac
   if (editable && (pending.cells.size || pending.deletes.size)) notes.unshift({ text: `${changesText(pending)} not saved · s saves · u undoes the row · U all`, color: theme.warn });
   const noteLines = Math.min(3, notes.length);
   const gridH = Math.max(1, innerH - 2 - noteLines);
-  const nav = useListNav(set?.rows.length ?? 0, gridH, { resetKey: `${results?.id}:${setIndex}` });
+  const nav = useListNav(order.length, gridH, { resetKey: `${results?.id}:${setIndex}:${sort?.col}:${sort?.dir}:${filter}` });
   // Editable rows have a cell cursor; other results just scroll, the first column shown standing in for it.
   const cur = Math.min(editable ? col : colOffset, Math.max(0, widths.length - 1));
 
@@ -167,13 +176,15 @@ export function ResultsView({ results, changes, setIndex, ctx, width, height, ac
       if (ctx.cellHasKeys()) return cellKeys(input, k);
       if (!ctx.viewHasKeys()) return;
       if (nav.handle(input, k)) return;
-      const row = nav.current();
+      const row = order[nav.current()];
       const cur = Math.min(editable ? colRef.current : colOffset, Math.max(0, widths.length - 1));
       if (k.leftArrow || input === 'h') setCol(cur - 1);
       else if (k.rightArrow || input === 'l') setCol(cur + 1);
       else if (input === '[' && setIndex > 0) (ctx.setResultIndex(setIndex - 1), setColOffset(0), setCol(0));
       else if (input === ']' && setIndex < sets.length - 1) (ctx.setResultIndex(setIndex + 1), setColOffset(0), setCol(0));
       else if (input === 'x') ctx.prefill('/export ');
+      else if (input === 'o' && set) ctx.sortResults(cur);
+      else if (input === 'f' && set) ctx.prefill('/filter ');
       else if (input === 'y' && set?.rows[row]) ctx.copy(editText(set.rows[row][cur]), `${set.columns[cur].name}'s value`);
       else if (input === 'Y' && set?.rows[row]) ctx.copy(tsvText(set, { header: false, rows: [set.rows[row]] }), `row ${row + 1}, tab-separated`);
       else if (k.return && set?.rows[row]) ctx.showText(`Row ${row + 1} of ${set.rows.length}`, recordText(set, set.rows[row]));
@@ -220,7 +231,7 @@ export function ResultsView({ results, changes, setIndex, ctx, width, height, ac
     const at = `${r}:${i}`;
     const staged = pending.cells.has(at);
     const value = staged ? pending.cells.get(at) : v;
-    const here = editable && active && r === nav.index && i === cur;
+    const here = editable && active && r === order[nav.index] && i === cur;
     if (deleted) return { text: formatValue(v), color: theme.del, strike: true, underline: here };
     if (staged) return { text: value === null ? 'NULL' : value, color: theme.warn, bold: true, italic: value === null, underline: here };
     return { text: formatValue(v), color: v == null ? theme.nul : numeric[i] ? theme.number : undefined, italic: v == null, underline: here };
@@ -228,7 +239,9 @@ export function ResultsView({ results, changes, setIndex, ctx, width, height, ac
 
   const parts = [];
   if (sets.length > 1) parts.push(`set ${setIndex + 1}/${sets.length}`);
-  if (set) parts.push(`${set.rows.length}${set.truncated ? '+' : ''} row${set.rows.length === 1 ? '' : 's'}`);
+  if (set && filter) parts.push(`"${filter}": ${order.length} of ${set.rows.length}${set.truncated ? '+' : ''} rows`);
+  else if (set) parts.push(`${set.rows.length}${set.truncated ? '+' : ''} row${set.rows.length === 1 ? '' : 's'}`);
+  if (set && sort) parts.push(`by ${set.columns[sort.col]?.name} ${sort.dir > 0 ? '▲' : '▼'}`);
   if (set && widths.length > shown.length) parts.push(`cols ${firstCol + 1}–${firstCol + shown.length}/${widths.length}`);
   if (results.ms != null) parts.push(`${results.ms} ms`);
 
@@ -239,14 +252,14 @@ export function ResultsView({ results, changes, setIndex, ctx, width, height, ac
           <Row
             pointer={false}
             width={innerW}
-            segments={[{ text: '  ' }, ...cells(set.columns.map((c) => c.name), (i, v) => ({ text: v, bold: true, color: theme.accent, underline: editable && i === cur }))]}
+            segments={[{ text: '  ' }, ...cells(set.columns.map((c, i) => (sort?.col === i ? `${c.name} ${sort.dir > 0 ? '▲' : '▼'}` : c.name)), (i, v) => ({ text: v, bold: true, color: theme.accent, underline: editable && i === cur }))]}
           />
           <Row pointer={false} width={innerW} segments={[{ text: '  ' }, ...shown.flatMap(({ w }, k) => [...(k ? [{ text: '─┼─', color: theme.border }] : []), { text: '─'.repeat(w), color: theme.border }])]} />
-          {set.rows.slice(nav.offset, nav.offset + gridH).map((row, r) => (
-            <Row key={nav.offset + r} width={innerW} selected={nav.offset + r === nav.index} focused={active} segments={cells(row, rowCells(row, nav.offset + r))} />
+          {order.slice(nav.offset, nav.offset + gridH).map((r, k) => (
+            <Row key={r} width={innerW} selected={nav.offset + k === nav.index} focused={active} segments={cells(set.rows[r], rowCells(set.rows[r], r))} />
           ))}
-          {set.rows.length === 0 ? <Row pointer={false} width={innerW} segments={[{ text: '  (no rows)', color: theme.dim }]} /> : null}
-          {Array.from({ length: Math.max(0, gridH - Math.max(1, set.rows.length - nav.offset)) }, (_, k) => (
+          {order.length === 0 ? <Row pointer={false} width={innerW} segments={[{ text: set.rows.length ? `  (no rows contain "${filter}": /filter with nothing shows them all)` : '  (no rows)', color: theme.dim }]} /> : null}
+          {Array.from({ length: Math.max(0, gridH - Math.max(1, order.length - nav.offset)) }, (_, k) => (
             <Row key={`pad${k}`} pointer={false} width={innerW} segments={[]} />
           ))}
         </Box>

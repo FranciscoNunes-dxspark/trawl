@@ -437,6 +437,28 @@ test('y and Y copy the cell and the row, and /copy the whole result set', async 
   app.unmount();
 });
 
+test('o sorts the result rows by a column and /filter narrows them, without running again', async () => {
+  const app = start();
+  await until(() => frame().includes('Clubs'), 'the explorer');
+  await type(app.stdin, '!SELECT TOP (500) * FROM [dbo].[Players]');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('Rui Costa'), 'the players');
+  for (let k = 0; k < 5; k++) app.stdin.write('l');
+  await new Promise((r) => setTimeout(r, 50));
+  app.stdin.write('o');
+  await until(() => frame().includes('Goals ▲'), 'sorted A to Z');
+  app.stdin.write('o');
+  await until(() => frame().includes('by Goals ▼'), 'sorted Z to A');
+  assert.match(frame(), /❯\s+4 │\s+1 │ João Pinto/);
+  assert.match(frame(), /│ Goals ▼/);
+  await type(app.stdin, '/filter marta');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('"marta": 1 of 12 rows'), 'the filter');
+  assert.match(frame(), /Marta Reis/);
+  assert.doesNotMatch(frame(), /Rui Costa/);
+  app.unmount();
+});
+
 test('e in History puts the statement in the console to edit', async () => {
   const app = start();
   await until(() => frame().includes('Clubs'), 'the explorer');

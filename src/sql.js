@@ -431,3 +431,25 @@ export function withoutLeadingComments(text) {
   const at = mask(src).search(/[^\s\u0001]/);
   return at < 0 ? '' : src.slice(at);
 }
+
+// Sorting values from the server: NULL first, then by what they are (numbers as numbers, dates
+// by time), text by the user's locale.
+function compareValues(a, b) {
+  if (a == null || b == null) return a == null ? (b == null ? 0 : -1) : 1;
+  if (a instanceof Date && b instanceof Date) return a - b;
+  if ((typeof a === 'number' || typeof a === 'bigint') && (typeof b === 'number' || typeof b === 'bigint')) return a < b ? -1 : a > b ? 1 : 0;
+  if (typeof a === 'boolean' && typeof b === 'boolean') return Number(a) - Number(b);
+  return formatValue(a).localeCompare(formatValue(b), undefined, { numeric: true, sensitivity: 'base' });
+}
+
+/**
+ * The order a result set's rows show in, as indexes into `set.rows`: only those with a value
+ * containing `filter` (ignoring case), sorted on `sort` ({ col, dir: 1 or -1 }) when given.
+ */
+export function viewOrder(set, { sort = null, filter = '' } = {}) {
+  let order = set.rows.map((_, i) => i);
+  const q = filter.trim().toLowerCase();
+  if (q) order = order.filter((i) => set.rows[i].some((v) => formatValue(v).toLowerCase().includes(q)));
+  if (sort) order.sort((x, y) => compareValues(set.rows[x][sort.col], set.rows[y][sort.col]) * sort.dir || x - y);
+  return order;
+}

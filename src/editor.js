@@ -87,3 +87,36 @@ export function append(ed, text) {
   while (lines.length && !lines.at(-1).trim()) lines.pop();
   return { lines: [...lines, '', ...body], row: lines.length + 1, col: 0 };
 }
+
+// Undo history: { past, future } of earlier and undone states. Typing a word is one step, as in
+// editors: keystrokes marked `merge` on the same line within a second join the step before them.
+const HISTORY_LIMIT = 500;
+const MERGE_MS = 1000;
+
+export const newHistory = () => ({ past: [], future: [] });
+
+/** Records `prev`, the state an edit is about to replace. A new edit drops what was undone. */
+export function record(history, prev, { merge = false, at = Date.now() } = {}) {
+  const last = history.past.at(-1);
+  if (merge && last?.merge && at - last.at < MERGE_MS && last.row === prev.row) {
+    return { past: [...history.past.slice(0, -1), { ...last, at }], future: [] };
+  }
+  const entry = { lines: prev.lines, row: prev.row, col: prev.col, merge, at };
+  return { past: [...history.past, entry].slice(-HISTORY_LIMIT), future: [] };
+}
+
+const stateOf = (e) => ({ lines: e.lines, row: e.row, col: e.col });
+
+/** Steps back: { editor, history }, or null when there's nothing to undo. */
+export function undo(history, current) {
+  const last = history.past.at(-1);
+  if (!last) return null;
+  return { editor: stateOf(last), history: { past: history.past.slice(0, -1), future: [...history.future, stateOf(current)] } };
+}
+
+/** Steps forward again after an undo: { editor, history }, or null. */
+export function redo(history, current) {
+  const next = history.future.at(-1);
+  if (!next) return null;
+  return { editor: next, history: { past: [...history.past, { ...stateOf(current), merge: false, at: 0 }], future: history.future.slice(0, -1) } };
+}

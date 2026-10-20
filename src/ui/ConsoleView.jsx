@@ -83,6 +83,8 @@ export function ConsoleView({ editor, editing, ctx, width, height, active }) {
       const editor = ctx.console;
       if (key.return || input === 'i') return ctx.setEditing(true);
       if (key.ctrl && input === 'r') return runConsole(ctx, editor);
+      if (key.ctrl && input === 'z') return ctx.undoConsole();
+      if (key.ctrl && input === 'y') return ctx.redoConsole();
       if (input === 'R') return runConsole(ctx, editor, { all: true });
       if (key.downArrow || input === 'j') return set(ed.move(editor, { rows: 1 }));
       if (key.upArrow || input === 'k') return set(ed.move(editor, { rows: -1 }));
@@ -119,9 +121,11 @@ export function ConsoleView({ editor, editing, ctx, width, height, active }) {
       if (open) setMenu(null);
       if (key.escape || (key.ctrl && input === 'c')) return ctx.setEditing(false);
       if (key.ctrl && input === 'r') return runConsole(ctx, editor);
+      if (key.ctrl && input === 'z') return ctx.undoConsole();
+      if (key.ctrl && input === 'y') return ctx.redoConsole();
       if (key.return) return set(ed.newline(editor));
       if (key.backspace || key.delete) {
-        set(ed.backspace(editor));
+        ctx.setConsole(ed.backspace(editor), { merge: true });
         return open ? setMenu({ index: 0, force: open.force }) : undefined;
       }
       if (key.leftArrow) return set(ed.move(editor, { cols: -1 }));
@@ -138,7 +142,8 @@ export function ConsoleView({ editor, editing, ctx, width, height, active }) {
       if (key.ctrl || key.meta || !input) return;
       const typed = input.replace(/[\x00-\x08\x0b-\x0c\x0e-\x1f\x7f]/g, '');
       if (!typed) return;
-      set(ed.insert(editor, typed));
+      // One character of a word joins the undo step before it; a space, or a paste, starts one.
+      ctx.setConsole(ed.insert(editor, typed), { merge: typed.length === 1 && typed !== ' ' });
       if (WORD_CHAR.test(typed)) setMenu({ index: 0 });
     },
     { isActive: active && editing },
@@ -232,7 +237,7 @@ export function ConsoleView({ editor, editing, ctx, width, height, active }) {
   const hint = items.length
     ? 'tab take it · ↑↓ pick · esc close'
     : editing
-      ? 'typing · ctrl+space suggest · ctrl+r run statement · esc stop'
+      ? 'typing · ctrl+space suggest · ctrl+r run · ctrl+z undo · esc stop'
       : `${editor.lines.length} lines · ↵ type · ctrl+r run · R run all`;
   return (
     <Panel title="Console" hint={hint} width={width} height={height} focused={active}>

@@ -357,7 +357,7 @@ const splitArgsLoose = (s) => String(s ?? '').trim().split(/\s+/).filter(Boolean
 /** Empties the console, asking first when there's something in it. */
 export async function newConsole(ctx) {
   if (ed.toText(ctx.console).trim()) {
-    const ok = await ctx.confirm({ title: 'Clear the console?', detail: 'Its text is gone for good. /save <file.sql> keeps a copy first.', options: YES_NO('Yes, clear it') });
+    const ok = await ctx.confirm({ title: 'Clear the console?', detail: 'ctrl+z in the console brings it back until you quit; /save <file.sql> keeps a copy for good.', options: YES_NO('Yes, clear it') });
     if (!ok) return;
   }
   ctx.setConsole(ed.fromText(''));

@@ -317,6 +317,33 @@ test('the console suggests tables and columns as you type; tab takes one, esc on
   app.unmount();
 });
 
+test('ctrl+z undoes in the console a word at a time, ctrl+y redoes, and /new can be undone', async () => {
+  mkdirSync(process.env.TRAWL_HOME, { recursive: true });
+  writeFileSync(join(process.env.TRAWL_HOME, 'console.sql'), '');
+  const app = start();
+  await until(() => frame().includes('Clubs'), 'the explorer');
+  app.stdin.write('2');
+  await until(() => frame().includes('An empty console'), 'the empty console');
+  app.stdin.write('i');
+  await until(() => frame().includes('typing SQL'), 'typing mode');
+  await type(app.stdin, 'SELECT 42');
+  await until(() => frame().includes('1 SELECT 42'), 'the text');
+  app.stdin.write('\x1a'); // ctrl+z
+  await until(() => frame().includes('1 SELECT ') && !frame().includes('SELECT 42'), 'the last word undone');
+  app.stdin.write('\x19'); // ctrl+y
+  await until(() => frame().includes('1 SELECT 42'), 'redone');
+  app.stdin.write(KEYS.esc);
+  await until(() => frame().includes('↵/i type'), 'out of typing mode');
+  await type(app.stdin, '/new');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('Clear the console?'), 'the question');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('typing SQL') && !frame().includes('SELECT 42'), 'a clear console');
+  app.stdin.write('\x1a');
+  await until(() => frame().includes('1 SELECT 42'), '/new undone');
+  app.unmount();
+});
+
 test('e in History puts the statement in the console to edit', async () => {
   const app = start();
   await until(() => frame().includes('Clubs'), 'the explorer');

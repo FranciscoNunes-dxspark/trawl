@@ -66,3 +66,40 @@ test('highlighting colours keywords, strings, comments, numbers and variables', 
   assert.equal(lines[1][0].kind, 'comment');
   assert.equal(lines[1].at(-1).kind, 'keyword');
 });
+
+test('undo steps back a word at a time, and redo forward again', () => {
+  let h = ed.newHistory();
+  let e = ed.fromText('');
+  // Each keystroke records the state before it, as App's setConsole does.
+  const key = (ch, at) => {
+    const next = ch === '\n' ? ed.newline(e) : ed.insert(e, ch);
+    h = ed.record(h, e, { merge: ch !== ' ' && ch !== '\n', at });
+    e = next;
+  };
+  [...'SELECT 1'].forEach((ch, i) => key(ch, i * 10));
+  assert.equal(ed.toText(e), 'SELECT 1');
+  let r = ed.undo(h, e);
+  assert.equal(ed.toText(r.editor), 'SELECT ');
+  r = ed.undo(r.history, r.editor);
+  assert.equal(ed.toText(r.editor), 'SELECT');
+  r = ed.undo(r.history, r.editor);
+  assert.deepEqual(r.editor, { lines: [''], row: 0, col: 0 });
+  assert.equal(ed.undo(r.history, r.editor), null);
+  r = ed.redo(r.history, r.editor);
+  assert.equal(ed.toText(r.editor), 'SELECT');
+  r = ed.redo(r.history, r.editor);
+  r = ed.redo(r.history, r.editor);
+  assert.deepEqual([ed.toText(r.editor), r.editor.col], ['SELECT 1', 8]);
+  assert.equal(ed.redo(r.history, r.editor), null);
+});
+
+test('a pause or another line starts a new undo step, and an edit drops what was undone', () => {
+  let h = ed.record(ed.newHistory(), { lines: [''], row: 0, col: 0 }, { merge: true, at: 0 });
+  h = ed.record(h, { lines: ['a'], row: 0, col: 1 }, { merge: true, at: 2000 });
+  assert.equal(h.past.length, 2);
+  h = ed.record(h, { lines: ['ab', ''], row: 1, col: 0 }, { merge: true, at: 2010 });
+  assert.equal(h.past.length, 3);
+  const r = ed.undo(h, { lines: ['ab', 'c'], row: 1, col: 1 });
+  assert.equal(r.history.future.length, 1);
+  assert.equal(ed.record(r.history, r.editor).future.length, 0);
+});

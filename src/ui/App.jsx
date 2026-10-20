@@ -177,6 +177,8 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
   const historyPos = useRef(-1);
   const lastOutput = useRef(null);
   const editorRef = useRef(editor);
+  // The console's undo history, for this session only (console.sql keeps just the text).
+  const historyRef = useRef(ed.newHistory());
   const saveTimer = useRef(null);
   // Passwords typed this session, by connection, so /use and reconnecting don't ask again.
   const typed = useRef(new Map());
@@ -221,12 +223,21 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     resultsRef.current = next;
     setResults(next);
   };
-  // The console is saved a moment after typing stops, and straight away on quit.
-  const setConsole = (next) => {
+  // The console is saved a moment after typing stops, and straight away on quit. Every change to
+  // its text is a step ctrl+z can undo; `merge` (typing) joins the keystrokes of a word into one.
+  const setConsole = (next, { merge = false, record = true } = {}) => {
+    const prev = editorRef.current;
+    if (record && next.lines !== prev.lines && ed.toText(next) !== ed.toText(prev)) historyRef.current = ed.record(historyRef.current, prev, { merge });
     editorRef.current = next;
     setEditorState(next);
     clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => saveConsole(ed.toText(next)), 400);
+  };
+  const stepConsole = (step, nothing) => {
+    const r = step(historyRef.current, editorRef.current);
+    if (!r) return note(nothing);
+    historyRef.current = r.history;
+    setConsole(r.editor, { record: false });
   };
   const setFocus = (f) => {
     focusRef.current = f;
@@ -613,6 +624,8 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     viewHasKeys: () => focusRef.current === 'view' && !overlayRef.current && !confirmRef.current,
     editorHasKeys: () => focusRef.current === 'editor' && !overlayRef.current && !confirmRef.current,
     setConsole,
+    undoConsole: () => stepConsole(ed.undo, 'Nothing to undo.'),
+    redoConsole: () => stepConsole(ed.redo, 'Nothing to redo.'),
     // Stopping waits until this key has been handled everywhere, so the esc (or ctrl+c) that
     // ends typing isn't also taken as a global key: clear the log, or quit.
     setEditing: (on) => (on ? setFocus('editor') : queueMicrotask(() => focusRef.current === 'editor' && setFocus('view'))),

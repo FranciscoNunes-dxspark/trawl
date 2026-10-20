@@ -1,7 +1,7 @@
 import React from 'react';
 import { render } from 'ink';
 import { COMPILED, VERSION } from './version.js';
-import { fetchLatest } from './update.js';
+import { fetchLatest, installUpdate, removeOldExecutables } from './update.js';
 import { loadConfig } from './config.js';
 import { DEMO_CONNECTIONS } from './connections.js';
 import { setAccent } from './theme.js';
@@ -64,10 +64,22 @@ async function runApp() {
   process.on('exit', () => process.stdout.write(`\x1b[?1049l${title ? `\x1b]0;${clean(title)}\x07` : ''}\x1b[23;0t`));
   const setTitle = (text) => process.stdout.write(`\x1b]0;${clean(text)}\x07`);
 
-  // Only the downloaded executables look for updates: a checkout updates with git pull, and its
-  // package.json version is behind the releases (the Release workflow sets the version as it builds).
+  // Only the downloaded executables look for updates and install them: a checkout updates with git
+  // pull, and its package.json version is behind the releases (the Release workflow sets the version as it builds).
   const checkLatest = COMPILED ? (opts) => fetchLatest({ current: VERSION, ...opts }) : undefined;
-  const app = render(<App config={config} initialFile={file} initialConnection={connectTo} checkLatest={checkLatest} setTitle={setTitle} />, { exitOnCtrlC: false });
+  // What an earlier update moved aside; quietly, and it doesn't hold up the start.
+  if (COMPILED) removeOldExecutables();
+  const app = render(
+    <App
+      config={config}
+      initialFile={file}
+      initialConnection={connectTo}
+      checkLatest={checkLatest}
+      installUpdate={COMPILED ? installUpdate : undefined}
+      setTitle={setTitle}
+    />,
+    { exitOnCtrlC: false },
+  );
   await app.waitUntilExit();
   process.exit(0);
 }

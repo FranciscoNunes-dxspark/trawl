@@ -1,15 +1,15 @@
 import React, { useMemo, useRef, useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 import * as a from '../actions.js';
-import { accept, completeAt } from '../complete.js';
+import { accept, completeAt, signatureAt } from '../complete.js';
 import * as ed from '../editor.js';
 import { highlight, oneLine, splitStatements, statementAt, withoutLeadingComments } from '../sql.js';
-import { fit } from '../text.js';
+import { fit, fitSegments } from '../text.js';
 import { theme } from '../theme.js';
 import { Panel, Row } from './parts.jsx';
 
 const COLORS = () => ({ keyword: theme.accent, string: theme.warn, comment: theme.dim, number: theme.number, variable: theme.routine });
-const KIND_COLORS = () => ({ join: theme.ok, expand: theme.ok, keyword: theme.accent, function: theme.routine, procedure: theme.routine, table: theme.table, view: theme.view, schema: theme.schema, database: theme.schema });
+const KIND_COLORS = () => ({ join: theme.ok, expand: theme.ok, parameter: theme.routine, keyword: theme.accent, function: theme.routine, procedure: theme.routine, table: theme.table, view: theme.view, schema: theme.schema, database: theme.schema });
 const MENU_ROWS = 8;
 // Typing one of these keeps the suggestions coming; anything else (a comma, a bracket) closes them.
 // A space asks too, though only "ON " has anything to offer before a word is typed.
@@ -208,6 +208,25 @@ export function ConsoleView({ editor, editing, ctx, width, height, active }) {
         ];
       }),
     };
+  } else if (editing && !ed.selection(editor)) {
+    // Inside a call's parentheses (or an EXEC's arguments): its syntax, with the argument the cursor
+    // is on picked out, on the line above (below on the first line).
+    const sig = signatureAt(editor, ctx.schema);
+    if (sig) {
+      const bg = theme.selBg;
+      const segs = [{ text: ` ${sig.name}${sig.exec ? ' ' : '('}`, color: theme.routine, bg }];
+      const last = sig.params.length - 1;
+      sig.params.forEach((p, k) => {
+        const on = k === sig.index || (p.repeats && k === last && sig.index > k);
+        const sep = k ? ', ' : '';
+        segs.push({ text: p.optional ? `[${sep}${p.text}]` : `${sep}${p.text}`, color: on ? theme.accent : undefined, bold: on, bg });
+      });
+      if (sig.params[last]?.repeats) segs.push({ text: ', …', bg });
+      segs.push({ text: sig.exec ? ' ' : ') ', color: theme.routine, bg });
+      const w = Math.min(textW, segs.reduce((n, s) => n + s.text.length, 0));
+      const y = editor.row - top.current;
+      popup = { y: y > 0 ? y - 1 : y + 1, x: gutterW + Math.max(0, Math.min(editor.col - left.current - 1, textW - w)), lines: [fitSegments(segs, w)] };
+    }
   }
 
   const empty = editor.lines.length === 1 && !editor.lines[0];

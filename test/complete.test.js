@@ -1,6 +1,6 @@
 import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { accept, completeAt, ident, tablesIn } from '../src/complete.js';
+import { accept, completeAt, ident, signatureAt, tablesIn } from '../src/complete.js';
 import { demoSession } from '../src/demo.js';
 import { SCHEMA_SQL, buildSchema } from '../src/schema.js';
 
@@ -53,14 +53,18 @@ test('EXEC offers procedures, USE databases', () => {
   assert.deepEqual(offered('USE Club|'), ['ClubA', 'ClubB']);
 });
 
-test('nothing in comments, strings or variables, or before anything is typed', () => {
+test('nothing in comments, strings or variables, or before anything is typed where it isn\'t clear', () => {
   assert.equal(offered("SELECT 'Cl|'"), null);
   assert.equal(offered('-- FROM Cl|'), null);
   assert.equal(offered('/* FROM Cl| */'), null);
   assert.equal(offered('SELECT @Cl|'), null);
-  assert.deepEqual(offered('SELECT * FROM |'), []);
-  // ctrl+space asks anyway.
-  assert.ok(offered('SELECT * FROM |', { force: true }).includes('dbo.Players'));
+  assert.deepEqual(offered('SELECT * FROM dbo.Clubs WHERE |'), []);
+  // ctrl+n asks anyway.
+  assert.ok(offered('SELECT * FROM dbo.Clubs WHERE |', { force: true }).includes('Name'));
+  // After FROM, JOIN, EXEC or USE it's clear what comes next, so the list opens at once.
+  assert.ok(offered('SELECT * FROM |').includes('dbo.Players'));
+  assert.deepEqual(offered('EXEC |'), ['dbo.usp_RecalculateTable', 'dbo.', 'i18n.']);
+  assert.deepEqual(offered('USE |'), ['master', 'ClubA', 'ClubB']);
   // Nothing to add when the only match is already there.
   assert.deepEqual(offered('SELECT * FROM dbo.Clubs|'), []);
 });
@@ -118,4 +122,31 @@ test('after SELECT *: the columns written out, qualified when there are several 
   assert.deepEqual(offered('SELECT COUNT(*| FROM dbo.Players'), []);
   assert.deepEqual(offered('SELECT *| FROM #tmp'), []);
   assert.deepEqual(offered('SELECT *|'), []);
+});
+
+test('after EXEC proc: the parameters not given yet, where the next argument starts', () => {
+  assert.deepEqual(offered('EXEC dbo.usp_RecalculateTable |'), ['@Season = ', '@DryRun = ']);
+  assert.deepEqual(offered('EXEC usp_RecalculateTable @Season = 2026, |'), ['@DryRun = ']);
+  assert.deepEqual(offered('EXEC usp_RecalculateTable @Season = 2026, @D|'), ['@DryRun = ']);
+  // Typing a value isn't the place for them.
+  assert.deepEqual(offered('EXEC usp_RecalculateTable @Season = 20|'), []);
+});
+
+test('signatureAt: the syntax of the call the cursor is in, and which argument it is on', () => {
+  const sig = (text) => {
+    const s = signatureAt(at(text), schema);
+    return s && `${s.name}(${s.params.map((p) => p.text).join(', ')}) @${s.index}`;
+  };
+  assert.equal(sig('SELECT DATEADD(|'), 'DATEADD(datepart, number, date) @0');
+  assert.equal(sig("SELECT dateadd(day, 3, |"), 'DATEADD(datepart, number, date) @2');
+  // Commas inside an inner call or a string don't count; the inner call wins while inside it.
+  assert.equal(sig("SELECT ISNULL(LEFT(Name, 3), 'a,b|"), 'ISNULL(check_expression, replacement_value) @1');
+  assert.equal(sig('SELECT ISNULL(LEFT(Name, |'), 'LEFT(character_expression, integer_expression) @1');
+  assert.equal(sig('SELECT ISNULL((Goals + 1), |'), 'ISNULL(check_expression, replacement_value) @1');
+  assert.equal(sig('SELECT ISNULL(Goals, 0)|'), null);
+  assert.equal(sig('SELECT Name FROM t WHERE Id IN (|'), null);
+  // A procedure's parameters come from the schema.
+  assert.equal(sig('EXEC dbo.usp_RecalculateTable @Season = 1, |'), 'dbo.usp_RecalculateTable(@Season int, @DryRun bit) @1');
+  const opt = signatureAt(at('SELECT CONVERT(|'), schema).params;
+  assert.deepEqual(opt.map((p) => p.optional), [false, false, true]);
 });

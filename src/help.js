@@ -30,6 +30,7 @@ Query, the console (a SQL editor, kept between sessions)
                    ctrl+←/→ a word at a time · ctrl+w delete a word · shift+movement selects (esc lets go)
   ctrl+z  ctrl+y   Undo · Redo (a word at a time; also when not typing, and /new can be undone too)
   Suggestions      tables, columns, keywords, JOIN … ON from foreign keys · tab take one · ↑↓ pick (then ↵ takes it)
+                   they open by themselves after FROM, JOIN, ON, EXEC, USE · inside a call, its syntax shows above
                    esc close · ctrl+n (or ctrl+space) ask for them anywhere · tab after SELECT * writes out the columns
   /new  /save <file.sql>   Clear it · Write it to a file
 

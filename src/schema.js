@@ -32,7 +32,14 @@ JOIN sys.columns pc ON pc.object_id = fkc.parent_object_id AND pc.column_id = fk
 JOIN sys.objects ro ON ro.object_id = fkc.referenced_object_id
 JOIN sys.schemas rs ON rs.schema_id = ro.schema_id
 JOIN sys.columns rc ON rc.object_id = fkc.referenced_object_id AND rc.column_id = fkc.referenced_column_id
-ORDER BY fk.name, fkc.constraint_column_id;`;
+ORDER BY fk.name, fkc.constraint_column_id;
+SELECT s.name AS [schema], o.name AS [object], p.name, t.name AS type, p.max_length, p.precision, p.scale, p.is_output
+FROM sys.parameters p
+JOIN sys.objects o ON o.object_id = p.object_id
+JOIN sys.schemas s ON s.schema_id = o.schema_id
+JOIN sys.types t ON t.user_type_id = p.user_type_id
+WHERE o.type IN ('P', 'FN', 'IF', 'TF') AND o.is_ms_shipped = 0 AND p.parameter_id > 0
+ORDER BY s.name, o.name, p.parameter_id;`;
 
 const KINDS = { U: 'table', V: 'view', P: 'procedure', FN: 'function', IF: 'function', TF: 'function' };
 
@@ -54,18 +61,20 @@ export function typeLabel(type, maxLength, precision, scale) {
 }
 
 /**
- * Shapes SCHEMA_SQL's result sets into { database, databases, objects, foreignKeys }. A foreign key
+ * Shapes SCHEMA_SQL's result sets into { database, databases, objects, foreignKeys }. Procedures and
+ * functions have `params` ({ name, type, output }), in order. A foreign key
  * is { name, from, to, columns }: `from` references `to` ("dbo.Players", "dbo.Clubs"), and each of
  * `columns` is [column in from, column in to].
  */
 export function buildSchema(sets) {
-  const [dbSet, dbsSet, objSet, colSet, fkSet] = sets;
+  const [dbSet, dbsSet, objSet, colSet, fkSet, paramSet] = sets;
   const objects = rowsOf(objSet).map((o) => ({
     schema: o.schema,
     name: o.name,
     kind: KINDS[o.type] ?? 'other',
     rows: o.rows == null ? null : Number(o.rows),
     columns: [],
+    ...(KINDS[o.type] === 'procedure' || KINDS[o.type] === 'function' ? { params: [] } : {}),
   }));
   // Grouped by schema whatever order the catalog came in (the Explorer draws one header per schema).
   objects.sort((x, y) => (x.schema === y.schema ? 0 : x.schema.toLowerCase() < y.schema.toLowerCase() ? -1 : 1));
@@ -78,6 +87,9 @@ export function buildSchema(sets) {
       identity: Boolean(c.is_identity),
       pk: Boolean(c.pk),
     });
+  }
+  for (const p of rowsOf(paramSet)) {
+    byKey.get(`${p.schema}.${p.object}`)?.params?.push({ name: p.name, type: typeLabel(p.type, p.max_length, p.precision, p.scale), output: Boolean(p.is_output) });
   }
   const foreignKeys = new Map();
   for (const f of rowsOf(fkSet)) {
@@ -117,7 +129,11 @@ export function describeObject(o, schema) {
     const flags = [c.pk ? 'primary key' : '', c.identity ? 'identity' : '', c.nullable ? 'null' : 'not null'].filter(Boolean).join(', ');
     lines.push(`${c.pk ? 'PK' : '  '} ${c.name.padEnd(nameW)}${c.type.padEnd(typeW)}${flags}`);
   }
-  if (!o.columns.length) lines.push('(no columns listed for this kind of object)');
+  if (o.params) {
+    const w = Math.max(6, ...o.params.map((p) => p.name.length)) + 2;
+    for (const p of o.params) lines.push(`   ${p.name.padEnd(w)}${p.type}${p.output ? '  output' : ''}`);
+    if (!o.params.length) lines.push('(no parameters)');
+  } else if (!o.columns.length) lines.push('(no columns listed for this kind of object)');
   const name = objectName(o);
   const keys = (schema?.foreignKeys ?? []).filter((f) => f.from === name || f.to === name);
   if (keys.length) lines.push('', 'Foreign keys');

@@ -31,7 +31,7 @@ function makeDatabase(club, { extraLanguage = true } = {}) {
       { schema: 'dbo', name: 'Matches', kind: 'table', columns: [col('Id', 'int', { pk: true, identity: true }), col('HomeId', 'int'), col('AwayId', 'int'), col('PlayedOn', 'date'), col('HomeGoals', 'tinyint'), col('AwayGoals', 'tinyint')], rows: matches },
       { schema: 'i18n', name: 'Translations', kind: 'table', columns: [col('ResourceKey', 'nvarchar(200)', { pk: true }), col('Value', 'nvarchar(max)'), col('Culture', 'nvarchar(10)', { pk: true }), col('ResourceSet', 'nvarchar(50)')], rows: translations },
       { schema: 'dbo', name: 'vTopScorers', kind: 'view', columns: [col('Name', 'nvarchar(100)'), col('Goals', 'int')], rows: players.filter((p) => p[5] > 0).map((p) => [p[2], p[5]]) },
-      { schema: 'dbo', name: 'usp_RecalculateTable', kind: 'procedure', columns: [], rows: [] },
+      { schema: 'dbo', name: 'usp_RecalculateTable', kind: 'procedure', columns: [], rows: [], params: [col('@Season', 'int'), col('@DryRun', 'bit')] },
     ],
     // [name, table, column, referenced table, its column]
     foreignKeys: [
@@ -68,6 +68,10 @@ function schemaSets(dbName) {
     set(
       ['name', 'schema', 'object', 'column', 'ref_schema', 'ref_object', 'ref_column'],
       db.foreignKeys.map(([name, table, column, refTable, refColumn]) => [name, 'dbo', table, column, 'dbo', refTable, refColumn]),
+    ),
+    set(
+      ['schema', 'object', 'name', 'type', 'max_length', 'precision', 'scale', 'is_output'],
+      db.tables.flatMap((t) => (t.params ?? []).map((p) => [t.schema, t.name, p.name, p.type, 0, 0, 0, false])),
     ),
   ];
 }

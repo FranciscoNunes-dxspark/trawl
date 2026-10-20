@@ -21,7 +21,18 @@ JOIN sys.objects o ON o.object_id = c.object_id
 JOIN sys.schemas s ON s.schema_id = o.schema_id
 JOIN sys.types t ON t.user_type_id = c.user_type_id
 WHERE o.type IN ('U', 'V') AND o.is_ms_shipped = 0
-ORDER BY s.name, o.name, c.column_id;`;
+ORDER BY s.name, o.name, c.column_id;
+SELECT fk.name, ps.name AS [schema], po.name AS [object], pc.name AS [column],
+  rs.name AS ref_schema, ro.name AS ref_object, rc.name AS ref_column
+FROM sys.foreign_key_columns fkc
+JOIN sys.foreign_keys fk ON fk.object_id = fkc.constraint_object_id
+JOIN sys.objects po ON po.object_id = fkc.parent_object_id
+JOIN sys.schemas ps ON ps.schema_id = po.schema_id
+JOIN sys.columns pc ON pc.object_id = fkc.parent_object_id AND pc.column_id = fkc.parent_column_id
+JOIN sys.objects ro ON ro.object_id = fkc.referenced_object_id
+JOIN sys.schemas rs ON rs.schema_id = ro.schema_id
+JOIN sys.columns rc ON rc.object_id = fkc.referenced_object_id AND rc.column_id = fkc.referenced_column_id
+ORDER BY fk.name, fkc.constraint_column_id;`;
 
 const KINDS = { U: 'table', V: 'view', P: 'procedure', FN: 'function', IF: 'function', TF: 'function' };
 
@@ -42,9 +53,13 @@ export function typeLabel(type, maxLength, precision, scale) {
   return t;
 }
 
-/** Shapes SCHEMA_SQL's four result sets into { database, databases, objects }. */
+/**
+ * Shapes SCHEMA_SQL's result sets into { database, databases, objects, foreignKeys }. A foreign key
+ * is { name, from, to, columns }: `from` references `to` ("dbo.Players", "dbo.Clubs"), and each of
+ * `columns` is [column in from, column in to].
+ */
 export function buildSchema(sets) {
-  const [dbSet, dbsSet, objSet, colSet] = sets;
+  const [dbSet, dbsSet, objSet, colSet, fkSet] = sets;
   const objects = rowsOf(objSet).map((o) => ({
     schema: o.schema,
     name: o.name,
@@ -64,10 +79,17 @@ export function buildSchema(sets) {
       pk: Boolean(c.pk),
     });
   }
+  const foreignKeys = new Map();
+  for (const f of rowsOf(fkSet)) {
+    const key = `${f.schema}.${f.name}`;
+    if (!foreignKeys.has(key)) foreignKeys.set(key, { name: f.name, from: `${f.schema}.${f.object}`, to: `${f.ref_schema}.${f.ref_object}`, columns: [] });
+    foreignKeys.get(key).columns.push([f.column, f.ref_column]);
+  }
   return {
     database: rowsOf(dbSet)[0]?.db ?? null,
     databases: rowsOf(dbsSet).map((d) => d.name),
     objects,
+    foreignKeys: [...foreignKeys.values()],
   };
 }
 
@@ -86,8 +108,8 @@ export function findObject(schema, text) {
 /** "dbo.Clubs" for completion and titles. */
 export const objectName = (o) => `${o.schema}.${o.name}`;
 
-/** The text /describe shows for a table or view. */
-export function describeObject(o) {
+/** The text /describe shows for a table or view, with its foreign keys when `schema` is given. */
+export function describeObject(o, schema) {
   const nameW = Math.max(6, ...o.columns.map((c) => c.name.length)) + 2;
   const typeW = Math.max(4, ...o.columns.map((c) => c.type.length)) + 2;
   const lines = [`${o.kind} ${objectName(o)}${o.rows != null ? `  ·  about ${o.rows.toLocaleString('en')} rows` : ''}`, ''];
@@ -96,5 +118,12 @@ export function describeObject(o) {
     lines.push(`${c.pk ? 'PK' : '  '} ${c.name.padEnd(nameW)}${c.type.padEnd(typeW)}${flags}`);
   }
   if (!o.columns.length) lines.push('(no columns listed for this kind of object)');
+  const name = objectName(o);
+  const keys = (schema?.foreignKeys ?? []).filter((f) => f.from === name || f.to === name);
+  if (keys.length) lines.push('', 'Foreign keys');
+  for (const f of keys) {
+    const cols = (i) => f.columns.map((c) => c[i]).join(', ');
+    lines.push(f.from === name ? `  ${cols(0)} → ${f.to} (${cols(1)})  ${f.name}` : `  ${f.from} (${cols(0)}) → ${cols(1)}  ${f.name}`);
+  }
   return lines.join('\n');
 }

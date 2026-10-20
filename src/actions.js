@@ -255,7 +255,7 @@ export function describe(ctx, text) {
   if (!text) return ctx.prefill('/describe ');
   const obj = typeof text === 'string' ? findObject(ctx.schema, text) : text;
   if (!obj) return ctx.note(`No table or view called ${text} in ${ctx.session.database}.`, 'error');
-  ctx.showText(objectName(obj), describeObject(obj));
+  ctx.showText(objectName(obj), describeObject(obj, ctx.schema));
 }
 
 export function setLimit(ctx, value) {

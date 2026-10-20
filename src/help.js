@@ -25,7 +25,7 @@ Query, the console (a SQL editor, kept between sessions)
   R                Run the whole console
   j k  g G         Move between lines (when not typing)
   Typing           arrows · home/end or ctrl+a/ctrl+e · ctrl+u/ctrl+k cut to start/end · tab two spaces
-  Suggestions      tables, columns, keywords as you type · tab take one · ↑↓ pick (then ↵ takes it too)
+  Suggestions      tables, columns, keywords, JOIN … ON from foreign keys · tab take one · ↑↓ pick (then ↵ takes it)
                    esc close · ctrl+space ask for them anywhere
   /new  /save <file.sql>   Clear it · Write it to a file
 

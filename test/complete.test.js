@@ -91,3 +91,15 @@ test('ident brackets names that need it', () => {
   assert.equal(ident('Order'), '[Order]');
   assert.equal(ident('Line Items'), '[Line Items]');
 });
+
+test('after ON: the join condition, from the foreign keys to the tables before it', () => {
+  assert.deepEqual(offered('SELECT * FROM dbo.Players p JOIN dbo.Clubs c ON |'), ['c.Id = p.ClubId']);
+  assert.deepEqual(offered('SELECT * FROM dbo.Clubs c JOIN dbo.Players p ON |'), ['p.ClubId = c.Id']);
+  // Typing the other alias first finds it as well, and the usual suggestions follow.
+  assert.equal(offered('SELECT * FROM dbo.Players p JOIN dbo.Clubs c ON p|')[0], 'c.Id = p.ClubId');
+  // Two keys to the same table: both, and only the table joined last counts.
+  const sql = 'SELECT * FROM dbo.Clubs c\nJOIN dbo.Players p ON p.ClubId = c.Id\nJOIN dbo.Matches m ON |';
+  assert.deepEqual(offered(sql), ['m.HomeId = c.Id', 'm.AwayId = c.Id']);
+  // No key between them: nothing until a word is typed.
+  assert.deepEqual(offered('SELECT * FROM i18n.Translations t JOIN dbo.Clubs c ON |'), []);
+});

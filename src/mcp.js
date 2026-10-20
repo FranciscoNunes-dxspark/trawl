@@ -161,7 +161,7 @@ export function createServer({ demo = false, log = logQuery, open = connect } = 
       const { schema } = await schemaOf(conn, database);
       const o = findObject(schema, table);
       if (!o) throw new ToolError(`No table or view called ${table} in ${schema.database}. list_tables shows what there is.`);
-      return `${describeObject(o)}\n\nCompact: ${tableLine(o)}`;
+      return `${describeObject(o, schema)}\n\nCompact: ${tableLine(o)}`;
     },
     async run_query({ connection, sql, database, max_rows }) {
       const conn = findConn(connection);

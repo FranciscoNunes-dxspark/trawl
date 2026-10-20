@@ -58,6 +58,33 @@ export function tablesIn(sql, schema) {
   return out;
 }
 
+/**
+ * ON conditions for the table joined last in `sqlBefore` (the statement up to the cursor), from the
+ * foreign keys between it and each table before it: "c.Id = p.ClubId". Several columns join with AND.
+ */
+export function joinConditions(sqlBefore, schema) {
+  const refs = tablesIn(sqlBefore, schema).filter((t) => t.object);
+  const joined = refs.at(-1);
+  if (!joined) return [];
+  const owner = (t) => ident(t.alias ?? t.object.name);
+  const here = objectName(joined.object);
+  const out = [];
+  for (const other of refs.slice(0, -1)) {
+    const there = objectName(other.object);
+    for (const f of schema.foreignKeys ?? []) {
+      let pairs;
+      if (f.from === here && f.to === there) pairs = f.columns.map(([c, r]) => [`${owner(joined)}.${ident(c)}`, `${owner(other)}.${ident(r)}`]);
+      else if (f.to === here && f.from === there) pairs = f.columns.map(([c, r]) => [`${owner(joined)}.${ident(r)}`, `${owner(other)}.${ident(c)}`]);
+      else continue;
+      const text = pairs.map(([x, y]) => `${x} = ${y}`).join(' AND ');
+      // Typing the other table's alias first finds it too.
+      const swapped = pairs.map(([x, y]) => `${y} = ${x}`).join(' AND ');
+      out.push({ label: text, insert: text, match: [text, swapped], kind: 'join', detail: f.name });
+    }
+  }
+  return out;
+}
+
 const lineStartOffset = (lines, row) => lines.slice(0, row).reduce((n, l) => n + l.length + 1, 0);
 
 // Prefix matches first, in the order the candidates came (the context put the likeliest first),
@@ -101,16 +128,16 @@ export function completeAt(editor, schema, { force = false } = {}) {
   const before = m.slice(0, at - qualifier.length);
   const prev = before.match(/([\w@#$]+|[^\s\u0001])[\s\u0001]*$/)?.[1].toUpperCase() ?? '';
   const clause = [...before.matchAll(/\b(SELECT|FROM|WHERE|JOIN|ON|GROUP|ORDER|HAVING|SET|VALUES)\b/gi)].at(-1)?.[1].toUpperCase();
-  if (!word && !qualifier && !force) return { from, word, items: [] };
+  // Right after ON the join conditions come up before anything is typed.
+  if (!word && !qualifier && !force && prev !== 'ON') return { from, word, items: [] };
 
   const bracket = word.startsWith('[');
   // A [name] still being typed would hide the rest of the statement, so close it to read the scope.
   const closed = bracket && line[col] !== ']' ? [...lines.slice(0, row), `${head}]${line.slice(col)}`, ...lines.slice(row + 1)].join('\n') : text;
-  const statement = splitStatements(closed)
-    .filter((s) => s.line <= row + 1 && row + 1 <= s.endLine)
-    .map((s) => s.text)
-    .join('\n');
+  const here = splitStatements(closed).filter((s) => s.line <= row + 1 && row + 1 <= s.endLine);
+  const statement = here.map((s) => s.text).join('\n');
   const scope = schema ? tablesIn(statement, schema) : [];
+  const joins = prev === 'ON' && !qualifier && schema ? joinConditions(text.slice(lineStartOffset(lines, (here[0]?.line ?? row + 1) - 1), at), schema) : [];
   const typed = bracket ? word.slice(1) : word;
   const name = (n) => (bracket ? quoteIdent(n) : ident(n));
   const objects = schema?.objects ?? [];
@@ -162,12 +189,14 @@ export function completeAt(editor, schema, { force = false } = {}) {
     const lower = /[a-z]/.test(typed) && typed === typed.toLowerCase();
     const cased = (k) => (lower ? k.toLowerCase() : k);
     items = [
+      ...joins,
       ...columns.filter((c) => !seen.has(c.label) && seen.add(c.label)),
       ...(bracket ? [] : WORDS.map((k) => ({ label: cased(k), insert: cased(k), match: [k], kind: 'keyword', detail: 'keyword' }))),
       ...(bracket ? [] : FUNCTIONS.map((f) => ({ label: `${cased(f)}()`, insert: `${cased(f)}(`, match: [f], kind: 'function', detail: 'function' }))),
       ...ofKind(['table', 'view']).map((o) => objectItem(o, true)),
     ];
   }
+  if (!word && !qualifier && !force) items = joins;
   items = rank(items, typed);
   // Nothing to add when the one suggestion is what's already there.
   if (items.length === 1 && items[0].insert.toLowerCase() === word.toLowerCase()) items = [];

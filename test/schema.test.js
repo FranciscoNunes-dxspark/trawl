@@ -42,6 +42,10 @@ test('the demo answers the catalog query like a server', async () => {
   const schema = buildSchema((await s.run(SCHEMA_SQL)).sets);
   assert.equal(schema.database, 'ClubA');
   assert.ok(schema.objects.some((o) => o.schema === 'i18n' && o.name === 'Translations'));
+  assert.deepEqual(schema.foreignKeys[0], { name: 'FK_Players_Clubs', from: 'dbo.Players', to: 'dbo.Clubs', columns: [['ClubId', 'Id']] });
+  const clubs = describeObject(findObject(schema, 'Clubs'), schema);
+  assert.match(clubs, /Foreign keys\n  dbo\.Players \(ClubId\) → Id  FK_Players_Clubs/);
+  assert.match(describeObject(findObject(schema, 'Players'), schema), /ClubId → dbo\.Clubs \(Id\)  FK_Players_Clubs/);
   assert.equal(findObject(schema, 'dbo.Clubs').columns[1].type, 'nvarchar(100)');
 });
 

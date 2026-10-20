@@ -33,11 +33,17 @@ function makeDatabase(club, { extraLanguage = true } = {}) {
       { schema: 'dbo', name: 'vTopScorers', kind: 'view', columns: [col('Name', 'nvarchar(100)'), col('Goals', 'int')], rows: players.filter((p) => p[5] > 0).map((p) => [p[2], p[5]]) },
       { schema: 'dbo', name: 'usp_RecalculateTable', kind: 'procedure', columns: [], rows: [] },
     ],
+    // [name, table, column, referenced table, its column]
+    foreignKeys: [
+      ['FK_Players_Clubs', 'Players', 'ClubId', 'Clubs', 'Id'],
+      ['FK_Matches_Home', 'Matches', 'HomeId', 'Clubs', 'Id'],
+      ['FK_Matches_Away', 'Matches', 'AwayId', 'Clubs', 'Id'],
+    ],
   };
 }
 
 // ClubB is one language short, so comparing the two shows a difference.
-const DATABASES = { master: { tables: [] }, ClubA: makeDatabase('Club A'), ClubB: makeDatabase('Club B', { extraLanguage: false }) };
+const DATABASES = { master: { tables: [], foreignKeys: [] }, ClubA: makeDatabase('Club A'), ClubB: makeDatabase('Club B', { extraLanguage: false }) };
 
 const set = (names, rows, types = []) => ({ columns: names.map((name, i) => ({ name, type: types[i] ?? '' })), rows, truncated: false });
 
@@ -58,6 +64,10 @@ function schemaSets(dbName) {
           return [t.schema, t.name, c.name, type, max, 0, 0, c.nullable, c.identity, c.pk ? 1 : 0];
         }),
       ),
+    ),
+    set(
+      ['name', 'schema', 'object', 'column', 'ref_schema', 'ref_object', 'ref_column'],
+      db.foreignKeys.map(([name, table, column, refTable, refColumn]) => [name, 'dbo', table, column, 'dbo', refTable, refColumn]),
     ),
   ];
 }

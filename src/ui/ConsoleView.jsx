@@ -9,10 +9,11 @@ import { theme } from '../theme.js';
 import { Panel, Row } from './parts.jsx';
 
 const COLORS = () => ({ keyword: theme.accent, string: theme.warn, comment: theme.dim, number: theme.number, variable: theme.routine });
-const KIND_COLORS = () => ({ keyword: theme.accent, function: theme.routine, procedure: theme.routine, table: theme.table, view: theme.view, schema: theme.schema, database: theme.schema });
+const KIND_COLORS = () => ({ join: theme.ok, keyword: theme.accent, function: theme.routine, procedure: theme.routine, table: theme.table, view: theme.view, schema: theme.schema, database: theme.schema });
 const MENU_ROWS = 8;
-// Typing one of these keeps the suggestions coming; anything else (a space, a comma) closes them.
-const WORD_CHAR = /^[\w@#$.[]$/;
+// Typing one of these keeps the suggestions coming; anything else (a comma, a bracket) closes them.
+// A space asks too, though only "ON " has anything to offer before a word is typed.
+const WORD_CHAR = /^[\w@#$.[ ]$/;
 
 /** Lays `add` over a row of segments from column `x`, padding the row when it's shorter. */
 function overlay(segs, x, add) {

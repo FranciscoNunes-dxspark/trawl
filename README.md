@@ -72,7 +72,7 @@ Save connections with `/add`:
 
 Azure SQL gets a fresh token from the Azure CLI each time it connects, so there's no password to keep. A SQL or Windows login asks for its password the first time you connect, shown as `*`. With "Keep it" ticked (`tab` changes it), a password that signs in is saved in the operating system's credential store: **Windows Credential Manager** (as `Trawl:<connection>`), the macOS Keychain, or the Secret Service keyring on Linux (through `secret-tool`). It is never written to Trawl's own files. A saved password the server turns down is asked for again. `p` in Connections, or `/password [connection]`, sets a new one ahead of time; leaving it empty removes the saved one, and forgetting a connection removes its password too. If you'd rather keep a password in an environment variable, `/add … --password-env <VAR>` names it, and the variable comes first when it's set.
 
-Connections live in `~/.trawl/config.json` (or `TRAWL_HOME`), along with the prompt history, the run history and the row limit.
+Connections live in `~/.trawl/config.json` (or `TRAWL_HOME`), along with the prompt history, the run history and what Settings (`,`) changes: the row limit, the accent colour and updates.
 
 ### Folders
 
@@ -95,7 +95,7 @@ Press `?` inside for every shortcut. The essentials:
 
 | Where | Keys |
 | --- | --- |
-| Anywhere | `1`–`5` or `tab` switch views · `/` commands · `!` SQL · `r` reload the schema · `esc` cancel the running query · `q` quit |
+| Anywhere | `1`–`5` or `tab` switch views · `/` commands · `!` SQL · `r` reload the schema · `,` settings · `esc` cancel the running query · `q` quit |
 | Lists | `j`/`k` or arrows · `g`/`G` top/bottom · `ctrl+d`/`ctrl+u` page |
 | Explorer | `↵` first rows · `d` describe · `s` start a query on it in the console · `/find <text>` filter |
 | Query, the console | `↵` or `i` start typing · `esc` stop · `ctrl+r` run the statement under the cursor · `R` run it all |
@@ -103,6 +103,7 @@ Press `?` inside for every shortcut. The essentials:
 | Results | `h`/`l` columns · `[`/`]` result sets · `↵` the row as a record · `e` edit · `n` NULL · `d` delete · `u` undo · `s` save · `x` export |
 | History | `↵` run again · `e` edit in the console · `◆` marks what Claude ran |
 | Connections | `↵` connect · `n` new · `p` password · `f` folder · `x` forget |
+| Settings (`,`) | `↵` or space changes the row limit, the accent colour, and whether Trawl checks for and installs updates · `esc` closes |
 
 One-liners can also go straight in the prompt: SQL there runs with `!`, or without it when it starts with a SQL keyword (`select …`, `exec …`).
 
@@ -147,7 +148,7 @@ Columns that are expressions or renamed in the query, identity columns and `rowv
 
 Type `/` and the menu narrows as you type. `tab` completes, `↑`/`↓` picks, `↵` runs. `/connect` completes connection names, `/use` database names and `/describe` tables and views.
 
-`/import datagrip [folder]` `/connect <name>` `/add …` `/forget <name>` `/folder <connection> [folder]` `/password [connection]` `/disconnect` `/use <database>` `/open <file.sql>` `/console` `/new` `/save <file.sql>` `/describe <table>` `/find [text]` `/export <file>` `/limit [rows]` `/writes` `/tx [auto|manual]` `/commit` `/rollback` `/ask <question>` `/ai [connection] [level]` `/update` `/last` `/refresh` `/help` `/quit`
+`/import datagrip [folder]` `/connect <name>` `/add …` `/forget <name>` `/folder <connection> [folder]` `/password [connection]` `/disconnect` `/use <database>` `/open <file.sql>` `/console` `/new` `/save <file.sql>` `/describe <table>` `/find [text]` `/export <file>` `/limit [rows]` `/writes` `/tx [auto|manual]` `/commit` `/rollback` `/ask <question>` `/ai [connection] [level]` `/update` `/settings` `/last` `/refresh` `/help` `/quit`
 
 ## Claude
 
@@ -197,7 +198,7 @@ The downloaded Trawl keeps itself up to date, as Tiller does. Once a day, in the
 - If Trawl can't write to the folder it's in (under Program Files, say), or anything else goes wrong, nothing changes: the header shows `↑ 0.2.0`, the activity log says why, and `/update` gives the `gh release download` command (replace the old file after quitting).
 - Running from a checkout skips all of this; `git pull && npm install` updates that.
 
-The repository is private, so GitHub only shows its releases to someone signed in with access. Trawl asks anonymously first, then through the GitHub CLI (`gh api`) with your own sign-in; without `gh` signed in, it just finds nothing. The request carries `trawl/<version>` as the user agent, and nothing about your connections or queries is sent. When it fails (offline, say), it stays silent and tries again the next day. To only be told about new versions, set `"autoUpdate": false` in `~/.trawl/config.json` (`/update` still installs when you ask). To turn the check off, set `"checkUpdates": false`, or the environment variable `TRAWL_NO_UPDATE_CHECK=1`.
+The repository is private, so GitHub only shows its releases to someone signed in with access. Trawl asks anonymously first, then through the GitHub CLI (`gh api`) with your own sign-in; without `gh` signed in, it just finds nothing. The request carries `trawl/<version>` as the user agent, and nothing about your connections or queries is sent. When it fails (offline, say), it stays silent and tries again the next day. To only be told about new versions, turn off **Install updates** in Settings (`,`), or set `"autoUpdate": false` in `~/.trawl/config.json`; `/update` still installs when you ask. To turn the check off, turn off **Check for updates** (`"checkUpdates": false`), or set the environment variable `TRAWL_NO_UPDATE_CHECK=1`.
 
 ## Glim
 

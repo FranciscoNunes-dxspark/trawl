@@ -21,6 +21,16 @@ export const theme = {
 // Windows terminals draw ⏺ as a wide emoji, so use the plain circle there (as Claude Code does).
 export const BULLET = process.platform === 'win32' ? '●' : '⏺';
 
+// The accents Settings cycles through; any "#hex" in config.json works too. Blue is Glim's, the default.
+export const ACCENTS = [
+  { name: 'blue', color: '#5fafff' },
+  { name: 'teal', color: '#5fd7d7' },
+  { name: 'green', color: '#5fd787' },
+  { name: 'amber', color: '#ffaf5f' },
+  { name: 'pink', color: '#ff87d7' },
+  { name: 'violet', color: '#af87ff' },
+];
+
 export function setAccent(color) {
   if (typeof color === 'string' && color) theme.accent = color;
 }

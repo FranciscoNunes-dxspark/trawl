@@ -16,6 +16,7 @@ Explorer (tables, views and routines of the current database)
   ↵                First rows (SELECT TOP (limit) *)
   d                Describe: columns, types, keys
   s                Start a query on it in the console
+  c                Its CREATE script, into the console (a table's from the catalog; others' from the server)
   /find <text>     Filter by name
 
 Query, the console (a SQL editor, kept between sessions)
@@ -87,7 +88,7 @@ Prompt
 Slash commands
   /import datagrip [folder]   /connect <name>   /add <name> <server> [database] [--user u] [--domain d] [--folder f] [--prod] [--commit auto|manual] [--trust-cert]
   /forget <name>   /folder <connection> [folder]   /password [connection]   /disconnect   /use <database>   /open <file.sql>   /console   /new   /format   /search <text>   /save <file.sql>
-  /describe <table>   /find [text]
+  /describe <table>   /script <name>   /find [text]
   /export <file>   /limit [rows]   /writes   /tx [auto|manual]   /commit   /rollback   /ask <question>   /ai   /update   /settings   /last   /refresh   /help   /quit
 
 Viewer (describe, records, output, this help)

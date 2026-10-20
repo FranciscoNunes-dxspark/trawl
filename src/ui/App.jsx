@@ -40,7 +40,7 @@ const VIEWS = [
 ];
 
 const HINTS = {
-  explorer: '↵ first rows · d describe · s query it in the console · /find filter',
+  explorer: '↵ first rows · d describe · s query it in the console · c CREATE script · /find filter',
   query: '↵ run statement · v select several · R run file · e edit in the console · /console',
   results: 'h/l columns · ↵ record · e edit · n NULL · d delete · u undo · s save · x export',
   history: '↵ run again · e edit in the console · ◆ ran by Claude',

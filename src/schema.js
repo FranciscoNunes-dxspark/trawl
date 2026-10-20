@@ -143,3 +143,35 @@ export function describeObject(o, schema) {
   }
   return lines.join('\n');
 }
+
+const bracket = (name) => `[${String(name).replace(/]/g, ']]')}]`;
+const fullName = (o) => `${bracket(o.schema)}.${bracket(o.name)}`;
+
+/**
+ * CREATE TABLE for a table, from what the catalog query read: columns, the primary key and the
+ * foreign keys. Defaults, checks, indexes and an identity's seed aren't read, and the script says so.
+ */
+export function createTableScript(o, schema) {
+  const cols = o.columns.map((c) => `  ${bracket(c.name)} ${c.type}${c.identity ? ' IDENTITY(1,1)' : ''} ${c.nullable ? 'NULL' : 'NOT NULL'}`);
+  const pk = o.columns.filter((c) => c.pk).map((c) => bracket(c.name));
+  if (pk.length) cols.push(`  PRIMARY KEY (${pk.join(', ')})`);
+  const name = objectName(o);
+  const fks = (schema?.foreignKeys ?? [])
+    .filter((f) => f.from === name)
+    .map((f) => {
+      const [toSchema, ...toName] = f.to.split('.');
+      const list = (i) => f.columns.map((c) => bracket(c[i])).join(', ');
+      return `ALTER TABLE ${fullName(o)} ADD CONSTRAINT ${bracket(f.name)}\n  FOREIGN KEY (${list(0)}) REFERENCES ${bracket(toSchema)}.${bracket(toName.join('.'))} (${list(1)});`;
+    });
+  return [
+    `-- ${name}: columns, primary key and foreign keys as Trawl read them (not defaults, checks or indexes).`,
+    `CREATE TABLE ${fullName(o)} (`,
+    cols.join(',\n'),
+    ');',
+    ...fks,
+  ].join('\n');
+}
+
+// The marker comment lets the demo driver recognise this batch.
+/** The query that reads a view's, procedure's or function's own CREATE text. */
+export const definitionSql = (o) => `-- trawl:definition\nSELECT OBJECT_DEFINITION(OBJECT_ID(N'${fullName(o).replace(/'/g, "''")}')) AS definition;`;

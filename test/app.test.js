@@ -402,6 +402,21 @@ test('f formats the statement under the cursor, and ctrl+z puts it back', async 
   app.unmount();
 });
 
+test('c in the Explorer, or /script, puts a CREATE script in the console', async () => {
+  mkdirSync(process.env.TRAWL_HOME, { recursive: true });
+  writeFileSync(join(process.env.TRAWL_HOME, 'console.sql'), '');
+  const app = start();
+  await until(() => frame().includes('Clubs'), 'the explorer');
+  app.stdin.write('c');
+  await until(() => frame().includes('CREATE TABLE [dbo].[Clubs]') && frame().includes('typing SQL'), 'the table script');
+  app.stdin.write(KEYS.esc);
+  await until(() => frame().includes('↵/i type'), 'out of typing mode');
+  await type(app.stdin, '/script vTop');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('CREATE VIEW dbo.vTopScorers AS'), 'the view definition');
+  app.unmount();
+});
+
 test('e in History puts the statement in the console to edit', async () => {
   const app = start();
   await until(() => frame().includes('Clubs'), 'the explorer');
@@ -416,6 +431,8 @@ test('e in History puts the statement in the console to edit', async () => {
 });
 
 test('/ask puts Claude’s query in the console and runs nothing', async () => {
+  mkdirSync(process.env.TRAWL_HOME, { recursive: true });
+  writeFileSync(join(process.env.TRAWL_HOME, 'console.sql'), '');
   const prompts = [];
   const askClaude = async ({ prompt }) => {
     prompts.push(prompt);

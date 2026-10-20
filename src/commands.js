@@ -19,6 +19,7 @@ export const COMMANDS = [
   { name: 'search', args: '<text>', desc: 'Find text in the console (then n and N: next, previous)', run: (ctx, s) => a.searchConsole(ctx, s) },
   { name: 'save', args: '<file.sql>', desc: 'Write the console to a file', run: (ctx, s) => a.saveConsoleAs(ctx, s) },
   { name: 'describe', args: '<table>', desc: 'Columns, types and keys of a table or view', complete: 'objects', run: (ctx, s) => a.describe(ctx, s) },
+  { name: 'script', args: '<name>', desc: 'CREATE script of a table, view, procedure or function, into the console', complete: 'everything', run: (ctx, s) => a.scriptObject(ctx, s) },
   { name: 'find', args: '[text]', desc: 'Filter the Explorer by name (empty clears it)', run: (ctx, s) => ctx.find(s) },
   { name: 'export', args: '<file.csv|file.json>', desc: 'Save the result set on screen', run: (ctx, s) => a.exportResults(ctx, s) },
   { name: 'limit', args: '[rows]', desc: 'Rows kept per result set (the query stops there)', run: (ctx, s) => a.setLimit(ctx, s) },
@@ -49,6 +50,7 @@ function completions(kind, { config, schema }) {
   if (kind === 'connections') return config.connections.map((c) => c.name);
   if (!schema) return [];
   if (kind === 'databases') return schema.databases;
+  if (kind === 'everything') return schema.objects.map(objectName);
   return schema.objects.filter((o) => o.kind === 'table' || o.kind === 'view').map(objectName);
 }
 

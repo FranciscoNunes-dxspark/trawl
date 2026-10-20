@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { ADD_USAGE, commitMode, connectionRows, isReadOnly, parseAddArgs, parseServer, splitArgs, tediousConfig } from '../src/connections.js';
-import { buildSchema, describeObject, findObject, typeLabel } from '../src/schema.js';
+import { buildSchema, createTableScript, definitionSql, describeObject, findObject, typeLabel } from '../src/schema.js';
 import { demoSession } from '../src/demo.js';
 import { SCHEMA_SQL } from '../src/schema.js';
 
@@ -117,4 +117,30 @@ test('servers and tedious options', () => {
   assert.equal(sql.options.port, 1433);
   assert.equal(sql.options.database, 'Other');
   assert.equal(sql.options.trustServerCertificate, true);
+});
+
+test('createTableScript writes CREATE TABLE from the catalog, with its keys', async () => {
+  const s = demoSession({ name: 'demo', demo: true, database: 'ClubA' });
+  const schema = buildSchema((await s.run(SCHEMA_SQL)).sets);
+  assert.equal(
+    createTableScript(findObject(schema, 'Players'), schema),
+    [
+      '-- dbo.Players: columns, primary key and foreign keys as Trawl read them (not defaults, checks or indexes).',
+      'CREATE TABLE [dbo].[Players] (',
+      '  [Id] int IDENTITY(1,1) NOT NULL,',
+      '  [ClubId] int NOT NULL,',
+      '  [Name] nvarchar(100) NOT NULL,',
+      '  [Position] char(2) NOT NULL,',
+      '  [Shirt] tinyint NULL,',
+      '  [Goals] int NOT NULL,',
+      '  PRIMARY KEY ([Id])',
+      ');',
+      'ALTER TABLE [dbo].[Players] ADD CONSTRAINT [FK_Players_Clubs]',
+      '  FOREIGN KEY ([ClubId]) REFERENCES [dbo].[Clubs] ([Id]);',
+    ].join('\n'),
+  );
+  assert.match(definitionSql(findObject(schema, 'vTopScorers')), /OBJECT_DEFINITION\(OBJECT_ID\(N'\[dbo\]\.\[vTopScorers\]'\)\)/);
+  // The demo answers it.
+  const res = await s.run(definitionSql(findObject(schema, 'vTopScorers')));
+  assert.match(res.sets[0].rows[0][0], /^CREATE VIEW dbo\.vTopScorers/);
 });

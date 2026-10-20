@@ -8,7 +8,7 @@ import { findDataSources, importPlan, planText } from './datagrip.js';
 import { formatSql } from './format.js';
 import { changesText, saveScript, withSaved } from './edit.js';
 import { AI_LABELS, AI_LEVELS, aiLevel, askPrompt, canSeeSchema, consoleText, parseAnswer } from './ai.js';
-import { describeObject, findObject, objectName } from './schema.js';
+import { createTableScript, definitionSql, describeObject, findObject, objectName } from './schema.js';
 import { classifyScript, countQuery, oneLine, selectTop, splitStatements, statementAt, toCsv, toJson } from './sql.js';
 
 // A WHERE that still changes more rows than this is asked about too.
@@ -299,6 +299,28 @@ export function describe(ctx, text) {
   const obj = typeof text === 'string' ? findObject(ctx.schema, text) : text;
   if (!obj) return ctx.note(`No table or view called ${text} in ${ctx.session.database}.`, 'error');
   ctx.showText(objectName(obj), describeObject(obj, ctx.schema));
+}
+
+/**
+ * /script <name> and c in the Explorer: the object's CREATE script, into the console to edit. A table's
+ * is written from the catalog; a view's, procedure's or function's is the server's own text.
+ */
+export async function scriptObject(ctx, text) {
+  if (!needSession(ctx)) return;
+  if (!text) return ctx.prefill('/script ');
+  const obj = typeof text === 'string' ? findObject(ctx.schema, text) : text;
+  if (!obj) return ctx.note(`Nothing called ${text} in ${ctx.session.database}.`, 'error');
+  if (obj.kind === 'table') return ctx.editInConsole(createTableScript(obj, ctx.schema));
+  let definition = null;
+  const r = await ctx.task(
+    `script ${objectName(obj)}`,
+    async (signal) => {
+      definition = (await ctx.session.run(definitionSql(obj), { signal, limit: 1 })).sets[0]?.rows[0]?.[0] ?? null;
+      return [definition ? 'In the console.' : "The server gave no definition: it may be encrypted, or the login can't VIEW DEFINITION."];
+    },
+    { label: 'Reading the definition' },
+  );
+  if (r.ok && definition) ctx.editInConsole(String(definition).replace(/\r\n?/g, '\n').trim());
 }
 
 export function setLimit(ctx, value) {

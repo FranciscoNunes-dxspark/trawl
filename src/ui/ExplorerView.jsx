@@ -47,6 +47,7 @@ export function ExplorerView({ schema, ctx, width, height, active, filter }) {
       if (key.return) a.browse(ctx, obj);
       else if (input === 'd') a.describe(ctx, obj);
       else if (input === 's') ctx.startQuery(obj);
+      else if (input === 'c') a.scriptObject(ctx, obj);
     },
     { isActive: active },
   );

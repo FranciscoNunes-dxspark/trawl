@@ -400,7 +400,9 @@ test('tab leaves the password out of the store; esc cancels', async () => {
 test('/password saves one, /folder files a connection, and the window title follows the session', async () => {
   const credentials = memoryCredentials();
   const titles = [];
-  const app = startWith([LOGIN, { name: 'az', server: 'x.database.windows.net', auth: 'azure-cli' }, ...DEMO_CONNECTIONS], { open: fakeOpen, credentials, setTitle: (t) => titles.push(t) });
+  // Returns true as cli.jsx's process.stdout.write does, which an effect must not hand back to React.
+  const setTitle = (t) => (titles.push(t), true);
+  const app = startWith([LOGIN, { name: 'az', server: 'x.database.windows.net', auth: 'azure-cli' }, ...DEMO_CONNECTIONS], { open: fakeOpen, credentials, setTitle });
   await until(() => frame().includes('club-sql') && frame().includes('Connections'), 'the connections');
   await type(app.stdin, '/folder club-sql Clubs / Lisbon');
   app.stdin.write(KEYS.enter);
@@ -417,6 +419,12 @@ test('/password saves one, /folder files a connection, and the window title foll
   await type(app.stdin, '/connect demo-prod');
   app.stdin.write(KEYS.enter);
   await until(() => titles.at(-1) === 'Trawl · demo-prod/ClubA · PROD', 'the title');
+  // A second change runs the first effect's clean-up, which crashed the app when it wasn't a function.
+  await type(app.stdin, '/connect demo');
+  app.stdin.write(KEYS.enter);
+  await until(() => titles.at(-1) === 'Trawl · demo/ClubA', 'the title again');
+  app.stdin.write('?');
+  await until(() => frame().includes('Keyboard shortcuts'), 'the app still taking keys');
   const saved = JSON.parse(readFileSync(join(process.env.TRAWL_HOME, 'config.json'), 'utf8'));
   assert.equal(saved.connections.find((c) => c.name === 'club-sql').folder, 'Clubs/Lisbon');
   app.unmount();

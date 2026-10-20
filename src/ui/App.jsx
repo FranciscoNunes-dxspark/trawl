@@ -632,7 +632,9 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
 
   // The terminal's title says where you are: "Trawl · funds/fundsdb · PROD".
   const windowTitle = session ? `Trawl · ${session.conn.name}/${session.database ?? session.conn.database ?? ''}${session.conn.prod ? ' · PROD' : ''}`.replace(/\/$/, '') : 'Trawl';
-  useEffect(() => setTitle?.(windowTitle), [windowTitle]);
+  useEffect(() => {
+    setTitle?.(windowTitle);
+  }, [windowTitle]);
 
   // Leaving the console stops typing, so keys never go to an editor that isn't on screen.
   useEffect(() => {

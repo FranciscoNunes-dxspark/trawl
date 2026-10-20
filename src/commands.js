@@ -1,5 +1,6 @@
 import * as a from './actions.js';
 import { folderNames } from './fanout.js';
+import { SNIPPET_WORDS, snippetsFor } from './snippets.js';
 import { objectName } from './schema.js';
 
 // Slash commands. `args` in square brackets are optional, so picking the command runs it straight away.
@@ -19,6 +20,8 @@ export const COMMANDS = [
   { name: 'format', desc: 'Lay out the statement under the cursor in the console (or the selection)', run: (ctx) => a.formatConsole(ctx) },
   { name: 'search', args: '<text>', desc: 'Find text in the console (then n and N: next, previous)', run: (ctx, s) => a.searchConsole(ctx, s) },
   { name: 'save', args: '<file.sql>', desc: 'Write the console to a file', run: (ctx, s) => a.saveConsoleAs(ctx, s) },
+  { name: 'snippet', args: '[name | save <name> | delete <name>]', desc: "Run a saved query; save the console's statement as one; forget one", complete: 'snippets', run: (ctx, s) => a.snippet(ctx, s) },
+  { name: 'snippets', desc: 'The saved queries for this connection: ↵ run, e edit, x forget', run: (ctx) => a.showSnippets(ctx) },
   { name: 'describe', args: '<table>', desc: 'Columns, types and keys of a table or view', complete: 'objects', run: (ctx, s) => a.describe(ctx, s) },
   { name: 'script', args: '<name>', desc: 'CREATE script of a table, view, procedure or function, into the console', complete: 'everything', run: (ctx, s) => a.scriptObject(ctx, s) },
   { name: 'find', args: '[text]', desc: 'Filter the Explorer by name (empty clears it)', run: (ctx, s) => ctx.find(s) },
@@ -56,7 +59,8 @@ export function findCommand(name) {
   return matches.length === 1 ? matches[0] : null;
 }
 
-function completions(kind, { config, schema }) {
+function completions(kind, { config, schema, conn }) {
+  if (kind === 'snippets') return [...snippetsFor(config.snippets, conn).map((s) => s.name), ...SNIPPET_WORDS];
   if (kind === 'connections') return config.connections.map((c) => c.name);
   if (kind === 'folders') return folderNames(config.connections);
   if (kind === 'diff') return [...config.connections.map((c) => c.name), ...(schema?.databases.filter((d) => d !== schema.database) ?? [])];

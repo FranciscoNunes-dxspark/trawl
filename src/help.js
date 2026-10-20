@@ -39,6 +39,14 @@ Query, the console (a SQL editor, kept between sessions)
                    they open by themselves after FROM, JOIN, ON, EXEC, USE · inside a call, its syntax shows above
                    esc close · ctrl+n (or ctrl+space) ask for them anywhere · tab after SELECT * writes out the columns
   /new  /save <file.sql>   Clear it · Write it to a file
+  S                Save the statement under the cursor (or the selection) as a snippet (/snippet save <name>)
+
+Snippets and parameters
+  /snippets        The saved queries for this connection (and those saved while not connected): ↵ run · e edit · x forget
+  /snippet <name>  Run one · /snippet save <name> · /snippet delete <name>
+  @name            A variable the SQL uses without DECLARE is a parameter: Trawl asks for its value before running
+                   (a number, NULL, or text, which it quotes); EXEC's argument names and @@functions aren't
+  $(name)          sqlcmd variables too: :setvar name "value" gives one, any other is asked for
 
 Query, a file (opened with /open; Trawl reloads it when you save; /console goes back)
   ↵                Run the statement under the cursor

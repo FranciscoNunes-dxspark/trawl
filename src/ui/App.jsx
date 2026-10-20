@@ -27,6 +27,7 @@ import { HistoryView } from './HistoryView.jsx';
 import { QueryView } from './QueryView.jsx';
 import { ResultsView } from './ResultsView.jsx';
 import { TextViewer } from './TextViewer.jsx';
+import { Picker } from './Picker.jsx';
 import { WELCOME_HEIGHT, Welcome } from './Glim.jsx';
 import { FACES, moodFor } from '../glim.js';
 import { checksDisabled, isDue, isNewer, openUrl, updateAdvice } from '../update.js';
@@ -682,6 +683,8 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     confirm,
     // A password field in place of the prompt: resolves { value, remember } or null.
     askSecret: (req) => confirm({ ...req, secret: true, options: [] }),
+    // A line of text in the same place, shown as typed: resolves the text, or null on esc.
+    askText: async (req) => (await confirm({ ...req, secret: true, plain: true, options: [] }))?.value ?? null,
     credentials,
     // Whether this terminal can report the mouse at all (Settings says so).
     mouseAvailable: Boolean(mouse),
@@ -752,6 +755,8 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     askClaude,
     findDataSources,
     showText: (title, text) => setOverlay({ title, text }),
+    // A list to pick from (Picker.jsx): { title, hint, items, keys, empty }.
+    showPicker: (picker) => setOverlay({ picker }),
     closeOverlay: () => setOverlay(null),
     rememberOutput: (title, text) => (lastOutput.current = { title, text }),
     showHelp: () => setOverlay({ title: 'Keyboard shortcuts', text: HELP }),
@@ -821,14 +826,14 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     if (view !== 'results' && focusRef.current === 'cell') setFocus('view');
   }, [view, queryMode]);
 
-  const lists = { config, schema };
+  const lists = { config, schema, conn: session?.conn.name };
   const suggestions = focus === 'prompt' && !confirmReq ? suggestionsFor(prompt.value, lists) : [];
   const sel = Math.min(sugIndex, Math.max(0, suggestions.length - 1));
 
   // Line editing in the prompt.
   const promptKeys = (input, key) => {
     const { value, cursor } = promptRef.current;
-    const items = suggestionsFor(value, { config: configRef.current, schema: schemaRef.current });
+    const items = suggestionsFor(value, { config: configRef.current, schema: schemaRef.current, conn: sessionRef.current?.conn.name });
     const pick = items[Math.min(sugIndex, items.length - 1)];
     const edit = (v, c) => {
       setPrompt(v, c);
@@ -1010,6 +1015,8 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     // Over whichever view is open; ↵ on the row limit hands over to the prompt, and the overlay stays.
     const settingsActive = focus === 'view' && !confirmReq;
     main = <SettingsView config={config} ctx={ctx} updates={{ check: Boolean(checkLatest), install: Boolean(installUpdate) }} update={update} width={W} height={mainH} active={settingsActive} onClose={closeOnKey} />;
+  } else if (overlay?.picker) {
+    main = <Picker {...overlay.picker} ctx={ctx} width={W} height={mainH} active={focus === 'view' && !confirmReq} onClose={closeOnKey} />;
   } else if (overlay) {
     main = <TextViewer {...overlay} ctx={ctx} width={W} height={mainH} active={focus === 'view' && (!confirmReq || confirmReq.scrollsOverlay)} pageOnly={Boolean(confirmReq)} onClose={closeOnKey} />;
   } else if (view === 'connections') {
@@ -1046,6 +1053,8 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
 
   const left = flash
     ? flash.text
+    : confirmReq?.plain
+    ? 'type the value · ↵ done · esc cancel'
     : confirmReq?.secret
     ? 'type the password (shown as *) · ↵ done · esc cancel'
     : focus === 'prompt'
@@ -1056,6 +1065,8 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
           ? 'editing the cell · ↵ keep it (s saves) · tab next column · esc leave it as it was · ctrl+u clear'
           : overlay?.settings
           ? 'j/k move · ↵ or space change it · esc close'
+          : overlay?.picker
+          ? `j/k move · ${overlay.picker.hint} · esc close`
           : overlay
           ? 'j/k scroll · space page · esc close'
           : view === 'query' && queryMode === 'console'

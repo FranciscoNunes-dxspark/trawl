@@ -9,11 +9,12 @@ import { formatSql } from './format.js';
 import { changesText, insertScript, saveScript, tsvText, withSaved } from './edit.js';
 import { AI_LABELS, AI_LEVELS, aiLevel, askPrompt, canSeeSchema, consoleText, parseAnswer } from './ai.js';
 import { followTargets } from './follow.js';
+import { findSnippet, snippetNameProblem, snippetsFor, withSnippet, withoutSnippet } from './snippets.js';
 import { folderNames, inFolder, inParallel, mergeResults, readOnlyScript } from './fanout.js';
 import { DIFF_SQL, buildExtras, diffText, schemaDiff, syncScript } from './diff.js';
 import { ACTIVITY_SQL, buildActivity, killSql } from './activity.js';
 import { SCHEMA_SQL, buildSchema, createTableScript, definitionSql, describeObject, findObject, objectName } from './schema.js';
-import { classifyScript, countQuery, oneLine, selectTop, splitStatements, statementAt, toCsv, toJson, withoutLeadingComments } from './sql.js';
+import { applySqlcmd, bindVariables, classifyScript, countQuery, oneLine, scriptVariables, selectTop, splitStatements, sqlcmdVariables, statementAt, toCsv, toJson, withoutLeadingComments } from './sql.js';
 
 // A WHERE that still changes more rows than this is asked about too.
 const MANY_ROWS = 1000;
@@ -57,11 +58,52 @@ async function countChanges(ctx, text) {
 
 const rowsText = (n) => `${n.toLocaleString('en')} row${n === 1 ? '' : 's'}`;
 
+/**
+ * The script with its parameters filled in, asking for each: sqlcmd's $(name) without a :setvar, then
+ * @variables used without being declared (sql.js scriptVariables). Null when one is cancelled with esc.
+ * The values typed are offered again next time, for this session.
+ */
+async function withParameters(ctx, sql) {
+  ctx.parameterValues ??= new Map();
+  const remembered = ctx.parameterValues;
+  const ask = async (name, i, n) => {
+    const r = await ctx.askText({
+      title: `Value for ${name}${n > 1 ? ` (${i + 1} of ${n})` : ''}`,
+      detail: name.startsWith('$') ? 'Put into the script as it is, as sqlcmd does. esc cancels the run.' : 'A number, NULL, or text (quoted for you; type the quotes to give a literal yourself). esc cancels the run.',
+      value: remembered.get(name.toLowerCase()) ?? '',
+    });
+    if (r == null) return null;
+    remembered.set(name.toLowerCase(), r);
+    return r;
+  };
+  let text = sql;
+  const { defined, needed } = sqlcmdVariables(text);
+  if (defined.size || needed.length) {
+    const values = new Map();
+    for (const [i, name] of needed.entries()) {
+      const v = await ask(`$(${name})`, i, needed.length);
+      if (v == null) return null;
+      values.set(name, v);
+    }
+    text = applySqlcmd(text, values);
+  }
+  const vars = scriptVariables(text);
+  if (!vars.length) return text;
+  const values = new Map();
+  for (const [i, { name }] of vars.entries()) {
+    const v = await ask(name, i, vars.length);
+    if (v == null) return null;
+    values.set(name, v);
+  }
+  return bindVariables(text, values);
+}
+
 /** Runs SQL on the current connection, after the read-only and danger checks. */
-export async function runSql(ctx, sql, { title, lineBase, stay, keep } = {}) {
+export async function runSql(ctx, sql, { title, prefix = '', lineBase, stay, keep } = {}) {
   if (!needSession(ctx)) return;
-  const text = sql.trim();
-  if (!text) return;
+  if (!sql.trim()) return;
+  const text = await withParameters(ctx, sql.trim());
+  if (text == null) return;
   const { write, danger } = classifyScript(text);
   const { conn } = ctx.session;
   if (write && isReadOnly(conn) && !ctx.writesAllowed) {
@@ -89,7 +131,7 @@ export async function runSql(ctx, sql, { title, lineBase, stay, keep } = {}) {
   }
   // With manual commit (production's default), a write starts a transaction, so nothing sticks until /commit.
   const wrap = write && commitMode(conn) === 'manual' && !ctx.tranCount;
-  return ctx.query(wrap ? `BEGIN TRANSACTION;\n${text}` : text, { title: title ?? oneLine(text), wrapped: wrap, lineBase, stay, keep });
+  return ctx.query(wrap ? `BEGIN TRANSACTION;\n${text}` : text, { title: title ?? `${prefix}${oneLine(withoutLeadingComments(text))}`, wrapped: wrap, lineBase, stay, keep });
 }
 
 /**
@@ -457,6 +499,65 @@ export async function killSession(ctx, id) {
 function consoleStatement(ctx) {
   const e = ctx.console;
   return ed.selectedText(e)?.text.trim() || statementAt(splitStatements(ed.toText(e)), e.row + 1)?.text || '';
+}
+
+/**
+ * /snippet <name> runs a saved query; /snippet save <name> keeps the console's selection (or its
+ * statement under the cursor) under that name for the connection you're on; /snippet delete <name>
+ * forgets one; /snippet alone lists them (/snippets).
+ */
+export async function snippet(ctx, rest) {
+  const m = String(rest ?? '').trim().match(/^(\S+)?\s*([\s\S]*)$/);
+  const [word, name] = [m[1] ?? '', m[2].trim()];
+  const conn = ctx.session?.conn.name ?? null;
+  if (!word) return showSnippets(ctx);
+  if (word.toLowerCase() === 'save') {
+    const problem = snippetNameProblem(name);
+    if (problem) return name ? ctx.note(problem, 'error') : ctx.prefill('/snippet save ');
+    const sql = consoleStatement(ctx);
+    if (!sql) return ctx.note('Nothing to save: select some SQL in the console, or put the cursor on a statement.', 'error');
+    const there = (ctx.config.snippets ?? []).find((x) => x.name.toLowerCase() === name.toLowerCase() && String(x.conn ?? '').toLowerCase() === String(conn ?? '').toLowerCase());
+    if (there && there.sql !== sql) {
+      const ok = await ctx.confirm({ title: `Replace the snippet ${there.name}?`, detail: oneLine(there.sql), options: YES_NO('Yes, replace it') });
+      if (!ok) return;
+    }
+    ctx.setConfig((c) => ({ ...c, snippets: withSnippet(c.snippets, { name, conn, sql, at: Date.now() }) }));
+    return ctx.note(`Saved the snippet ${name}${conn ? ` for ${conn}` : ' for every connection'}. /snippet ${name} runs it.`, 'ok');
+  }
+  if (word.toLowerCase() === 'delete') {
+    if (!name) return ctx.prefill('/snippet delete ');
+    const found = findSnippet(ctx.config.snippets, conn, name);
+    if (!found) return ctx.note(`No snippet called ${name}${conn ? ` for ${conn}` : ''}.`, 'error');
+    return forgetSnippet(ctx, found);
+  }
+  const found = findSnippet(ctx.config.snippets, conn, `${word}${name ? ` ${name}` : ''}`);
+  if (!found) return ctx.note(`No snippet called ${word}${name ? ` ${name}` : ''}${conn ? ` for ${conn}` : ''}. /snippets lists them.`, 'error');
+  return runSql(ctx, found.sql, { prefix: `${found.name}: ` });
+}
+
+async function forgetSnippet(ctx, found) {
+  const ok = await ctx.confirm({ title: `Forget the snippet ${found.name}?`, detail: oneLine(found.sql), options: YES_NO('Yes, forget it') });
+  if (!ok) return false;
+  ctx.setConfig((c) => ({ ...c, snippets: withoutSnippet(c.snippets, found) }));
+  ctx.note(`Forgot the snippet ${found.name}.`, 'ok');
+  return true;
+}
+
+/** /snippets: the saved queries for this connection (and every connection), to run, edit or forget. */
+export function showSnippets(ctx) {
+  const conn = ctx.session?.conn.name ?? null;
+  const items = snippetsFor(ctx.config.snippets, conn).map((x) => ({ label: x.name, detail: `${x.conn ? '' : 'every connection · '}${oneLine(x.sql)}`, text: x.sql, snippet: x }));
+  ctx.showPicker({
+    title: `Snippets${conn ? `: ${conn}` : ''}`,
+    hint: '↵ run · e edit in the console · x forget',
+    items,
+    empty: 'No snippets yet. In the console, S (or /snippet save <name>) keeps the statement under the cursor.',
+    keys: {
+      return: (it) => runSql(ctx, it.snippet.sql, { prefix: `${it.snippet.name}: ` }),
+      e: (it) => ctx.editInConsole(it.snippet.sql),
+      x: async (it) => (await forgetSnippet(ctx, it.snippet)) && showSnippets(ctx),
+    },
+  });
 }
 
 // Connections a fan-out works on at once.

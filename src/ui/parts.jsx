@@ -100,14 +100,15 @@ export function confirmHeight(req) {
 }
 
 /**
- * A password field in the confirm box: what's typed shows as *. ↵ gives { value, remember },
+ * A password field in the confirm box: what's typed shows as * (or as it is, with `req.plain`, for
+ * a value that isn't secret; `req.value` is what it starts with). ↵ gives { value, remember },
  * esc null. With `req.remember` set, tab flips the "keep it" choice under the field.
  */
 export function SecretPrompt({ req, width, onDone }) {
-  const [value, setValueState] = useState('');
+  const [value, setValueState] = useState(req.value ?? '');
   const [remember, setRemember] = useState(req.remember);
   // ↵ can come before the render after the last key, so the text lives in a ref too.
-  const valueRef = useRef('');
+  const valueRef = useRef(req.value ?? '');
   const setValue = (v) => {
     valueRef.current = v;
     setValueState(v);
@@ -137,7 +138,7 @@ export function SecretPrompt({ req, width, onDone }) {
         <Text color={theme.accent} bold>
           {'> '}
         </Text>
-        {'*'.repeat(Math.min(value.length, Math.max(0, inner - 3)))}
+        {req.plain ? value.slice(-Math.max(1, inner - 3)) : '*'.repeat(Math.min(value.length, Math.max(0, inner - 3)))}
         <Text inverse> </Text>
       </Text>
       {remember !== undefined ? (

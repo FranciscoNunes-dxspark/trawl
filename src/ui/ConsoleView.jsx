@@ -98,6 +98,8 @@ export function ConsoleView({ editor, editing, ctx, width, height, active }) {
     if (key.ctrl && input === 'f') return ctx.prefill('/search ');
     if (input === 'f') return a.formatConsole(ctx);
     if (input === 'p') return a.showPlan(ctx);
+    // After every handler has had the S, or the prompt would take it as its first letter.
+    if (input === 'S') return queueMicrotask(() => ctx.prefill('/snippet save '));
     if (input === 'n' || input === 'N') return a.searchConsole(ctx, '', { back: input === 'N' });
     if (key.downArrow || input === 'j') return set(ed.move(editor, { rows: 1 }));
     if (key.upArrow || input === 'k') return set(ed.move(editor, { rows: -1 }));

@@ -486,3 +486,132 @@ export function statisticsSummary(messages) {
   const tables = [...reads].sort((x, y) => y[1] - x[1]).map(([t, n]) => `${t} ${n.toLocaleString('en')}`);
   return { summary: `Logical reads: ${tables.join(', ') || 'none'} · CPU ${cpu} ms · elapsed ${elapsed} ms`, messages: rest };
 }
+
+// sqlcmd's :setvar lines, which SSMS's SQLCMD mode reads and the server never sees.
+const SETVAR = /^[ \t]*:setvar[ \t]+([A-Za-z_][\w-]*)(?:[ \t]+(?:"((?:[^"]|"")*)"|(\S+)))?[ \t]*$/gim;
+const SQLCMD_REF = /\$\(([A-Za-z_][\w-]*)\)/g;
+
+/**
+ * sqlcmd variables in a script: `defined` maps each :setvar's name (lower case) to its value, and
+ * `needed` lists the $(name)s used that no :setvar gives, by first spelling.
+ */
+export function sqlcmdVariables(text) {
+  const src = normalise(text);
+  const defined = new Map();
+  for (const m of src.matchAll(SETVAR)) defined.set(m[1].toLowerCase(), (m[2]?.replace(/""/g, '"') ?? m[3] ?? ''));
+  const needed = [];
+  for (const m of src.matchAll(SQLCMD_REF)) {
+    const k = m[1].toLowerCase();
+    if (!defined.has(k) && !needed.some((n) => n.toLowerCase() === k)) needed.push(m[1]);
+  }
+  return { defined, needed };
+}
+
+/**
+ * The script as the server should get it: :setvar lines become comments (so line numbers hold) and
+ * each $(name) is replaced, as sqlcmd does, by its value as it is: from :setvar, else `values`.
+ */
+export function applySqlcmd(text, values = new Map()) {
+  const src = normalise(text);
+  const { defined } = sqlcmdVariables(src);
+  const lookup = (name) => {
+    const k = name.toLowerCase();
+    if (defined.has(k)) return defined.get(k);
+    for (const [n, v] of values) if (n.toLowerCase() === k) return v;
+    return null;
+  };
+  return src.replace(SETVAR, (line) => `-- ${line.trim()}`).replace(SQLCMD_REF, (all, name) => lookup(name) ?? all);
+}
+
+const VARIABLE = /(?<![\w@$#])@(?!@)([A-Za-z_#$][\w@#$]*)/g;
+const DECLARE_ENDS = new Set([...STARTS, 'SET', 'WITH', 'BEGIN', 'END', 'WHILE', 'RETURN', 'FETCH', 'OPEN', 'CLOSE', 'DEALLOCATE', 'USE', 'GO']);
+
+/**
+ * The @variables a script uses without declaring them, which Trawl asks for before running it, as
+ * DataGrip asks for parameters: [{ name, at }] with `at` the offsets of each use in the normalised
+ * text. Not a parameter: anything DECLAREd in the same batch, @@ system functions, the names of a
+ * procedure's arguments in EXEC (@Season = 2024), and anything in a CREATE PROCEDURE, FUNCTION,
+ * TRIGGER or VIEW, whose parameters are its own. Comments and strings are never looked in.
+ */
+export function scriptVariables(text) {
+  const src = normalise(text);
+  const m = mask(src);
+  const found = new Map();
+  let base = 0;
+  for (const piece of m.split(/^([ \t]*go(?:[ \t]+\d+)?[ \t\u0001]*)$/im)) {
+    const from = base;
+    base += piece.length;
+    if (GO_LINE.test(piece) && !piece.includes('\n')) continue;
+    const words = [...piece.matchAll(/[\w@#$]+/g)].slice(0, 4).map((w) => w[0].toUpperCase());
+    if (isModuleHeader(words)) continue;
+    const toks = [...piece.matchAll(/[\w@#$]+|[(),;=]/g)];
+    const declared = new Set();
+    const argNames = new Set();
+    let depth = 0;
+    for (let i = 0; i < toks.length; i++) {
+      const t = toks[i][0];
+      if (t === '(') depth++;
+      else if (t === ')') depth = Math.max(0, depth - 1);
+      const w = t.toUpperCase();
+      if (w === 'DECLARE') {
+        // DECLARE @a int = 1, @b TABLE (…): the names at its own depth, first and after each comma.
+        let d = depth;
+        let expect = true;
+        for (let j = i + 1; j < toks.length; j++) {
+          const u = toks[j][0];
+          if (u === '(') d++;
+          else if (u === ')') d--;
+          else if (d === depth && u === ';') break;
+          else if (d === depth && u === ',') expect = true;
+          else if (d === depth && expect && u.startsWith('@')) {
+            declared.add(u.toLowerCase());
+            expect = false;
+          } else if (d === depth && DECLARE_ENDS.has(u.toUpperCase()) && !expect) break;
+          else if (d === depth) expect = false;
+        }
+      } else if (w === 'EXEC' || w === 'EXECUTE') {
+        // EXEC [@ret =] proc @Arg = value, …: the argument names are the procedure's, not variables.
+        // An argument name is "@x =" after the procedure's name or a comma; "@ret =" straight after EXEC is a variable.
+        let d = depth;
+        for (let j = i + 1; j < toks.length; j++) {
+          const u = toks[j][0];
+          if (u === '(') d++;
+          else if (u === ')') d--;
+          if (d < depth || (d === depth && (u === ';' || (STARTS.has(u.toUpperCase()) && j > i + 1)))) break;
+          if (d === depth && j > i + 1 && u.startsWith('@') && toks[j + 1]?.[0] === '=' && toks[j - 1][0] !== '=') argNames.add(`${from + toks[j].index}`);
+        }
+      }
+    }
+    for (const v of piece.matchAll(VARIABLE)) {
+      const name = `@${v[1]}`;
+      const k = name.toLowerCase();
+      if (declared.has(k) || argNames.has(`${from + v.index}`)) continue;
+      if (!found.has(k)) found.set(k, { name, at: [] });
+      found.get(k).at.push(from + v.index);
+    }
+  }
+  return [...found.values()];
+}
+
+/** A value typed for a parameter, as SQL: NULL, a number as it is, a literal typed as one ('x', N'x', 0x…), else N'text'. */
+export function parameterLiteral(input) {
+  const s = String(input ?? '').trim();
+  if (/^null$/i.test(s)) return 'NULL';
+  if (/^-?(\d+\.?\d*|\.\d+)(e[-+]?\d+)?$/i.test(s)) return s;
+  if (/^N?'(?:[^']|'')*'$/is.test(s) || /^0x[0-9a-f]*$/i.test(s)) return s;
+  return `N'${s.replace(/'/g, "''")}'`;
+}
+
+/** The script with each undeclared @variable (scriptVariables) replaced by its value's literal. */
+export function bindVariables(text, values) {
+  const src = normalise(text);
+  const edits = [];
+  for (const v of scriptVariables(src)) {
+    const value = [...values].find(([n]) => n.toLowerCase() === v.name.toLowerCase());
+    if (!value) continue;
+    for (const at of v.at) edits.push([at, v.name.length, parameterLiteral(value[1])]);
+  }
+  let out = src;
+  for (const [at, len, lit] of edits.sort((x, y) => y[0] - x[0])) out = out.slice(0, at) + lit + out.slice(at + len);
+  return out;
+}

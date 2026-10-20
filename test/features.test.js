@@ -141,3 +141,31 @@ test('F on a foreign key cell opens the row it refers to, and on a key others re
   await until(() => frame().includes('SELECT TOP (500) * FROM [dbo].[Matches] WHERE [HomeId] = 1;'), 'the matches');
   app.unmount();
 });
+
+test('S saves the console statement as a snippet; running it asks for its @parameters first', async () => {
+  mkdirSync(process.env.TRAWL_HOME, { recursive: true });
+  writeFileSync(join(process.env.TRAWL_HOME, 'console.sql'), 'DECLARE @n int = 1\nSELECT * FROM dbo.Players WHERE Id = @id AND @n = 1');
+  const app = start();
+  await until(() => frame().includes('Clubs'), 'the explorer');
+  app.stdin.write('2');
+  await until(() => frame().includes('WHERE Id = @id'), 'the console');
+  app.stdin.write('S');
+  await until(() => frame().includes('/snippet save'), 'the prompt');
+  await command(app, 'player by id');
+  await until(() => frame().includes('Saved the snippet player by id for demo'), 'saved');
+  await command(app, '/snippets');
+  await until(() => frame().includes('Snippets: demo') && frame().includes('player by id'), 'the list');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('Value for @id') && frame().includes('type the value'), 'the question for @id, and only @id');
+  assert.doesNotMatch(frame(), /Value for @n/);
+  app.stdin.write(KEYS.esc);
+  await until(() => !frame().includes('Value for @id'), 'cancelled');
+  await command(app, '/snippet player by id');
+  await until(() => frame().includes('Value for @id'), 'asked again');
+  await type(app.stdin, '3');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('player by id: DECLARE @n int = 1 SELECT * FROM dbo.Players WHERE Id = 3 AND @n = 1'), 'the run, with the value in place');
+  const config = JSON.parse(readFileSync(join(process.env.TRAWL_HOME, 'config.json'), 'utf8'));
+  assert.equal(config.snippets[0].conn, 'demo');
+  app.unmount();
+});

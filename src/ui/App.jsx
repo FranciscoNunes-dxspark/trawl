@@ -345,6 +345,23 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
         );
       }
     }
+    // A certificate no authority vouches for (a local SQL Server's own) asks to trust it, as SSMS's
+    // "Trust server certificate" does, and once trusted it is kept on the connection (--trust-cert).
+    if (!r.ok && r.error?.untrustedCert) {
+      const trust = await confirm({
+        title: `${conn.name}: the server's certificate can't be verified. Trust it?`,
+        detail: `Self-signed, as a local SQL Server's usually is. Trust it only for a server you know: ${conn.server}.`,
+        options: [
+          { label: 'Yes, trust it and connect (kept on the connection)', value: true },
+          { label: 'No', value: false },
+        ],
+        danger: Boolean(conn.prod),
+      });
+      if (!trust) return false;
+      const trusted = { ...conn, trustCert: true };
+      setConfig((c) => ({ ...c, connections: c.connections.map((x) => (x.name === conn.name && !x.demo ? trusted : x)) }));
+      return connect(trusted, { database, password, remember });
+    }
     if (!r.ok && r.error?.needsPassword) {
       typed.current.delete(conn.name);
       const answer = await a.askPassword(ctx, conn, { failed: /login failed/i.test(r.error.message) });

@@ -1,0 +1,93 @@
+import { test, before } from 'node:test';
+import assert from 'node:assert/strict';
+import { accept, completeAt, ident, tablesIn } from '../src/complete.js';
+import { demoSession } from '../src/demo.js';
+import { SCHEMA_SQL, buildSchema } from '../src/schema.js';
+
+let schema;
+before(async () => {
+  schema = buildSchema((await demoSession({ demo: true, name: 'demo' }).run(SCHEMA_SQL)).sets);
+});
+
+// The editor for `text` with the cursor where the | is.
+const at = (text) => {
+  const lines = text.split('\n');
+  const row = lines.findIndex((l) => l.includes('|'));
+  const col = lines[row].indexOf('|');
+  lines[row] = lines[row].replace('|', '');
+  return { lines, row, col };
+};
+const offered = (text, opts) => completeAt(at(text), schema, opts)?.items.map((i) => i.insert) ?? null;
+
+test('after FROM and JOIN: tables and views, schema-qualified', () => {
+  assert.deepEqual(offered('SELECT * FROM Cl|'), ['dbo.Clubs']);
+  assert.deepEqual(offered('SELECT * FROM dbo.Clubs c JOIN pl|'), ['dbo.Players']);
+  assert.deepEqual(offered('SELECT * FROM dbo.Clubs, Ma|'), ['dbo.Matches']);
+  assert.deepEqual(offered('SELECT * FROM i18n.|'), ['Translations']);
+  // A name that only contains the text comes after those that start with it.
+  assert.deepEqual(offered('SELECT * FROM lat|'), ['i18n.Translations']);
+});
+
+test('after an alias or table and a dot: its columns', () => {
+  assert.deepEqual(offered('SELECT p.| FROM dbo.Players p'), ['Id', 'ClubId', 'Name', 'Position', 'Shirt', 'Goals']);
+  assert.deepEqual(offered('SELECT * FROM dbo.Players AS p WHERE p.Go|'), ['Goals']);
+  assert.deepEqual(offered('SELECT Clubs.Fo| FROM dbo.Clubs'), ['Founded']);
+  assert.deepEqual(offered('SELECT dbo.Clubs.Co| FROM dbo.Clubs'), ['Country']);
+});
+
+test('elsewhere: columns in scope first, with the alias when two tables share one', () => {
+  const items = offered('SELECT Na| FROM dbo.Players p JOIN dbo.Clubs c ON c.Id = p.ClubId');
+  assert.deepEqual(items.slice(0, 2), ['p.Name', 'c.Name']);
+  assert.deepEqual(offered('SELECT Sh| FROM dbo.Players p JOIN dbo.Clubs c ON 1 = 1'), ['Shirt']);
+  assert.ok(offered('SELECT * FROM dbo.Players WHERE Goals > 0 OR|').includes('ORDER'));
+});
+
+test('keywords follow the case being typed; functions come with their parenthesis', () => {
+  assert.deepEqual(offered('sel|'), ['select']);
+  assert.deepEqual(offered('SEL|'), ['SELECT']);
+  assert.ok(offered('SELECT COU|').includes('COUNT('));
+});
+
+test('EXEC offers procedures, USE databases', () => {
+  assert.deepEqual(offered('EXEC usp|'), ['dbo.usp_RecalculateTable']);
+  assert.deepEqual(offered('USE Club|'), ['ClubA', 'ClubB']);
+});
+
+test('nothing in comments, strings or variables, or before anything is typed', () => {
+  assert.equal(offered("SELECT 'Cl|'"), null);
+  assert.equal(offered('-- FROM Cl|'), null);
+  assert.equal(offered('/* FROM Cl| */'), null);
+  assert.equal(offered('SELECT @Cl|'), null);
+  assert.deepEqual(offered('SELECT * FROM |'), []);
+  // ctrl+space asks anyway.
+  assert.ok(offered('SELECT * FROM |', { force: true }).includes('dbo.Players'));
+  // Nothing to add when the only match is already there.
+  assert.deepEqual(offered('SELECT * FROM dbo.Clubs|'), []);
+});
+
+test('a [name] being typed completes in brackets, and reads the scope past it', () => {
+  assert.deepEqual(offered('SELECT [Na| FROM dbo.Clubs'), ['[Name]']);
+  const e = at('SELECT [Na|] FROM dbo.Clubs');
+  const c = completeAt(e, schema);
+  assert.deepEqual(accept(e, c, c.items[0]), { lines: ['SELECT [Name] FROM dbo.Clubs'], row: 0, col: 13 });
+});
+
+test('accept replaces the word and leaves the cursor after it', () => {
+  const e = at('SELECT *\nFROM Pl| p');
+  const c = completeAt(e, schema);
+  assert.deepEqual(accept(e, c, c.items[0]), { lines: ['SELECT *', 'FROM dbo.Players p'], row: 1, col: 16 });
+});
+
+test('tablesIn reads aliases, brackets, lists and hints', () => {
+  const refs = tablesIn('SELECT * FROM dbo.Players AS p WITH (NOLOCK) JOIN [dbo].[Clubs] c ON 1 = 1 WHERE x = 1', schema);
+  assert.deepEqual(refs.map((t) => [t.name, t.alias, t.object?.name]), [['dbo.Players', 'p', 'Players'], ['[dbo].[Clubs]', 'c', 'Clubs']]);
+  const list = tablesIn('SELECT * FROM Clubs, #tmp t WHERE 1 = 1', schema);
+  assert.deepEqual(list.map((t) => [t.name, t.alias, t.object?.name ?? null]), [['Clubs', null, 'Clubs'], ['#tmp', 't', null]]);
+  assert.deepEqual(tablesIn('UPDATE dbo.Clubs SET Name = 1', schema).map((t) => t.alias), [null]);
+});
+
+test('ident brackets names that need it', () => {
+  assert.equal(ident('Clubs'), 'Clubs');
+  assert.equal(ident('Order'), '[Order]');
+  assert.equal(ident('Line Items'), '[Line Items]');
+});

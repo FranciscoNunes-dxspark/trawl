@@ -1,7 +1,7 @@
 // Drives the real UI against the demo connections: keys in, frames out.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import React from 'react';
@@ -290,6 +290,31 @@ test('the console: type SQL, ctrl+r runs it with the results underneath, and it 
   again.stdin.write('2');
   await until(() => frame().includes('SELECT TOP (2) * FROM dbo.Clubs'), 'the kept console');
   again.unmount();
+});
+
+test('the console suggests tables and columns as you type; tab takes one, esc only closes the list', async () => {
+  mkdirSync(process.env.TRAWL_HOME, { recursive: true });
+  writeFileSync(join(process.env.TRAWL_HOME, 'console.sql'), '');
+  const app = start();
+  await until(() => frame().includes('Clubs'), 'the explorer');
+  app.stdin.write('2');
+  await until(() => frame().includes('An empty console'), 'the empty console');
+  app.stdin.write('i');
+  await until(() => frame().includes('typing SQL'), 'typing mode');
+  await type(app.stdin, 'SELECT * FROM Pl');
+  await until(() => frame().includes('dbo · table') && frame().includes('tab take it'), 'the suggestion');
+  app.stdin.write('\t');
+  await until(() => frame().includes('FROM dbo.Players') && !frame().includes('dbo · table'), 'the table taken');
+  await type(app.stdin, ' p WHERE p.Go');
+  await until(() => frame().includes('int · Players'), 'the column suggested');
+  app.stdin.write(KEYS.esc);
+  await until(() => !frame().includes('int · Players'), 'the list closed');
+  assert.match(frame(), /typing SQL/);
+  app.stdin.write('\x00'); // ctrl+space brings it back
+  await until(() => frame().includes('int · Players'), 'the list again');
+  app.stdin.write('\t');
+  await until(() => frame().includes('WHERE p.Goals'), 'the column taken');
+  app.unmount();
 });
 
 test('e in History puts the statement in the console to edit', async () => {

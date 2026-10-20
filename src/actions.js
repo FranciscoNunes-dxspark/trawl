@@ -9,7 +9,7 @@ import { formatSql } from './format.js';
 import { changesText, insertScript, saveScript, tsvText, withSaved } from './edit.js';
 import { AI_LABELS, AI_LEVELS, aiLevel, askPrompt, canSeeSchema, consoleText, parseAnswer } from './ai.js';
 import { createTableScript, definitionSql, describeObject, findObject, objectName } from './schema.js';
-import { classifyScript, countQuery, oneLine, selectTop, splitStatements, statementAt, toCsv, toJson } from './sql.js';
+import { classifyScript, countQuery, oneLine, selectTop, splitStatements, statementAt, toCsv, toJson, withoutLeadingComments } from './sql.js';
 
 // A WHERE that still changes more rows than this is asked about too.
 const MANY_ROWS = 1000;
@@ -321,6 +321,61 @@ export async function scriptObject(ctx, text) {
     { label: 'Reading the definition' },
   );
   if (r.ok && definition) ctx.editInConsole(String(definition).replace(/\r\n?/g, '\n').trim());
+}
+
+/**
+ * /stats [on|off]: SET STATISTICS IO and TIME for the session, so each run says how many pages it
+ * read from which table and how long the server spent (as one line). With nothing, it toggles.
+ */
+export async function setStats(ctx, mode) {
+  if (!needSession(ctx)) return;
+  if (mode && mode !== 'on' && mode !== 'off') return ctx.note('/stats on shows the pages read and the server time after each run; /stats off stops it.', 'error');
+  const session = ctx.session;
+  const on = mode ? mode === 'on' : !session.stats;
+  const r = await ctx.task(
+    `statistics ${on ? 'on' : 'off'}`,
+    async (signal) => {
+      const v = on ? 'ON' : 'OFF';
+      await session.run(`SET STATISTICS IO ${v};\nSET STATISTICS TIME ${v};`, { signal });
+      return [on ? 'Each run now ends with the logical reads per table and the CPU and elapsed time.' : 'Runs no longer report reads and times.'];
+    },
+    { label: on ? 'Turning statistics on' : 'Turning statistics off' },
+  );
+  if (r.ok) session.stats = on;
+}
+
+/**
+ * /plan [sql] and p in the console: the estimated plan, as text (SHOWPLAN_TEXT), of the SQL given,
+ * the selection, or the statement under the cursor. Nothing runs. SHOWPLAN goes off again whatever
+ * happens, or the session would answer every query with a plan.
+ */
+export async function showPlan(ctx, sql) {
+  if (!needSession(ctx)) return;
+  const e = ctx.console;
+  const text = sql?.trim() || ed.selectedText(e)?.text.trim() || statementAt(splitStatements(ed.toText(e)), e.row + 1)?.text;
+  if (!text) return ctx.note('Nothing to plan: give the SQL (/plan SELECT …) or put the cursor on a statement in the console.', 'error');
+  const session = ctx.session;
+  let plan = null;
+  const title = `Plan: ${oneLine(withoutLeadingComments(text))}`;
+  await ctx.task(
+    title,
+    async (signal) => {
+      await session.run('SET SHOWPLAN_TEXT ON;', { signal });
+      try {
+        const res = await session.run(text, { limit: 10_000 });
+        // Each statement gives two sets: its text, then its plan's rows.
+        plan = res.sets.map((s) => s.rows.map((r) => String(r[0] ?? '').replace(/\s+$/, '')).join('\n')).join('\n\n');
+      } finally {
+        await session.run('SET SHOWPLAN_TEXT OFF;');
+      }
+      return ['The plan is on screen (esc closes it). Nothing ran.'];
+    },
+    { label: 'Asking for the plan' },
+  );
+  if (plan) {
+    ctx.showText(title, plan);
+    ctx.rememberOutput(title, plan);
+  }
 }
 
 export function setLimit(ctx, value) {

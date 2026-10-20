@@ -459,6 +459,32 @@ test('o sorts the result rows by a column and /filter narrows them, without runn
   app.unmount();
 });
 
+test('/stats sums up reads and times after each run, and p shows the plan without running', async () => {
+  mkdirSync(process.env.TRAWL_HOME, { recursive: true });
+  writeFileSync(join(process.env.TRAWL_HOME, 'console.sql'), 'DELETE FROM dbo.Players WHERE Goals = 0');
+  const app = start();
+  await until(() => frame().includes('Clubs'), 'the explorer');
+  await type(app.stdin, '/stats');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('stats on'), 'statistics on');
+  await type(app.stdin, '!SELECT * FROM dbo.Players');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('Logical reads: Players 3 · CPU 0 ms · elapsed 1 ms'), 'the one-line summary');
+  assert.doesNotMatch(frame(), /Scan count/);
+  app.stdin.write('2');
+  await until(() => frame().includes('DELETE FROM dbo.Players'), 'the console');
+  app.stdin.write('p');
+  await until(() => frame().includes('Clustered Index Scan(OBJECT:([ClubA].[dbo].[Players]'), 'the plan');
+  assert.doesNotMatch(frame(), /rows affected/);
+  app.stdin.write(KEYS.esc);
+  await until(() => !frame().includes('╭─ Plan:'), 'the plan closed');
+  // SHOWPLAN is off again: a query gives rows, not a plan.
+  await type(app.stdin, '!SELECT TOP (2) * FROM dbo.Clubs');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('Club A FC'), 'rows again');
+  app.unmount();
+});
+
 test('e in History puts the statement in the console to edit', async () => {
   const app = start();
   await until(() => frame().includes('Clubs'), 'the explorer');

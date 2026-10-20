@@ -25,6 +25,7 @@ Query, the console (a SQL editor, kept between sessions)
   ctrl+r           Run the selection, or the statement under the cursor (marked ▌ in the gutter); the results show below
   R                Run the whole console
   j k  g G         Move between lines (when not typing)
+  p                Its estimated plan, as text (/plan): nothing runs
   f                Format the statement under the cursor (or the selection): a clause a line, keywords in capitals
   ctrl+f  n N      Find (/search <text>) · the next match · the previous one (n N when not typing)
   Typing           arrows · home/end or ctrl+a/ctrl+e · ctrl+u/ctrl+k cut to start/end · tab two spaces
@@ -92,7 +93,7 @@ Slash commands
   /import datagrip [folder]   /connect <name>   /add <name> <server> [database] [--user u] [--domain d] [--folder f] [--prod] [--commit auto|manual] [--trust-cert]
   /forget <name>   /folder <connection> [folder]   /password [connection]   /disconnect   /use <database>   /open <file.sql>   /console   /new   /format   /search <text>   /save <file.sql>
   /describe <table>   /script <name>   /find [text]
-  /export <file>   /filter [text]   /copy [format]   /limit [rows]   /writes   /tx [auto|manual]   /commit   /rollback   /ask <question>   /ai   /update   /settings   /last   /refresh   /help   /quit
+  /export <file>   /filter [text]   /copy [format]   /limit [rows]   /writes   /tx [auto|manual]   /commit   /rollback   /ask <question>   /ai   /update   /settings   /stats [on|off]   /plan [sql]   /last   /refresh   /help   /quit
 
 Viewer (describe, records, output, this help)
   j k  space  g G  Scroll         esc / q     Close`;

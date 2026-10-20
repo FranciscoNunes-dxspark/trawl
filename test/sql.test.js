@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { classify, classifyScript, countQuery, viewOrder, formatValue, mask, oneLine, quoteIdent, splitBatches, splitStatements, statementAt, toCsv, toJson, withoutLeadingComments } from '../src/sql.js';
+import { classify, classifyScript, countQuery, statisticsSummary, viewOrder, formatValue, mask, oneLine, quoteIdent, splitBatches, splitStatements, statementAt, toCsv, toJson, withoutLeadingComments } from '../src/sql.js';
 
 const texts = (list) => list.map((s) => s.text);
 
@@ -147,4 +147,19 @@ test('viewOrder filters and sorts a result set without touching its rows', () =>
   assert.deepEqual(viewOrder(set, { sort: { col: 0, dir: 1 } }), [1, 3, 2, 0]);
   assert.deepEqual(viewOrder(set, { filter: 'A' }), [1, 2]);
   assert.deepEqual(viewOrder(set, { filter: '10', sort: { col: 0, dir: -1 } }), [0, 3]);
+});
+
+test('statisticsSummary makes STATISTICS IO and TIME messages one line', () => {
+  const messages = [
+    'SQL Server parse and compile time: \n   CPU time = 0 ms, elapsed time = 2 ms.',
+    "Table 'Players'. Scan count 1, logical reads 3, physical reads 0, page server reads 0, read-ahead reads 0.",
+    "Table 'Worktable'. Scan count 0, logical reads 0, physical reads 0.",
+    "Table 'Clubs'. Scan count 1, logical reads 12, physical reads 1.",
+    ' SQL Server Execution Times:\n   CPU time = 15 ms,  elapsed time = 21 ms.',
+    "Table 'Players'. Scan count 1, logical reads 3, physical reads 0.",
+    ' SQL Server Execution Times:\n   CPU time = 1 ms,  elapsed time = 4 ms.',
+    '(3 rows affected)',
+  ];
+  assert.deepEqual(statisticsSummary(messages), { summary: 'Logical reads: Clubs 12, Players 6 · CPU 16 ms · elapsed 25 ms', messages: ['(3 rows affected)'] });
+  assert.deepEqual(statisticsSummary(['hello']), { summary: null, messages: ['hello'] });
 });

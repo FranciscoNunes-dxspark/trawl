@@ -453,3 +453,36 @@ export function viewOrder(set, { sort = null, filter = '' } = {}) {
   if (sort) order.sort((x, y) => compareValues(set.rows[x][sort.col], set.rows[y][sort.col]) * sort.dir || x - y);
   return order;
 }
+
+const IO_LINE = /^Table '([^']+)'\. Scan count \d+, logical reads (\d+)/;
+const TIME_LINE = /SQL Server Execution Times:\s*CPU time = (\d+) ms,\s*elapsed time = (\d+) ms/;
+const COMPILE_LINE = /SQL Server parse and compile time:/;
+
+/**
+ * SET STATISTICS IO and TIME's messages, one or more per statement, made into one line: the
+ * logical reads per table (most first) and the CPU and elapsed time added up. { summary, messages }
+ * with the other messages kept; summary is null when there were none of those.
+ */
+export function statisticsSummary(messages) {
+  const reads = new Map();
+  let cpu = 0;
+  let elapsed = 0;
+  let found = false;
+  const rest = [];
+  for (const msg of messages) {
+    const text = String(msg).trim();
+    let m;
+    if ((m = text.match(IO_LINE))) {
+      found = true;
+      if (m[1] !== 'Worktable' || Number(m[2])) reads.set(m[1], (reads.get(m[1]) ?? 0) + Number(m[2]));
+    } else if ((m = text.match(TIME_LINE))) {
+      found = true;
+      cpu += Number(m[1]);
+      elapsed += Number(m[2]);
+    } else if (COMPILE_LINE.test(text)) found = true;
+    else rest.push(msg);
+  }
+  if (!found) return { summary: null, messages };
+  const tables = [...reads].sort((x, y) => y[1] - x[1]).map(([t, n]) => `${t} ${n.toLocaleString('en')}`);
+  return { summary: `Logical reads: ${tables.join(', ') || 'none'} · CPU ${cpu} ms · elapsed ${elapsed} ms`, messages: rest };
+}

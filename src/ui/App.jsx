@@ -13,7 +13,7 @@ import { connect as openSession } from '../db.js';
 import { changesText, editTarget } from '../edit.js';
 import { HELP } from '../help.js';
 import { SCHEMA_SQL, buildSchema } from '../schema.js';
-import { qualified, splitStatements } from '../sql.js';
+import { qualified, splitStatements, statisticsSummary } from '../sql.js';
 import { BULLET, theme } from '../theme.js';
 import { fitSegments, stringWidth } from '../text.js';
 import { useTerminalSize } from './hooks.js';
@@ -59,6 +59,12 @@ const NO_CHANGES = { cells: new Map(), deletes: new Set() };
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
 /** The activity line under a run: "12 rows · 3 rows affected · 41 ms". */
+// STATISTICS IO and TIME (/stats) send several messages a statement: one line says it all.
+function withStatistics(res) {
+  const { summary, messages } = statisticsSummary(res.messages ?? []);
+  return summary ? { ...res, messages: [summary, ...messages] } : res;
+}
+
 function summarize(res, limit) {
   const parts = res.sets.map((s) => (s.truncated ? `first ${s.rows.length} rows (the limit is ${limit})` : plural(s.rows.length, 'row')));
   return [[...parts, ...res.messages.filter((m) => /rows? affected$/.test(m)), `${res.ms} ms`].join(' · '), ...res.messages.filter((m) => !/rows? affected$/.test(m))];
@@ -82,6 +88,7 @@ function Header({ session, tranCount, writesAllowed, file, width, connecting, mo
     // DataGrip's "Tx: Manual": writes wait for /commit.
     if (commitMode(conn) === 'manual') segs.push({ text: '  manual commit', color: theme.dim });
     if (tranCount) segs.push({ text: '  ' }, { text: ` TRANSACTION OPEN `, bg: theme.warn, color: theme.ink, bold: true });
+    if (session.stats) segs.push({ text: '  stats on', color: theme.dim });
   } else {
     segs.push({ text: connecting ? '  connecting…' : '  not connected', color: theme.dim });
   }
@@ -393,9 +400,9 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     let res = null;
     const r = await task(title, async (signal) => {
       try {
-        res = await s.run(sql, { signal, limit });
+        res = withStatistics(await s.run(sql, { signal, limit }));
       } catch (e) {
-        if (e.partial) res = { ...e.partial, error: e };
+        if (e.partial) res = withStatistics({ ...e.partial, error: e });
         if (e.line) e.message = `Line ${Math.max(1, lineBase + e.line - 1 - (wrapped ? 1 : 0))}: ${e.message}`;
         throw e;
       }

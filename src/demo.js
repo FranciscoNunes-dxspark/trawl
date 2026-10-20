@@ -142,6 +142,16 @@ async function runStatement(session, text, line, state, { signal, limit = 500 })
   };
   const s = withoutLeadingComments(text).replace(/;\s*$/, '').trim();
   let m;
+  // With SHOWPLAN on, a server explains statements instead of running them.
+  if ((m = s.match(/^SET\s+SHOWPLAN_TEXT\s+(ON|OFF)$/i))) return void (session.showplan = m[1].toUpperCase() === 'ON');
+  if (session.showplan) {
+    const t = /\b(?:FROM|INTO|UPDATE|TABLE|JOIN)\s+((?:\[[^\]]+\]|[\w#]+)(?:\.(?:\[[^\]]+\]|\w+))?)/i.exec(s);
+    const obj = t && findObject({ objects: db.tables }, t[1]);
+    state.sets.push(set(['StmtText'], [[s]]));
+    state.sets.push(set(['StmtText'], [[obj ? `  |--Clustered Index Scan(OBJECT:([${session.database}].[${obj.schema}].[${obj.name}].[PK_${obj.name}]))` : '  |--Constant Scan']]));
+    return;
+  }
+  if ((m = s.match(/^SET\s+STATISTICS\s+(IO|TIME)\s+(ON|OFF)$/i))) return void (session[`stats${m[1].toUpperCase()}`] = m[2].toUpperCase() === 'ON');
   if (/^SELECT\s+@@TRANCOUNT\b/i.test(s)) state.sets.push(set(['(No column name)'], [[session.tran]], ['IntN']));
   else if (/^BEGIN\s+TRAN(SACTION)?\b/i.test(s)) session.tran++;
   else if (/^COMMIT\b/i.test(s)) {
@@ -168,6 +178,8 @@ async function runStatement(session, text, line, state, { signal, limit = 500 })
       const out = set(t.columns.map((c) => c.name), rows.slice(0, limit), t.columns.map((c) => c.type));
       if (rows.length > limit) (out.truncated = true), (state.stopped = true);
       state.sets.push(out);
+      if (session.statsIO) state.messages.push(`Table '${t.name}'. Scan count 1, logical reads ${Math.ceil(t.rows.length / 8) + 1}, physical reads 0, page server reads 0, read-ahead reads 0.`);
+      if (session.statsTIME) state.messages.push(' SQL Server Execution Times:\n   CPU time = 0 ms,  elapsed time = 1 ms.');
       if (!/^SELECT\s+(TOP\s*\(?\s*\d+\s*\)?\s*)?\*\s+FROM\s+\S+$/i.test(s)) state.messages.push('The demo has no SQL engine: this shows the table as it is, without WHERE, JOIN or ORDER BY.');
     } else {
       const items = splitList(s.replace(/^SELECT\s+/i, '')).map((x) => selectItem(x, session));

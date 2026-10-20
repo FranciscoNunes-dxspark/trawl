@@ -386,6 +386,20 @@ test('ctrl+f finds text in the console and n finds the next one', async () => {
   app.unmount();
 });
 
+test('f formats the statement under the cursor, and ctrl+z puts it back', async () => {
+  mkdirSync(process.env.TRAWL_HOME, { recursive: true });
+  writeFileSync(join(process.env.TRAWL_HOME, 'console.sql'), 'select Name from dbo.Clubs where Id = 1 and Active = 1');
+  const app = start();
+  await until(() => frame().includes('Clubs'), 'the explorer');
+  app.stdin.write('2');
+  await until(() => frame().includes('select Name from'), 'the console');
+  app.stdin.write('f');
+  await until(() => /1 SELECT Name\s/.test(frame()) && /2 FROM dbo\.Clubs/.test(frame()) && /4\s+AND Active = 1/.test(frame()), 'the statement formatted');
+  app.stdin.write('\x1a');
+  await until(() => frame().includes('select Name from'), 'undone');
+  app.unmount();
+});
+
 test('e in History puts the statement in the console to edit', async () => {
   const app = start();
   await until(() => frame().includes('Clubs'), 'the explorer');

@@ -89,6 +89,7 @@ export function ConsoleView({ editor, editing, ctx, width, height, active }) {
       if (key.ctrl && input === 'y') return ctx.redoConsole();
       if (input === 'R') return runConsole(ctx, editor, { all: true });
       if (key.ctrl && input === 'f') return ctx.prefill('/search ');
+      if (input === 'f') return a.formatConsole(ctx);
       if (input === 'n' || input === 'N') return a.searchConsole(ctx, '', { back: input === 'N' });
       if (key.downArrow || input === 'j') return set(ed.move(editor, { rows: 1 }));
       if (key.upArrow || input === 'k') return set(ed.move(editor, { rows: -1 }));
@@ -271,7 +272,7 @@ export function ConsoleView({ editor, editing, ctx, width, height, active }) {
       ? 'selected · ctrl+r runs just this · typing replaces it · esc let go'
       : editing
       ? 'typing · ctrl+space suggest · ctrl+r run · ctrl+z undo · esc stop'
-      : `${editor.lines.length} lines · ↵ type · ctrl+r run · R run all · ctrl+f find`;
+      : `${editor.lines.length} lines · ↵ type · ctrl+r run · R run all · f format · ctrl+f find`;
   return (
     <Panel title="Console" hint={hint} width={width} height={height} focused={active}>
       {empty && !editing ? (

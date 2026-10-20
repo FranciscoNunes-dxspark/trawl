@@ -5,10 +5,11 @@ import { extname, resolve } from 'node:path';
 import { ADD_USAGE, cleanFolder, commitMode, describeConn, isReadOnly, parseAddArgs } from './connections.js';
 import * as ed from './editor.js';
 import { findDataSources, importPlan, planText } from './datagrip.js';
+import { formatSql } from './format.js';
 import { changesText, saveScript, withSaved } from './edit.js';
 import { AI_LABELS, AI_LEVELS, aiLevel, askPrompt, canSeeSchema, consoleText, parseAnswer } from './ai.js';
 import { describeObject, findObject, objectName } from './schema.js';
-import { classifyScript, oneLine, selectTop, toCsv, toJson } from './sql.js';
+import { classifyScript, oneLine, selectTop, splitStatements, statementAt, toCsv, toJson } from './sql.js';
 
 const YES_NO = (yes) => [
   { label: yes, value: true },
@@ -376,6 +377,28 @@ export function searchConsole(ctx, text, { back = false } = {}) {
   ctx.showConsole();
   const next = ed.find(ctx.console, query, { back });
   if (!next) return ctx.note(`"${query}" isn't in the console.`, 'error');
+  ctx.setConsole(next);
+}
+
+/** /format and f in the console: lays out the selection, or the statement under the cursor (ctrl+z undoes it). */
+export function formatConsole(ctx) {
+  const e = ctx.console;
+  ctx.showConsole();
+  const sel = ed.selectedText(e);
+  const st = sel ? null : statementAt(splitStatements(ed.toText(e)), e.row + 1);
+  const source = sel?.text ?? st?.text;
+  if (!source?.trim()) return ctx.note('Nothing to format: the console is empty.', 'error');
+  const out = formatSql(source);
+  if (out == null) return ctx.note('Trawl formats queries (SELECT, INSERT, UPDATE, DELETE, MERGE), not procedures, blocks or SET options.', 'error');
+  let next;
+  if (sel) next = ed.insert(e, out);
+  else {
+    const [first, last] = [st.line - 1, st.endLine - 1];
+    if (e.lines.slice(first, last + 1).join('\n').trim() !== st.text) return ctx.note('That statement shares a line with another: select it (shift+arrows) to format it.', 'error');
+    const lead = e.lines[first].match(/^\s*/)[0];
+    next = { lines: [...e.lines.slice(0, first), ...out.split('\n').map((l) => lead + l), ...e.lines.slice(last + 1)], row: first, col: lead.length };
+  }
+  if (ed.toText(next) === ed.toText(e)) return ctx.note('It is formatted already.');
   ctx.setConsole(next);
 }
 

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ADD_USAGE, isReadOnly, parseAddArgs, parseServer, splitArgs, tediousConfig } from '../src/connections.js';
+import { ADD_USAGE, commitMode, connectionRows, isReadOnly, parseAddArgs, parseServer, splitArgs, tediousConfig } from '../src/connections.js';
 import { buildSchema, describeObject, findObject, typeLabel } from '../src/schema.js';
 import { demoSession } from '../src/demo.js';
 import { SCHEMA_SQL } from '../src/schema.js';
@@ -70,9 +70,29 @@ test('/add arguments', () => {
   assert.equal(parseAddArgs('x srv --ai results').ai, 'results');
   assert.throws(() => parseAddArgs('x srv --ai everything'), /--ai is off, schema or results/);
   assert.throws(() => parseAddArgs('only-a-name'), { message: ADD_USAGE });
-  assert.throws(() => parseAddArgs('x srv --user sa'), /password-env/);
+  // No --password-env: Trawl asks for the password when connecting and keeps it in the OS store.
+  assert.deepEqual(parseAddArgs('x srv --user sa'), { name: 'x', server: 'srv', auth: 'sql', user: 'sa' });
+  assert.equal(parseAddArgs('x srv --folder " PROD / Clubs "').folder, 'PROD/Clubs');
+  assert.equal('folder' in parseAddArgs('x srv --folder /'), false);
   assert.throws(() => parseAddArgs('x srv --bogus'), /Unknown option/);
   assert.deepEqual(splitArgs('a "b c" d'), ['a', 'b c', 'd']);
+});
+
+test('connections list by folder, folders first and by name, then the rest', () => {
+  const rows = connectionRows([{ name: 'loose' }, { name: 'b1', folder: 'QA' }, { name: 'p1', folder: 'PROD' }, { name: 'b2', folder: 'QA' }]);
+  assert.deepEqual(
+    rows.map((r) => (r.folder ? `${r.folder}/ ${r.count}` : `${r.inFolder ? '  ' : ''}${r.conn.name}`)),
+    ['PROD/ 1', '  p1', 'QA/ 2', '  b1', '  b2', 'loose'],
+  );
+  assert.deepEqual(connectionRows([]), []);
+});
+
+test('commit modes: production waits for /commit unless it says otherwise', () => {
+  assert.equal(commitMode({}), 'auto');
+  assert.equal(commitMode({ prod: true }), 'manual');
+  assert.equal(commitMode({ prod: true, commit: 'auto' }), 'auto');
+  assert.equal(parseAddArgs('x srv --commit manual').commit, 'manual');
+  assert.throws(() => parseAddArgs('x srv --commit later'), /--commit is auto or manual/);
 });
 
 test('production is read-only unless it says otherwise', () => {

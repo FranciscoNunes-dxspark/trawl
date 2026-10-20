@@ -66,19 +66,26 @@ Save connections with `/add`:
 | --- | --- |
 | Azure SQL, signing in with your `az login` | `/add club-a myserver.database.windows.net ClubA` |
 | The same, as production | `/add club-a-prod myserver.database.windows.net ClubA --prod` |
-| A SQL login | `/add local localhost,1433 Dev --user sa --password-env SA_PASSWORD --trust-cert` |
-| Windows (NTLM) | `/add corp sqlhost\SQLEXPRESS Dev --user me --domain CORP --password-env CORP_PW` |
+| A SQL login | `/add local localhost,1433 Dev --user sa --trust-cert` |
+| Windows (NTLM) | `/add corp sqlhost\SQLEXPRESS Dev --user me --domain CORP` |
+| In a folder | `/add club-b srv.database.windows.net ClubB --folder Clubs/PROD` |
 
-Trawl never stores a password or token. Azure SQL gets a fresh token from the Azure CLI each time it connects. A SQL or Windows login reads its password from the environment variable you name. Connections live in `~/.trawl/config.json` (or `TRAWL_HOME`), along with the prompt history, the run history and the row limit.
+Azure SQL gets a fresh token from the Azure CLI each time it connects, so there's no password to keep. A SQL or Windows login asks for its password the first time you connect, shown as `*`. With "Keep it" ticked (`tab` changes it), a password that signs in is saved in the operating system's credential store: **Windows Credential Manager** (as `Trawl:<connection>`), the macOS Keychain, or the Secret Service keyring on Linux (through `secret-tool`). It is never written to Trawl's own files. A saved password the server turns down is asked for again. `p` in Connections, or `/password [connection]`, sets a new one ahead of time; leaving it empty removes the saved one, and forgetting a connection removes its password too. If you'd rather keep a password in an environment variable, `/add … --password-env <VAR>` names it, and the variable comes first when it's set.
+
+Connections live in `~/.trawl/config.json` (or `TRAWL_HOME`), along with the prompt history, the run history and the row limit.
+
+### Folders
+
+The Connections tab groups connections by folder, as DataGrip does: each folder's heading, its connections under it, and the ones in no folder last. `--folder` puts a connection in one when adding it, and `f` in Connections or `/folder <connection> <folder>` moves it; `/folder <connection>` with no folder takes it out. Nested folders are written with `/`, like `Clubs/PROD`.
 
 ### From DataGrip
 
 `/import datagrip` brings in your DataGrip data sources as connections. It reads the places DataGrip keeps them (its projects in `DataGripProjects`, its global data sources, and the per-project history newer versions use) and shows what it would add before adding anything. `/import datagrip <folder>` reads one project's `.idea` instead.
 
-- SQL Server and Azure SQL data sources come across with their server, database, login name and options (trust certificate, encryption, Entra sign-in). Others (Postgres, CockroachDB, MySQL…) are listed as skipped.
-- **Passwords don't**: DataGrip keeps them encrypted in its own store, which Trawl never opens. Each SQL login gets a password variable named after it (`TRAWL_PW_FUNDS` for `funds`), to set once before connecting, for example in PowerShell: `[Environment]::SetEnvironmentVariable('TRAWL_PW_FUNDS', '<password>', 'User')`.
-- Data sources in a DataGrip folder called PROD (or with prod in the name) become production connections, read-only until `/writes`; DataGrip's own read-only flag carries over too.
-- Importing again only adds what's new: one Trawl already has (same server, database and login) is skipped.
+- SQL Server and Azure SQL data sources come across with their server, database, login name, options (trust certificate, encryption, Entra sign-in) and **DataGrip folder**. Others (Postgres, CockroachDB, MySQL…) are listed as skipped.
+- **Passwords don't**: DataGrip keeps them encrypted in its own store, which Trawl never opens. Trawl asks for each login's password the first time you connect, and keeps it in the OS credential store (see above).
+- Data sources in a DataGrip folder called PROD (or with prod in the name) become production connections, read-only until `/writes`; DataGrip's own read-only flag and manual commit (Tx: Manual) carry over too.
+- Importing again only adds what's new: one Trawl already has (same server, database and login) is skipped. If that one is in no folder yet, it goes into its DataGrip folder, so connections imported before Trawl had folders get theirs by running `/import datagrip` again.
 
 `/use <database>` switches database by reconnecting. That works on Azure SQL Database too, where `USE` doesn't.
 
@@ -93,9 +100,9 @@ Press `?` inside for every shortcut. The essentials:
 | Explorer | `↵` first rows · `d` describe · `s` start a query on it in the console · `/find <text>` filter |
 | Query, the console | `↵` or `i` start typing · `esc` stop · `ctrl+r` run the statement under the cursor · `R` run it all |
 | Query, a file | `↵` run the statement under the cursor · `v` select several · `R` run the whole file · `e` edit in the console |
-| Results | `h`/`l` columns · `[`/`]` result sets · `↵` the row as a record · `x` export |
+| Results | `h`/`l` columns · `[`/`]` result sets · `↵` the row as a record · `e` edit · `n` NULL · `d` delete · `u` undo · `s` save · `x` export |
 | History | `↵` run again · `e` edit in the console · `◆` marks what Claude ran |
-| Connections | `↵` connect · `n` new · `x` forget |
+| Connections | `↵` connect · `n` new · `p` password · `f` folder · `x` forget |
 
 One-liners can also go straight in the prompt: SQL there runs with `!`, or without it when it starts with a SQL keyword (`select …`, `exec …`).
 
@@ -117,10 +124,22 @@ Errors say which line of the file they're on.
 
 Each result set stops at the row limit (500 to start with; `/limit <n>` changes it). Trawl cancels the query there instead of pulling the rest of the table over the network. `NULL` is shown as `NULL`, dates as `2026-10-19 15:14:35`, and binary as `0x…` hex. `/export <file.csv>` or `/export <file.json>` saves the result set on screen.
 
+### Editing results
+
+When the rows on screen are the rows of one table, with its primary key among the columns (`↵` on a table in the Explorer, or a `SELECT … FROM` one table with no join or grouping), you can change them in place, as in DataGrip:
+
+- `h`/`l` move between cells, and `e` (or `i`) edits the one under the cursor. `↵` keeps the new value, `tab` keeps it and moves on to the next column, and `esc` leaves the cell as it was.
+- `n` makes the cell `NULL`, and `d` marks the row to be deleted (`d` again keeps it).
+- Changes are only staged: they show in colour, with a count under the grid. `u` undoes the row's changes and `U` undoes them all.
+- `s` saves. Trawl shows the `UPDATE`/`DELETE` script and asks first. Each statement finds its row by the primary key and, for the columns it changes, by the values they had when you read them. If any row has changed or gone since then, nothing is saved. The script runs in a transaction of its own, so a failure doesn't roll back one you had open.
+- The usual rules apply: a read-only connection refuses it until `/writes`, and with manual commit the changes wait for `/commit`.
+
+Columns that are expressions or renamed in the query, identity columns and `rowversion` can't be edited. If something can't be edited, `e` says why.
+
 ### Safety
 
 - **Production is read-only.** On a connection added with `--prod`, anything that changes data is refused until `/writes`, which asks first and lasts until you disconnect.
-- **Production writes run in a transaction.** The first write starts one, and the header shows `TRANSACTION OPEN` until you `/commit` or `/rollback`. Disconnecting, switching database or quitting with a transaction open asks first, because it rolls back.
+- **Auto or manual commit, as DataGrip's Tx: Auto/Manual.** With manual commit, the first write starts a transaction, and the header shows `TRANSACTION OPEN` until you `/commit` or `/rollback`. With auto commit, each statement takes effect as it runs. Production connections use manual commit unless you change it. `/tx manual` or `/tx auto` switches the connection you're on and remembers it (switching production to auto asks first), `/add … --commit manual` sets it when adding, and a DataGrip data source set to manual comes across that way. Disconnecting, switching database or quitting with a transaction open asks first, because it rolls back.
 - **Risky statements ask first, on every connection**: `UPDATE` or `DELETE` with no `WHERE`, `DROP` and `TRUNCATE`.
 - A statement counts as a write when it has `INSERT`, `UPDATE`, `DELETE`, `MERGE`, `SELECT … INTO`, DDL, `GRANT`/`REVOKE`, `DBCC`, or `EXEC` of anything except the read-only system procedures (`sp_help`, `sp_who2`, `sp_spaceused` and the like).
 
@@ -128,7 +147,7 @@ Each result set stops at the row limit (500 to start with; `/limit <n>` changes 
 
 Type `/` and the menu narrows as you type. `tab` completes, `↑`/`↓` picks, `↵` runs. `/connect` completes connection names, `/use` database names and `/describe` tables and views.
 
-`/import datagrip [folder]` `/connect <name>` `/add …` `/forget <name>` `/disconnect` `/use <database>` `/open <file.sql>` `/console` `/new` `/save <file.sql>` `/describe <table>` `/find [text]` `/export <file>` `/limit [rows]` `/writes` `/commit` `/rollback` `/ask <question>` `/ai [connection] [level]` `/update` `/last` `/refresh` `/help` `/quit`
+`/import datagrip [folder]` `/connect <name>` `/add …` `/forget <name>` `/folder <connection> [folder]` `/password [connection]` `/disconnect` `/use <database>` `/open <file.sql>` `/console` `/new` `/save <file.sql>` `/describe <table>` `/find [text]` `/export <file>` `/limit [rows]` `/writes` `/tx [auto|manual]` `/commit` `/rollback` `/ask <question>` `/ai [connection] [level]` `/update` `/last` `/refresh` `/help` `/quit`
 
 ## Claude
 
@@ -160,7 +179,7 @@ claude mcp add --scope user trawl -- trawl mcp
 
 (From a checkout without `npm link`: `claude mcp add --scope user trawl -- node C:\Team\Trawl\bin\trawl.js mcp`.) It gives Claude `list_connections`, `list_tables`, `describe_table` and `run_query`.
 
-- Claude signs in exactly as you do (your `az login`, or the password variable you named); it never sees a password.
+- Claude signs in exactly as you do (your `az login`, or the password saved in the OS credential store or named variable); it never sees a password. A login with no saved password can't be used until you've connected to it once in Trawl.
 - **It only reads.** Anything the write check flags is refused before it reaches the database, on every connection, production or not. As a second lock, every query runs inside a transaction that is rolled back. The check reads the SQL text, so for connections Claude uses, a login with read-only rights (`db_datareader`) is the surest guard.
 - `run_query` only returns rows from connections at the `results` level; on `schema` ones Claude gets the names and writes queries you run.
 - Results stop at 100 rows unless Claude asks for more (1000 at most).

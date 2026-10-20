@@ -4,15 +4,18 @@
 import { Connection, Request } from 'tedious';
 import { azureSqlToken } from './azure.js';
 import { tediousConfig } from './connections.js';
+import { STORE_NAME, osCredentials } from './credentials.js';
 import { demoSession } from './demo.js';
 import { splitBatches } from './sql.js';
 
 export class DbError extends Error {
-  constructor(message, { number = null, line = null, cancelled = false, partial = null } = {}) {
+  constructor(message, { number = null, line = null, cancelled = false, partial = null, needsPassword = false } = {}) {
     super(message);
     this.number = number;
     this.line = line;
     this.cancelled = cancelled;
+    // No password to sign in with, or the saved one was turned down: the app asks for one.
+    this.needsPassword = needsPassword;
     // What had already come back when it failed: { sets, messages }.
     this.partial = partial;
   }
@@ -28,15 +31,27 @@ function toDbError(err, lineOffset = 0) {
 /**
  * Opens a session on `conn` (in `database`, when given). Resolves with
  * { conn, database, run(text, { signal, limit }), tranCount(), close(), onEnd }.
+ * A login's password is `password` when given, else its environment variable, else the one
+ * saved in the OS credential store (`credentials`).
  */
-export async function connect(conn, { database = conn.database, signal } = {}) {
+export async function connect(conn, { database = conn.database, signal, password, credentials = osCredentials } = {}) {
   if (conn.demo) return demoSession(conn, { database });
   const secrets = {};
+  let from = 'given';
   if (conn.auth === 'azure-cli') secrets.token = await azureSqlToken({ signal });
   else {
-    const password = process.env[conn.passwordEnv];
-    if (password == null) throw new DbError(`Set the ${conn.passwordEnv} environment variable to the password for ${conn.user}, then connect again.`);
-    secrets.password = password;
+    let pw = password;
+    if (pw == null && conn.passwordEnv && process.env[conn.passwordEnv] != null) [pw, from] = [process.env[conn.passwordEnv], 'env'];
+    let storeError = '';
+    if (pw == null) {
+      from = 'store';
+      pw = await credentials.get(conn.name, { signal }).catch((e) => ((storeError = ` (${e.message})`), null));
+    }
+    if (pw == null) {
+      const env = conn.passwordEnv ? `, or set $${conn.passwordEnv}` : '';
+      throw new DbError(`No password saved for ${conn.user} on ${conn.name}${storeError}. Connect in Trawl once to enter it (it keeps it in ${STORE_NAME})${env}.`, { needsPassword: true });
+    }
+    secrets.password = pw;
   }
   const connection = new Connection(tediousConfig(conn, { ...secrets, database }));
   await new Promise((resolve, reject) => {
@@ -45,7 +60,11 @@ export async function connect(conn, { database = conn.database, signal } = {}) {
     connection.connect((err) => {
       signal?.removeEventListener('abort', onAbort);
       if (signal?.aborted) return reject(new DbError('Cancelled', { cancelled: true }));
-      err ? reject(toDbError(err)) : resolve();
+      if (!err) return resolve();
+      const e = toDbError(err);
+      // A wrong password from the environment is yours to fix there; a saved or typed one is asked again.
+      if (secrets.password != null && from !== 'env' && /login failed/i.test(e.message)) e.needsPassword = true;
+      reject(e);
     });
   });
   return tediousSession(conn, connection, database);

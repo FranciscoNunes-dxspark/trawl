@@ -170,6 +170,14 @@ export function demoSession(conn, { database } = {}) {
         script,
         async (batch, line, state) => {
           if (batch.startsWith('-- trawl:schema')) return void state.sets.push(...schemaSets(session.database));
+          // Saved edits (edit.js) come as one TRY/CATCH batch, which the demo has no engine for: it
+          // counts the rows, as for other writes. Its own transaction opens and closes inside it.
+          const edit = batch.indexOf('-- trawl:edit');
+          if (edit >= 0) {
+            if (/^\s*BEGIN\s+TRAN/i.test(batch.slice(0, edit))) session.tran++;
+            for (const _ of batch.matchAll(/^\s*(UPDATE|DELETE)\b/gim)) state.messages.push('1 row affected');
+            return void state.messages.push('(Demo: nothing was changed.)');
+          }
           for (const st of splitStatements(batch)) {
             await runStatement(session, st.text, line + st.line - 1, state, opts);
             if (state.stopped) return;

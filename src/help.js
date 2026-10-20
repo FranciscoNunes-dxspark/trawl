@@ -39,14 +39,21 @@ Results
   [ ]              Previous, next result set
   ↵                The row as a record, one column per line
   x                Export (/export <file.csv|file.json>)
+  Editing (the rows of one table, with its primary key: ↵ in the Explorer, or SELECT … FROM one table)
+  e or i           Edit the cell: ↵ keeps it, tab keeps it and edits the next column, esc leaves it
+  n                Make the cell NULL           d           Mark the row to delete (again: keep it)
+  u                Undo the row's changes       U           Undo them all
+  s                Save: shows the UPDATE/DELETE script and asks; each must find its row unchanged, or none is saved
 
 History (every statement that ran, newest first; ◆ marks what Claude ran through trawl mcp)
   ↵                Run it again (the same checks apply)
   e                Copy it into the console to edit
 
-Connections (/import datagrip brings in DataGrip's data sources)
+Connections (in folders; /import datagrip brings in DataGrip's data sources and folders)
   ↵                Connect         n           New (/add …)
-  x                Forget
+  p                Password: saved in the OS credential store (Trawl also asks when you connect)
+  f                Move to a folder (/folder <connection> [folder])
+  x                Forget (and its saved password)
 
 Claude
   /ask <question>  Claude writes a query from the schema; it lands in the console, and nothing runs until ctrl+r
@@ -55,7 +62,8 @@ Claude
 
 Safety
   A production connection (/add … --prod) is read-only: writes are refused until /writes.
-  Then each write starts a transaction: /commit keeps it, /rollback undoes it.
+  /tx manual (production's default, as DataGrip's Tx: Manual): a write starts a transaction,
+  /commit keeps it, /rollback undoes it. /tx auto commits each statement as it runs.
   UPDATE or DELETE with no WHERE, DROP and TRUNCATE always ask first.
 
 Prompt
@@ -64,10 +72,10 @@ Prompt
   ctrl+u ctrl+w    Clear the line · Delete a word
 
 Slash commands
-  /import datagrip [folder]   /connect <name>   /add <name> <server> [database] [--user u --password-env VAR] [--domain d] [--prod] [--trust-cert]
-  /forget <name>   /disconnect   /use <database>   /open <file.sql>   /console   /new   /save <file.sql>
+  /import datagrip [folder]   /connect <name>   /add <name> <server> [database] [--user u] [--domain d] [--folder f] [--prod] [--commit auto|manual] [--trust-cert]
+  /forget <name>   /folder <connection> [folder]   /password [connection]   /disconnect   /use <database>   /open <file.sql>   /console   /new   /save <file.sql>
   /describe <table>   /find [text]
-  /export <file>   /limit [rows]   /writes   /commit   /rollback   /ask <question>   /ai   /update   /last   /refresh   /help   /quit
+  /export <file>   /limit [rows]   /writes   /tx [auto|manual]   /commit   /rollback   /ask <question>   /ai   /update   /last   /refresh   /help   /quit
 
 Viewer (describe, records, output, this help)
   j k  space  g G  Scroll         esc / q     Close`;

@@ -7,6 +7,9 @@ import { join } from 'node:path';
 import React from 'react';
 import { render } from 'ink-testing-library';
 import { DEMO_CONNECTIONS } from '../src/connections.js';
+import { memoryCredentials } from '../src/credentials.js';
+import { DbError } from '../src/db.js';
+import { demoSession } from '../src/demo.js';
 import { App } from '../src/ui/App.jsx';
 
 const KEYS = { down: '\x1b[B', enter: '\r', esc: '\x1b' };
@@ -103,6 +106,28 @@ test('production refuses writes until /writes, then opens a transaction', async 
   app.unmount();
 });
 
+test('/tx manual: a write opens a transaction to /commit or /rollback, as DataGrip’s Tx: Manual', async () => {
+  const app = start();
+  await until(() => frame().includes('Clubs'), 'the explorer');
+  await type(app.stdin, '/tx manual');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('demo now commits manually') && frame().includes('manual commit'), 'manual mode in the header');
+  await type(app.stdin, '!UPDATE dbo.Players SET Goals = 0 WHERE Id = 1');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('TRANSACTION OPEN') && frame().includes('demo commits manually'), 'the open transaction');
+  await type(app.stdin, '/tx auto');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('A transaction is open: /commit or /rollback it first.'), 'the refusal');
+  await type(app.stdin, '/rollback');
+  app.stdin.write(KEYS.enter);
+  await until(() => !frame().includes('TRANSACTION OPEN'), 'the rollback');
+  // Back to auto (the demo's connections are shared by every test in this file).
+  await type(app.stdin, '/tx auto');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('demo now commits each statement as it runs') && !frame().includes('manual commit'), 'auto again');
+  app.unmount();
+});
+
 test('esc cancels a running query', async () => {
   const app = start();
   await until(() => frame().includes('Clubs'), 'the explorer');
@@ -196,7 +221,7 @@ test('e in History puts the statement in the console to edit', async () => {
   app.stdin.write(KEYS.enter);
   await until(() => frame().includes('seven'), 'the result');
   app.stdin.write('4');
-  await until(() => frame().includes('History'), 'history');
+  await until(() => frame().includes('╭─ History'), 'history');
   app.stdin.write('e');
   await until(() => frame().includes('typing SQL') && /│\s*▌?\s*\d+ SELECT 7 AS seven/.test(frame()), 'the statement in the console');
   app.unmount();
@@ -248,8 +273,151 @@ test('/import datagrip previews, asks, then adds the connections', async () => {
   assert.match(frame(), /funds +funds\.database\.windows\.net\/fundsdb {2}PROD/);
   assert.match(frame(), /postgresql isn't supported yet/);
   app.stdin.write('1');
-  await until(() => frame().includes('Added 1 connection from DataGrip') && frame().includes('PROD'), 'the added connection');
+  await until(() => frame().includes('Added 1 connection from DataGrip') && frame().includes('▾ PROD/'), 'the added connection, in its folder');
   const saved = JSON.parse(readFileSync(join(process.env.TRAWL_HOME, 'config.json'), 'utf8'));
-  assert.deepEqual(saved.connections.find((c) => c.name === 'funds').passwordEnv, 'TRAWL_PW_FUNDS');
+  const funds = saved.connections.find((c) => c.name === 'funds');
+  assert.equal(funds.folder, 'PROD');
+  assert.equal(funds.passwordEnv, undefined, 'the password is asked for, not read from a variable');
+  app.unmount();
+});
+
+test('Results: edit a cell, delete a row, see the script, save', async () => {
+  const app = start();
+  await until(() => frame().includes('Clubs'), 'the explorer');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('Club A FC'), 'the rows of Clubs');
+  app.stdin.write('e');
+  await until(() => frame().includes('Id is an identity column'), 'the refusal on the identity key');
+  app.stdin.write('l');
+  await new Promise((r) => setTimeout(r, 50));
+  app.stdin.write('e');
+  await until(() => frame().includes('editing the cell'), 'typing in the cell');
+  app.stdin.write('\x15'); // ctrl+u clears it; digits and q are text here
+  await type(app.stdin, 'Club Q1');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('1 edited row not saved'), 'the staged change');
+  assert.match(frame(), /Club Q1/);
+  app.stdin.write(KEYS.down);
+  await new Promise((r) => setTimeout(r, 50));
+  app.stdin.write('d');
+  await until(() => frame().includes('1 edited row and 1 deletion not saved'), 'the staged deletion');
+  app.stdin.write('s');
+  await until(() => frame().includes('Save 1 edited row and 1 deletion to dbo.Clubs on demo?'), 'the question');
+  assert.match(frame(), /UPDATE \[dbo\]\.\[Clubs\] SET \[Name\] = N'Club Q1' WHERE \[Id\] = 1 AND \[Name\] = N'Club A FC';/);
+  assert.match(frame(), /DELETE FROM \[dbo\]\.\[Clubs\] WHERE \[Id\] = 2;/);
+  app.stdin.write('1');
+  await until(() => frame().includes('save 1 edited row and 1 deletion to dbo.Clubs') && frame().includes('2 rows'), 'saved, with the grid updated');
+  assert.match(frame(), /Club Q1/);
+  assert.doesNotMatch(frame(), /Atlético Norte/);
+  assert.doesNotMatch(frame(), /not saved/);
+  app.unmount();
+});
+
+test('Results: rows that aren’t one table’s say why they can’t be edited', async () => {
+  const app = start();
+  await until(() => frame().includes('Clubs'), 'the explorer');
+  await type(app.stdin, '!SELECT ClubId, COUNT(*) AS n FROM dbo.Players GROUP BY ClubId');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('12 rows ·'), 'the results');
+  app.stdin.write('e');
+  await until(() => frame().includes("These rows can't be edited: it isn’t the rows of one table"), 'the reason');
+  app.unmount();
+});
+
+test('importing again files the connections Trawl already has into their DataGrip folders', async () => {
+  const findDataSources = () => [{ uuid: '1', name: 'FUNDS', group: 'PROD', url: 'jdbc:sqlserver://funds.database.windows.net;database=fundsdb', user: 'fundsapp' }];
+  const old = { name: 'funds', server: 'funds.database.windows.net', database: 'fundsdb', auth: 'sql', user: 'fundsapp', passwordEnv: 'TRAWL_PW_FUNDS', prod: true };
+  const config = { connections: [old, ...DEMO_CONNECTIONS], history: [], ran: [], limit: 500, last: null };
+  const app = (lastApp = render(React.createElement(App, { config, findDataSources })));
+  await until(() => frame().includes('Connections'), 'the connections');
+  await type(app.stdin, '/import datagrip');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes("Put 1 connection into DataGrip's folders?"), 'the question');
+  app.stdin.write('1');
+  await until(() => frame().includes("Filed 1 connection in DataGrip's folders") && frame().includes('▾ PROD/'), 'the folder');
+  const saved = JSON.parse(readFileSync(join(process.env.TRAWL_HOME, 'config.json'), 'utf8')).connections.find((c) => c.name === 'funds');
+  assert.equal(saved.folder, 'PROD');
+  assert.equal(saved.passwordEnv, undefined, 'the unset variable an earlier import named gives way to the credential store');
+  app.unmount();
+});
+
+// A SQL login on a pretend server: the password "right" signs in, to the demo's data.
+const LOGIN = { name: 'club-sql', server: 'srv', database: 'ClubA', auth: 'sql', user: 'sa' };
+const fakeOpen = async (conn, { database, password, credentials }) => {
+  if (conn.demo) return demoSession(conn, { database });
+  const pw = password ?? (await credentials.get(conn.name));
+  if (pw == null) throw new DbError('No password saved.', { needsPassword: true });
+  if (pw !== 'right') throw new DbError("Login failed for user 'sa'.", { needsPassword: true });
+  return demoSession({ ...conn, demo: true }, { database });
+};
+const startWith = (connections, props) => {
+  const config = { connections, history: [], ran: [], limit: 500, last: null };
+  lastApp = render(React.createElement(App, { config, ...props }));
+  return lastApp;
+};
+
+test('a login asks for its password, again when it is wrong, and keeps the one that works', async () => {
+  const credentials = memoryCredentials();
+  const app = startWith([LOGIN], { initialConnection: 'club-sql', open: fakeOpen, credentials });
+  await until(() => frame().includes('Password for sa on club-sql'), 'the password prompt');
+  assert.match(frame(), /\[x\] Keep it in memory/);
+  await type(app.stdin, 'nope42');
+  assert.match(frame(), /> \*{6} /);
+  assert.doesNotMatch(frame(), /nope42/, 'what is typed never shows');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('Login failed. Password for sa on club-sql'), 'the second try');
+  assert.equal(credentials.saved.size, 0, 'a turned-down password is not kept');
+  await type(app.stdin, 'right');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('Clubs') && frame().includes('Saved the password for club-sql in memory'), 'connected, and the password kept');
+  assert.equal(credentials.saved.get('club-sql'), 'right');
+  app.unmount();
+  // Next time the saved one is used without asking.
+  startWith([LOGIN], { initialConnection: 'club-sql', open: fakeOpen, credentials });
+  await until(() => frame().includes('Clubs'), 'the explorer, with no prompt');
+  assert.doesNotMatch(frame(), /Password for/);
+  lastApp.unmount();
+});
+
+test('tab leaves the password out of the store; esc cancels', async () => {
+  const credentials = memoryCredentials();
+  const app = startWith([LOGIN], { initialConnection: 'club-sql', open: fakeOpen, credentials });
+  await until(() => frame().includes('Password for sa on club-sql'), 'the password prompt');
+  app.stdin.write(KEYS.esc);
+  await until(() => !frame().includes('Password for sa'), 'the prompt gone');
+  await type(app.stdin, '/connect club-sql');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('Password for sa on club-sql'), 'the prompt again');
+  app.stdin.write('\t');
+  await until(() => frame().includes('[ ] Keep it in memory'), 'keep it unticked');
+  await type(app.stdin, 'right');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('Clubs'), 'connected');
+  assert.equal(credentials.saved.size, 0);
+  app.unmount();
+});
+
+test('/password saves one, /folder files a connection, and the window title follows the session', async () => {
+  const credentials = memoryCredentials();
+  const titles = [];
+  const app = startWith([LOGIN, { name: 'az', server: 'x.database.windows.net', auth: 'azure-cli' }, ...DEMO_CONNECTIONS], { open: fakeOpen, credentials, setTitle: (t) => titles.push(t) });
+  await until(() => frame().includes('club-sql') && frame().includes('Connections'), 'the connections');
+  await type(app.stdin, '/folder club-sql Clubs / Lisbon');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('▾ Clubs/Lisbon/'), 'the folder heading');
+  await type(app.stdin, '/password club-sql');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('Kept in memory'), 'the password field');
+  assert.doesNotMatch(frame(), /Keep it in/, 'saving has no keep-it choice');
+  await type(app.stdin, 'right');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('save the password for club-sql'), 'saved');
+  assert.equal(credentials.saved.get('club-sql'), 'right');
+  assert.equal(titles.at(-1), 'Trawl');
+  await type(app.stdin, '/connect demo-prod');
+  app.stdin.write(KEYS.enter);
+  await until(() => titles.at(-1) === 'Trawl · demo-prod/ClubA · PROD', 'the title');
+  const saved = JSON.parse(readFileSync(join(process.env.TRAWL_HOME, 'config.json'), 'utf8'));
+  assert.equal(saved.connections.find((c) => c.name === 'club-sql').folder, 'Clubs/Lisbon');
   app.unmount();
 });

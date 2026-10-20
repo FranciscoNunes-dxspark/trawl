@@ -7,6 +7,9 @@ import { DEMO_CONNECTIONS } from './connections.js';
 import { setAccent } from './theme.js';
 import { App } from './ui/App.jsx';
 
+// A title is printed raw, so nothing in it may end or start an escape sequence.
+const clean = (s) => String(s).replace(/[\x00-\x1f\x7f]/g, '');
+
 const args = process.argv.slice(2);
 
 if (args.includes('-v') || args.includes('--version')) {
@@ -53,14 +56,18 @@ async function runApp() {
   if (demo) config.connections = [...DEMO_CONNECTIONS, ...config.connections.filter((c) => !DEMO_CONNECTIONS.some((d) => d.name === c.name))];
   setAccent(config.accent);
 
-  // Draw on the alternate screen, like a full-screen app, and give the terminal back untouched on exit.
-  process.stdout.write('\x1b[?1049h\x1b[H');
-  process.on('exit', () => process.stdout.write('\x1b[?1049l'));
+  // Draw on the alternate screen, like a full-screen app, and give the terminal back untouched on
+  // exit, window title included: terminals that keep a stack of titles get theirs back (CSI 22/23 t),
+  // and on Windows the console's own title, which Node reads, is put back.
+  const title = process.platform === 'win32' ? process.title : null;
+  process.stdout.write('\x1b[?1049h\x1b[H\x1b[22;0t');
+  process.on('exit', () => process.stdout.write(`\x1b[?1049l${title ? `\x1b]0;${clean(title)}\x07` : ''}\x1b[23;0t`));
+  const setTitle = (text) => process.stdout.write(`\x1b]0;${clean(text)}\x07`);
 
   // Only the downloaded executables look for updates: a checkout updates with git pull, and its
   // package.json version is behind the releases (the Release workflow sets the version as it builds).
   const checkLatest = COMPILED ? (opts) => fetchLatest({ current: VERSION, ...opts }) : undefined;
-  const app = render(<App config={config} initialFile={file} initialConnection={connectTo} checkLatest={checkLatest} />, { exitOnCtrlC: false });
+  const app = render(<App config={config} initialFile={file} initialConnection={connectTo} checkLatest={checkLatest} setTitle={setTitle} />, { exitOnCtrlC: false });
   await app.waitUntilExit();
   process.exit(0);
 }

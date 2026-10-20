@@ -1,10 +1,11 @@
-// Imports DataGrip's data sources as Trawl connections. Only the connection details come
-// across: DataGrip keeps passwords encrypted in its own store, which Trawl never opens, so each
-// SQL login names an environment variable for its password, as /add does.
+// Imports DataGrip's data sources as Trawl connections, in DataGrip's folders. Only the
+// connection details come across: DataGrip keeps passwords encrypted in its own store, which
+// Trawl never opens, so a SQL login's password is asked for the first time it connects.
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { DEMO_CONNECTIONS } from './connections.js';
+import { DEMO_CONNECTIONS, cleanFolder, connectionRows } from './connections.js';
+import { STORE_NAME } from './credentials.js';
 
 const decode = (s) =>
   String(s ?? '')
@@ -41,6 +42,8 @@ export function parseDataSources(xml) {
       url: child(body, 'jdbc-url'),
       user: child(body, 'user-name'),
       readOnly: child(body, 'read-only') === 'true' || attr(attrs, 'read-only') === 'true',
+      // DataGrip writes this only for "Tx: Manual" (auto-commit is its default).
+      manualCommit: child(body, 'auto-commit') === 'false' || attr(attrs, 'auto-commit') === 'false',
       removed: attr(wrapper, 'isRemovedFromProject') === 'true',
     });
   }
@@ -52,7 +55,7 @@ export function mergeLocal(sources, local) {
   const byUuid = new Map(local.map((l) => [l.uuid, l]));
   return sources.map((s) => {
     const l = byUuid.get(s.uuid);
-    return l ? { ...s, user: s.user ?? l.user, readOnly: s.readOnly || l.readOnly } : s;
+    return l ? { ...s, user: s.user ?? l.user, readOnly: s.readOnly || l.readOnly, manualCommit: s.manualCommit || l.manualCommit } : s;
   });
 }
 
@@ -72,9 +75,6 @@ export function parseJdbcUrl(url) {
   if (ms) return { host: ms[1], instance: ms[2] ?? props.instancename ?? null, port: ms[3] ? Number(ms[3]) : null, database: props.database ?? props.databasename ?? null, props };
   return { host: jtds[1], instance: props.instance ?? null, port: jtds[2] ? Number(jtds[2]) : null, database: jtds[3] || props.databasename || null, props };
 }
-
-/** "TRAWL_PW_FUNDS": the environment variable an imported SQL login's password is read from. */
-export const passwordEnvFor = (name) => `TRAWL_PW_${name.toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_|_$/g, '')}`;
 
 /**
  * A Trawl-style name: "defaultdb@host" → "defaultdb", "@localhost" → "localhost",
@@ -104,9 +104,10 @@ const sameTarget = (a, b) =>
 const PROD = /(^|[^a-z])(prod|production|prd|live)([^a-z]|$)/i;
 
 /**
- * One DataGrip data source as a Trawl connection: { conn } to add, or { skip } saying why not.
- * `taken` holds the names in use (lower case); `existing` the connections Trawl already has, so
- * importing twice doesn't add anything twice.
+ * One DataGrip data source as a Trawl connection: { conn } to add, or { skip } saying why not
+ * (with `same`, the connection Trawl already has for it, when that's why). `taken` holds the
+ * names in use (lower case); `existing` the connections Trawl already has, so importing twice
+ * doesn't add anything twice.
  */
 export function toConnection(ds, taken = new Set(), existing = []) {
   const jdbc = parseJdbcUrl(ds.url);
@@ -124,16 +125,19 @@ export function toConnection(ds, taken = new Set(), existing = []) {
   const conn = { name, server, ...(jdbc.database ? { database: jdbc.database } : {}) };
   if (authProp.startsWith('activedirectory')) conn.auth = 'azure-cli';
   else if (jdbc.props.integratedsecurity === 'true') return { skip: `${label}: Windows integrated sign-in isn't supported; add it with /add … --user <login> --domain <domain> --password-env <VAR>` };
-  else if (ds.user) Object.assign(conn, { auth: 'sql', user: ds.user, passwordEnv: passwordEnvFor(name) });
+  else if (ds.user) Object.assign(conn, { auth: 'sql', user: ds.user });
   else if (azure) conn.auth = 'azure-cli';
   else return { skip: `${label}: no login is saved for it in DataGrip` };
   if (jdbc.props.trustservercertificate === 'true') conn.trustCert = true;
   if (jdbc.props.encrypt === 'false') conn.encrypt = false;
   if (PROD.test(ds.group ?? '') || PROD.test(ds.name)) conn.prod = true;
   if (ds.readOnly) conn.readOnly = true;
+  if (ds.manualCommit) conn.commit = 'manual';
   const same = existing.find((c) => !c.demo && c.server && sameTarget(c, conn));
-  if (same) return { skip: `${label}: already in Trawl as ${same.name}` };
-  conn.from = `DataGrip${ds.group ? ` (${ds.group})` : ''}`;
+  if (same) return { skip: `${label}: already in Trawl as ${same.name}`, same };
+  const folder = cleanFolder(ds.group);
+  if (folder) conn.folder = folder;
+  conn.from = 'DataGrip';
   return { conn };
 }
 
@@ -195,41 +199,56 @@ export function findDataSources({ folder, home = homedir(), appData = process.en
   });
 }
 
-/** What an import would do: { add: [conn], skip: [reason] } against the connections Trawl has. */
+/**
+ * What an import would do against the connections Trawl has: { add: [conn], skip: [reason],
+ * file: [{ name, folder }] }. `file` puts connections Trawl already has, and that are in no
+ * folder, into their DataGrip folder.
+ */
 export function importPlan(sources, existing) {
   const taken = new Set([...RESERVED_NAMES, ...existing.map((c) => c.name.toLowerCase())]);
   const add = [];
   const skip = [];
+  const file = [];
   for (const ds of sources) {
     const r = toConnection(ds, taken, [...existing, ...add]);
     if (r.conn) {
       add.push(r.conn);
       taken.add(r.conn.name.toLowerCase());
-    } else skip.push(r.skip);
+      continue;
+    }
+    skip.push(r.skip);
+    const folder = cleanFolder(ds.group);
+    if (folder && r.same && !r.same.folder && existing.includes(r.same) && !file.some((f) => f.name === r.same.name)) file.push({ name: r.same.name, folder });
   }
-  return { add, skip };
+  return { add, skip, file };
 }
 
 /** The preview shown before importing. */
-export function planText({ add, skip }) {
+export function planText({ add, skip, file = [] }) {
   const lines = [];
   if (add.length) {
     lines.push(`Will add ${add.length} connection${add.length === 1 ? '' : 's'}:`, '');
     const w = Math.max(...add.map((c) => c.name.length)) + 2;
-    for (const c of add) {
-      const how = c.auth === 'sql' ? `login ${c.user}, password from $${c.passwordEnv}` : 'az login';
-      lines.push(`  ${c.name.padEnd(w)}${c.server}${c.database ? `/${c.database}` : ''}${c.prod ? '  PROD (read-only)' : ''}  · ${how}`);
+    for (const row of connectionRows(add)) {
+      if (row.folder) {
+        lines.push(`  ${row.folder}/`);
+        continue;
+      }
+      const c = row.conn;
+      const how = c.auth === 'sql' ? `login ${c.user}` : 'az login';
+      lines.push(`  ${row.inFolder ? '  ' : ''}${c.name.padEnd(w)}${c.server}${c.database ? `/${c.database}` : ''}${c.prod ? '  PROD (read-only)' : ''}  · ${how}`);
     }
-  } else lines.push('Nothing to add.');
+  } else lines.push(file.length ? 'No new connections.' : 'Nothing to add.');
+  if (file.length) {
+    lines.push('', `Will put ${file.length} connection${file.length === 1 ? '' : 's'} Trawl already has into their DataGrip folder:`);
+    for (const f of file) lines.push(`  ${f.name} → ${f.folder}/`);
+  }
   if (skip.length) lines.push('', `Skipped ${skip.length}:`, ...skip.map((s) => `  ${s}`));
-  const envs = add.filter((c) => c.passwordEnv);
-  if (envs.length) {
+  if (add.some((c) => c.auth === 'sql')) {
     lines.push(
       '',
-      'Passwords stay in DataGrip (encrypted); Trawl never reads them. Before connecting, set each',
-      'password variable once, for example in PowerShell (it lasts for new terminals):',
-      '',
-      `  [Environment]::SetEnvironmentVariable('${envs[0].passwordEnv}', '<password>', 'User')`,
+      'Passwords stay in DataGrip (encrypted); Trawl never reads them. Trawl asks for each login’s',
+      `password the first time you connect to it, and keeps it in ${STORE_NAME}.`,
     );
   }
   if (add.some((c) => c.prod)) lines.push('', 'Connections in a PROD folder (or named prod) become production: read-only until /writes.');

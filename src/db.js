@@ -9,16 +9,29 @@ import { demoSession } from './demo.js';
 import { splitBatches } from './sql.js';
 
 export class DbError extends Error {
-  constructor(message, { number = null, line = null, cancelled = false, partial = null, needsPassword = false } = {}) {
+  constructor(message, { number = null, line = null, cancelled = false, partial = null, needsPassword = false, untrustedCert = false } = {}) {
     super(message);
     this.number = number;
     this.line = line;
     this.cancelled = cancelled;
     // No password to sign in with, or the saved one was turned down: the app asks for one.
     this.needsPassword = needsPassword;
+    // The server's certificate couldn't be verified (self-signed, as a local SQL Server's is): the app
+    // offers to trust it, as SSMS's "Trust server certificate" does.
+    this.untrustedCert = untrustedCert;
     // What had already come back when it failed: { sets, messages }.
     this.partial = partial;
   }
+}
+
+// Node's TLS errors for a certificate no authority vouches for; Bun words the message without the hyphen.
+const CERT_CODES = new Set(['DEPTH_ZERO_SELF_SIGNED_CERT', 'SELF_SIGNED_CERT_IN_CHAIN', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY']);
+const CERT_MESSAGE = /self[- ]signed certificate|unable to verify the first certificate|unable to get local issuer certificate/i;
+
+/** Whether a failed connect was the server's certificate not being trusted. */
+export function untrustedCert(err) {
+  for (let e = err, n = 0; e && n < 5; e = e.cause, n++) if (CERT_CODES.has(e.code) || CERT_MESSAGE.test(e.message ?? '')) return true;
+  return false;
 }
 
 function toDbError(err, lineOffset = 0) {
@@ -64,6 +77,7 @@ export async function connect(conn, { database = conn.database, signal, password
       const e = toDbError(err);
       // A wrong password from the environment is yours to fix there; a saved or typed one is asked again.
       if (secrets.password != null && from !== 'env' && /login failed/i.test(e.message)) e.needsPassword = true;
+      if (!conn.trustCert && untrustedCert(err)) e.untrustedCert = true;
       reject(e);
     });
   });

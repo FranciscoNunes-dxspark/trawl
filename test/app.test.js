@@ -8,7 +8,7 @@ import React from 'react';
 import { render } from 'ink-testing-library';
 import { DEMO_CONNECTIONS } from '../src/connections.js';
 import { memoryCredentials } from '../src/credentials.js';
-import { DbError } from '../src/db.js';
+import { DbError, untrustedCert } from '../src/db.js';
 import { demoSession } from '../src/demo.js';
 import { setAccent } from '../src/theme.js';
 import { App } from '../src/ui/App.jsx';
@@ -455,6 +455,43 @@ test('a login asks for its password, again when it is wrong, and keeps the one t
   await until(() => frame().includes('Clubs'), 'the explorer, with no prompt');
   assert.doesNotMatch(frame(), /Password for/);
   lastApp.unmount();
+});
+
+test('a certificate that can’t be verified asks to trust it, and the trust is kept on the connection', async () => {
+  // Node's and Bun's wordings, and the TLS code under tedious's message; anything else isn't one.
+  assert.equal(untrustedCert(new Error('Failed to connect to localhost:1433 - self signed certificate')), true);
+  assert.equal(untrustedCert({ message: 'Failed to connect', cause: { code: 'DEPTH_ZERO_SELF_SIGNED_CERT', message: 'x' } }), true);
+  assert.equal(untrustedCert(new Error("Login failed for user 'sa'.")), false);
+
+  const LOCAL = { name: 'local', server: 'localhost', database: 'ClubA', auth: 'sql', user: 'sa' };
+  const credentials = memoryCredentials();
+  const message = 'Failed to connect to localhost:1433 - self signed certificate';
+  const open = async (conn, opts) => {
+    // As db.connect: the password is found first, then the TLS handshake turns the certificate down.
+    const pw = opts.password ?? (await opts.credentials.get(conn.name));
+    if (pw != null && !conn.trustCert) throw new DbError(message, { untrustedCert: untrustedCert(new Error(message)) });
+    return fakeOpen(conn, opts);
+  };
+  const app = startWith([LOCAL], { initialConnection: 'local', open, credentials });
+  await until(() => frame().includes('Password for sa on local'), 'the password prompt');
+  await type(app.stdin, 'right');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes("certificate can't be verified. Trust it?"), 'the trust question');
+  app.stdin.write('1');
+  // The typed password carries over: no second prompt, and it's kept once it signs in.
+  await until(() => frame().includes('Clubs') && frame().includes('Saved the password for local'), 'connected');
+  assert.equal(credentials.saved.get('local'), 'right');
+  const saved = JSON.parse(readFileSync(join(process.env.TRAWL_HOME, 'config.json'), 'utf8'));
+  assert.equal(saved.connections.find((c) => c.name === 'local').trustCert, true);
+  app.unmount();
+
+  // No leaves it as it was, and not connected.
+  const again = startWith([LOCAL], { initialConnection: 'local', open, credentials: memoryCredentials({ local: 'right' }) });
+  await until(() => frame().includes('Trust it?'), 'the trust question again');
+  again.stdin.write('2');
+  await until(() => !frame().includes('Trust it?') && frame().includes('self signed certificate'), 'declined');
+  assert.match(frame(), /Trawl\s+not connected/);
+  again.unmount();
 });
 
 test('tab leaves the password out of the store; esc cancels', async () => {

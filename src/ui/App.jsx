@@ -18,6 +18,7 @@ import { fitSegments, stringWidth } from '../text.js';
 import { useTerminalSize } from './hooks.js';
 import { Confirm, Panel, PromptBox, Row, SecretPrompt, Spinner, Suggestions, confirmHeight } from './parts.jsx';
 import { ConnectionsView } from './ConnectionsView.jsx';
+import { SettingsView } from './SettingsView.jsx';
 import { ConsoleView } from './ConsoleView.jsx';
 import { ExplorerView } from './ExplorerView.jsx';
 import { HistoryView } from './HistoryView.jsx';
@@ -629,6 +630,7 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     closeOverlay: () => setOverlay(null),
     rememberOutput: (title, text) => (lastOutput.current = { title, text }),
     showHelp: () => setOverlay({ title: 'Keyboard shortcuts', text: HELP }),
+    showSettings: () => setOverlay({ settings: true }),
     showLast: () => (lastOutput.current ? setOverlay({ ...lastOutput.current }) : note('Nothing has run yet.')),
   });
 
@@ -756,6 +758,7 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     if (input === '/' || input === ':') return prefill('/');
     if (input === '!') return prefill('!');
     if (input === '?') return ctx.showHelp();
+    if (input === ',') return ctx.showSettings();
     if (input === 'q') return quit();
     const n = Number(input);
     if (n >= 1 && n <= VIEWS.length) return setView(VIEWS[n - 1].id);
@@ -789,8 +792,15 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
   const viewActive = focus === 'view' && !overlay && !confirmReq;
 
   let main;
-  if (overlay) {
-    main = <TextViewer {...overlay} width={W} height={mainH} active={focus === 'view' && (!confirmReq || confirmReq.scrollsOverlay)} pageOnly={Boolean(confirmReq)} onClose={() => setOverlay(null)} />;
+  // An overlay closes on a key (esc, q) once every handler has had it: App's dispatcher runs after the
+  // overlay's, and would otherwise see no overlay and take q as quit.
+  const closeOnKey = () => queueMicrotask(() => setOverlay(null));
+  if (overlay?.settings) {
+    // Over whichever view is open; ↵ on the row limit hands over to the prompt, and the overlay stays.
+    const settingsActive = focus === 'view' && !confirmReq;
+    main = <SettingsView config={config} ctx={ctx} updates={{ check: Boolean(checkLatest), install: Boolean(installUpdate) }} update={update} width={W} height={mainH} active={settingsActive} onClose={closeOnKey} />;
+  } else if (overlay) {
+    main = <TextViewer {...overlay} width={W} height={mainH} active={focus === 'view' && (!confirmReq || confirmReq.scrollsOverlay)} pageOnly={Boolean(confirmReq)} onClose={closeOnKey} />;
   } else if (view === 'connections') {
     main = <ConnectionsView connections={config.connections} current={session?.conn} ctx={ctx} width={W} height={mainH} active={viewActive} />;
   } else if (view === 'query' && queryMode === 'console') {
@@ -829,6 +839,8 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
         ? 'typing SQL · ctrl+r run the statement · esc stop typing (then 3 for the full results)'
         : focus === 'cell'
           ? 'editing the cell · ↵ keep it (s saves) · tab next column · esc leave it as it was · ctrl+u clear'
+          : overlay?.settings
+          ? 'j/k move · ↵ or space change it · esc close'
           : overlay
           ? 'j/k scroll · space page · esc close'
           : view === 'query' && queryMode === 'console'

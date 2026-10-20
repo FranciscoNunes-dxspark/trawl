@@ -5,6 +5,7 @@ export const HELP = `Anywhere
   r                Reload the schema
   esc              Cancel the running query, or clear the activity lines
   ?                This help
+  ,                Settings (/settings)
   q / ctrl+c       Quit (asks first if a transaction is open)
 
 Lists
@@ -55,6 +56,10 @@ Connections (in folders; /import datagrip brings in DataGrip's data sources and 
   f                Move to a folder (/folder <connection> [folder])
   x                Forget (and its saved password)
 
+Settings (, or /settings: Trawl's own; a connection's are on Connections)
+  ↵ or space       Change it: the row limit, the accent colour, checking for and installing updates
+  esc / q          Close
+
 Claude
   /ask <question>  Claude writes a query from the schema; it lands in the console, and nothing runs until ctrl+r
   /ai [connection] [off|schema|results]   What Claude may see: nothing, names only (the default), or rows too
@@ -75,7 +80,7 @@ Slash commands
   /import datagrip [folder]   /connect <name>   /add <name> <server> [database] [--user u] [--domain d] [--folder f] [--prod] [--commit auto|manual] [--trust-cert]
   /forget <name>   /folder <connection> [folder]   /password [connection]   /disconnect   /use <database>   /open <file.sql>   /console   /new   /save <file.sql>
   /describe <table>   /find [text]
-  /export <file>   /limit [rows]   /writes   /tx [auto|manual]   /commit   /rollback   /ask <question>   /ai   /update   /last   /refresh   /help   /quit
+  /export <file>   /limit [rows]   /writes   /tx [auto|manual]   /commit   /rollback   /ask <question>   /ai   /update   /settings   /last   /refresh   /help   /quit
 
 Viewer (describe, records, output, this help)
   j k  space  g G  Scroll         esc / q     Close`;

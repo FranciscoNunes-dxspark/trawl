@@ -10,6 +10,7 @@ import { DEMO_CONNECTIONS } from '../src/connections.js';
 import { memoryCredentials } from '../src/credentials.js';
 import { DbError } from '../src/db.js';
 import { demoSession } from '../src/demo.js';
+import { setAccent } from '../src/theme.js';
 import { App } from '../src/ui/App.jsx';
 
 const KEYS = { down: '\x1b[B', enter: '\r', esc: '\x1b' };
@@ -209,6 +210,54 @@ test('the downloaded Trawl installs a newer release in the background, says when
   await until(() => frame().includes('install Trawl 9.0.0') && frame().includes('It starts the next time you open Trawl'), 'the install');
   assert.deepEqual(told, ['9.0.0']);
   lastApp.unmount();
+});
+
+test('Settings, an overlay, changes the row limit, the accent and updates, and keeps them in the config', async () => {
+  const app = start();
+  await until(() => frame().includes('Clubs'), 'the explorer');
+  app.stdin.write(',');
+  await until(() => frame().includes('Row limit') && frame().includes('500 rows'), 'Settings');
+  assert.match(frame(), /1 Explorer .* 5 Connections\s*$/m, 'no tab of its own');
+  assert.match(frame(), /Check for updates\s+on\s+\(not in a checkout\)/);
+  // ↵ on the row limit hands it to /limit, and Settings is still open after.
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('/limit '), 'the /limit prompt');
+  await type(app.stdin, '200');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('200 rows') && frame().includes('Row limit'), 'the new limit');
+  // The accent goes to the next colour at once.
+  app.stdin.write('j');
+  await until(() => frame().includes('Accent colour') && frame().includes('↵ next colour'), 'the accent row');
+  app.stdin.write(' ');
+  await until(() => /Accent colour\s+██ teal/.test(frame()), 'teal');
+  // Updates: installing off first, then checking.
+  app.stdin.write('j');
+  app.stdin.write('j');
+  await until(() => frame().includes('Off, Trawl only says one is out'), 'the install row');
+  app.stdin.write(KEYS.enter);
+  await until(() => /Install updates\s+off/.test(frame()), 'installing off');
+  app.stdin.write('k');
+  await until(() => frame().includes('Once a day, Trawl asks GitHub'), 'the check row');
+  app.stdin.write(KEYS.enter);
+  await until(() => /Check for updates\s+off/.test(frame()) && frame().includes('(checks are off)'), 'checks off');
+  const config = JSON.parse(readFileSync(join(process.env.TRAWL_HOME, 'config.json'), 'utf8'));
+  assert.equal(config.limit, 200);
+  assert.equal(config.accent, '#5fd7d7');
+  assert.equal(config.autoUpdate, false);
+  assert.equal(config.checkUpdates, false);
+  // q closes it, and only it: Trawl keeps running.
+  app.stdin.write('q');
+  await until(() => frame().includes('Clubs') && !frame().includes('Row limit'), 'the explorer again');
+  app.stdin.write(KEYS.down);
+  await until(() => frame().includes('Clubs'), 'still running');
+  app.stdin.write('/');
+  await type(app.stdin, 'settings');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('Row limit'), 'Settings from /settings');
+  app.stdin.write(KEYS.esc);
+  await until(() => !frame().includes('Row limit'), 'closed with esc');
+  app.unmount();
+  setAccent('#5fafff');
 });
 
 test('the console: type SQL, ctrl+r runs it with the results underneath, and it is kept', async () => {
@@ -454,6 +503,11 @@ test('/password saves one, /folder files a connection, and the window title foll
   await until(() => titles.at(-1) === 'Trawl · demo/ClubA', 'the title again');
   app.stdin.write('?');
   await until(() => frame().includes('Keyboard shortcuts'), 'the app still taking keys');
+  // q closes the help, and doesn't also quit.
+  app.stdin.write('q');
+  await until(() => !frame().includes('Keyboard shortcuts'), 'the help closed');
+  app.stdin.write('4');
+  await until(() => frame().includes('Nothing has run yet') || frame().includes('╭─ History'), 'History, so still running');
   const saved = JSON.parse(readFileSync(join(process.env.TRAWL_HOME, 'config.json'), 'utf8'));
   assert.equal(saved.connections.find((c) => c.name === 'club-sql').folder, 'Clubs/Lisbon');
   app.unmount();

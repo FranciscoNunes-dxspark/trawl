@@ -48,6 +48,7 @@ export const COMMANDS = [
   { name: 'fanout', args: '<folder> [sql]', desc: "One read-only query on every connection in a folder, the rows merged (the console's statement without sql)", complete: 'folders', run: (ctx, s) => a.fanOut(ctx, s) },
   { name: 'activity', desc: "The server's sessions: what runs, what waits, who blocks whom (6)", run: (ctx) => (ctx.setView('activity'), ctx.session && a.loadActivity(ctx)) },
   { name: 'kill', args: '<session>', desc: 'End another session (KILL), after asking; read-only connections refuse it', run: (ctx, s) => a.killSession(ctx, s) },
+  { name: 'explain', desc: 'Claude explains the last plan (p): what it does, what costs most, what might help', run: (ctx) => a.explainPlan(ctx) },
   { name: 'last', desc: 'Show the full output of the last run', run: (ctx) => ctx.showLast() },
   { name: 'refresh', desc: 'Reload the schema', run: (ctx) => ctx.refresh() },
   { name: 'help', desc: 'Keyboard shortcuts', run: (ctx) => ctx.showHelp() },

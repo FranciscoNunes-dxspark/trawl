@@ -817,7 +817,7 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     checkUpdates,
     askClaude,
     findDataSources,
-    showText: (title, text) => setOverlay({ title, text }),
+    showText: (title, text, extra = {}) => setOverlay({ title, text, ...extra }),
     // A list to pick from (Picker.jsx): { title, hint, items, keys, empty }.
     showPicker: (picker) => setOverlay({ picker }),
     closeOverlay: () => setOverlay(null),

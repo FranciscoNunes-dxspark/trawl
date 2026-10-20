@@ -263,3 +263,32 @@ test('a long run ends with a notification, unless Settings turns it off', async 
   assert.equal(told.length, 1);
   app.unmount();
 });
+
+test('a on a plan asks Claude to explain it (the query and plan, no rows), and not when the connection is closed to Claude', async () => {
+  mkdirSync(process.env.TRAWL_HOME, { recursive: true });
+  writeFileSync(join(process.env.TRAWL_HOME, 'console.sql'), 'SELECT * FROM dbo.Players WHERE Goals > 3');
+  const asked = [];
+  const askClaude = async ({ prompt, system }) => (asked.push({ prompt, system }), 'It scans the whole of Players.\nAn index on Goals would help.');
+  const app = start('demo', { askClaude });
+  await until(() => frame().includes('Clubs'), 'the explorer');
+  app.stdin.write('2');
+  await until(() => frame().includes('WHERE Goals > 3'), 'the console');
+  app.stdin.write('p');
+  await until(() => frame().includes('Clustered Index Scan') && frame().includes('a Claude explains it'), 'the plan');
+  app.stdin.write('a');
+  await until(() => frame().includes('Claude on the plan: SELECT * FROM dbo.Players WHERE Goals > 3') && frame().includes('An index on Goals would help.'), 'the explanation');
+  assert.equal(asked.length, 1);
+  assert.match(asked[0].prompt, /Query:\nSELECT \* FROM dbo\.Players WHERE Goals > 3\n\nEstimated plan \(SHOWPLAN_TEXT\):\n.*Clustered Index Scan/s);
+  assert.match(asked[0].system, /execution plans/);
+  assert.doesNotMatch(asked[0].prompt, /Rui Costa/, 'no rows');
+  app.stdin.write(KEYS.esc);
+  await until(() => !frame().includes('Claude on the plan'), 'closed');
+  await command(app, '/ai off');
+  await until(() => frame().includes('Claude may now see nothing of demo'), 'closed to Claude');
+  await command(app, '/explain');
+  await until(() => frame().includes('demo is closed to Claude'), 'the refusal');
+  assert.equal(asked.length, 1);
+  await command(app, '/ai results');
+  await until(() => frame().includes('Claude may now see schema and results of demo'), 'open again');
+  app.unmount();
+});

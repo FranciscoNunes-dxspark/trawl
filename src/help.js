@@ -29,7 +29,7 @@ Query, the console (a SQL editor, kept between sessions)
   ctrl+r           Run the selection, or the statement under the cursor (marked ▌ in the gutter); the results show below
   R                Run the whole console
   j k  g G         Move between lines (when not typing)
-  p                Its estimated plan, as text (/plan): nothing runs
+  p                Its estimated plan, as text (/plan): nothing runs; there, a asks Claude to explain it (/explain)
   f                Format the statement under the cursor (or the selection): a clause a line, keywords in capitals
   ctrl+f  n N      Find (/search <text>) · the next match · the previous one (n N when not typing)
   Typing           arrows · home/end or ctrl+a/ctrl+e · ctrl+u/ctrl+k cut to start/end · tab two spaces
@@ -115,6 +115,7 @@ Settings (, or /settings: Trawl's own; a connection's are on Connections)
 
 Claude
   /ask <question>  Claude writes a query from the schema; it lands in the console, and nothing runs until ctrl+r
+  /explain         Claude explains the last plan: what it does, what costs most, what might help (the query and plan only)
   /ai [connection] [off|schema|results]   What Claude may see: nothing, names only (the default), or rows too
   trawl mcp        Run from Claude Code (claude mcp add --scope user trawl -- trawl mcp); it only reads
 
@@ -134,7 +135,7 @@ Slash commands
   /import datagrip [folder]   /import-csv <file.csv> <table> [--run]   /connect <name>   /add <name> <server> [database] [--user u] [--domain d] [--folder f] [--prod] [--commit auto|manual] [--trust-cert]
   /forget <name>   /folder <connection> [folder]   /password [connection]   /disconnect   /use <database>   /open <file.sql>   /console   /tab …   /new   /format   /search <text>   /save <file.sql>
   /describe <table>   /script <name>   /find [text]
-  /export <file>   /filter [text]   /follow   /pin   /compare   /copy [format]   /limit [rows]   /writes   /tx [auto|manual]   /commit   /rollback   /ask <question>   /ai   /update   /settings   /stats [on|off]   /plan [sql]   /diff <connection> [database]   /fanout <folder> [sql]   /activity   /kill <session>   /last   /refresh   /help   /quit
+  /export <file>   /filter [text]   /follow   /pin   /compare   /copy [format]   /limit [rows]   /writes   /tx [auto|manual]   /commit   /rollback   /ask <question>   /explain   /ai   /update   /settings   /stats [on|off]   /plan [sql]   /diff <connection> [database]   /fanout <folder> [sql]   /activity   /kill <session>   /last   /refresh   /help   /quit
 
 Viewer (describe, records, output, this help)
   j k  space  g G  Scroll         esc / q     Close`;

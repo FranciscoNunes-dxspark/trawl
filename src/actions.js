@@ -8,7 +8,7 @@ import * as ed from './editor.js';
 import { findDataSources, importPlan, planText } from './datagrip.js';
 import { formatSql } from './format.js';
 import { changesText, insertScript, saveScript, tsvText, withSaved } from './edit.js';
-import { AI_LABELS, AI_LEVELS, aiLevel, askPrompt, canSeeSchema, consoleText, parseAnswer } from './ai.js';
+import { AI_LABELS, AI_LEVELS, EXPLAIN_SYSTEM, aiLevel, askPrompt, canSeeSchema, consoleText, explainPrompt, parseAnswer } from './ai.js';
 import { followTargets } from './follow.js';
 import { compareSets, comparisonSet, comparisonSummary } from './compare.js';
 import { findTab, freeName, tabNameProblem } from './consoles.js';
@@ -441,8 +441,34 @@ export async function showPlan(ctx, sql) {
     { label: 'Asking for the plan' },
   );
   if (plan) {
-    ctx.showText(title, plan);
+    ctx.lastPlan = { sql: text, plan, conn: session.conn.name, database: session.database };
+    ctx.showText(title, plan, { keys: { a: () => explainPlan(ctx) }, hint: 'a Claude explains it' });
     ctx.rememberOutput(title, plan);
+  }
+}
+
+/**
+ * a on a plan, and /explain: Claude reads the last plan with its query (never rows) and says what it
+ * does, what costs the most and what might help. Refused on a connection closed to Claude.
+ */
+export async function explainPlan(ctx) {
+  const p = ctx.lastPlan;
+  if (!p) return ctx.note('Show a plan first: p in the console, or /plan <sql>.', 'error');
+  const conn = ctx.config.connections.find((c) => c.name === p.conn) ?? ctx.session?.conn;
+  if (!canSeeSchema(conn)) return ctx.note(`${p.conn} is closed to Claude. /ai schema lets Claude see its queries and plans (never rows).`, 'error');
+  let answer = null;
+  const title = `Claude on the plan: ${oneLine(withoutLeadingComments(p.sql))}`;
+  const r = await ctx.task(
+    `ask Claude about the plan of ${oneLine(withoutLeadingComments(p.sql))}`,
+    async (signal) => {
+      answer = String(await ctx.askClaude({ prompt: explainPrompt(p), system: EXPLAIN_SYSTEM, signal })).trim();
+      return [answer ? 'The explanation is on screen (esc closes it; /last shows it again).' : 'Claude gave no answer.'];
+    },
+    { label: 'Asking Claude about the plan' },
+  );
+  if (r.ok && answer) {
+    ctx.showText(title, answer);
+    ctx.rememberOutput(title, answer);
   }
 }
 

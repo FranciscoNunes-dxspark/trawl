@@ -53,6 +53,19 @@ export function askPrompt({ question, schema, database }) {
   return `Database: ${database}\n\nSchema (schema.table(column type ...)):\n${schemaText(schema, question)}\n\nQuestion: ${question}`;
 }
 
+export const EXPLAIN_SYSTEM = `You explain Microsoft SQL Server execution plans to the developer who ran the query.
+You get the query and its estimated plan as SHOWPLAN_TEXT (no rows of data).
+In plain text with no Markdown headings, at most about 25 short lines:
+1. What the plan does, step by step, from the operators that read data up to the result.
+2. What is likely to cost the most, and why (scans of big tables, key lookups, sorts, hash joins, implicit conversions, missing index warnings).
+3. Concrete changes worth trying: an index (with its CREATE INDEX), a rewrite of a predicate, or "nothing to change" when it is already fine.
+Only talk about the tables, columns and operators in the plan; don't invent statistics or row counts that aren't there.`;
+
+/** The prompt for explaining a plan: the query and its plan, never any rows. */
+export function explainPrompt({ sql, plan, database }) {
+  return `Database: ${database}\n\nQuery:\n${sql}\n\nEstimated plan (SHOWPLAN_TEXT):\n${plan}`;
+}
+
 /** Splits Claude's answer into the SQL and the note around it. */
 export function parseAnswer(text) {
   const t = String(text ?? '').replace(/\r\n?/g, '\n');

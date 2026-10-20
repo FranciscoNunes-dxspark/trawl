@@ -344,6 +344,28 @@ test('ctrl+z undoes in the console a word at a time, ctrl+y redoes, and /new can
   app.unmount();
 });
 
+test('shift+arrows select in the console, and ctrl+r runs just the selection', async () => {
+  mkdirSync(process.env.TRAWL_HOME, { recursive: true });
+  writeFileSync(join(process.env.TRAWL_HOME, 'console.sql'), 'SELECT 1 AS one, 2 AS two');
+  const app = start();
+  await until(() => frame().includes('Clubs'), 'the explorer');
+  app.stdin.write('2');
+  await until(() => frame().includes('SELECT 1 AS one'), 'the console');
+  app.stdin.write('i');
+  await until(() => frame().includes('typing SQL'), 'typing mode');
+  // To the end of "one", then select back to the start of the line.
+  for (let k = 0; k < 4; k++) app.stdin.write('\x1b[1;5C'); // ctrl+→
+  await new Promise((r) => setTimeout(r, 50));
+  app.stdin.write('\x1b[1;2H'); // shift+home
+  await until(() => frame().includes('ctrl+r runs just this'), 'the selection');
+  app.stdin.write('\x12');
+  await until(() => frame().includes('─ SELECT 1 AS one ─'), 'only the selection run');
+  assert.doesNotMatch(frame(), /one\s+│ two/);
+  app.stdin.write(KEYS.esc);
+  await until(() => frame().includes('typing · ctrl+space'), 'the selection let go');
+  app.unmount();
+});
+
 test('e in History puts the statement in the console to edit', async () => {
   const app = start();
   await until(() => frame().includes('Clubs'), 'the explorer');

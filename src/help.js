@@ -21,10 +21,11 @@ Explorer (tables, views and routines of the current database)
 Query, the console (a SQL editor, kept between sessions)
   ↵ or i           Start typing; while typing, every key is text (digits and q too)
   esc              Stop typing
-  ctrl+r           Run the statement under the cursor (marked ▌ in the gutter); the results show below
+  ctrl+r           Run the selection, or the statement under the cursor (marked ▌ in the gutter); the results show below
   R                Run the whole console
   j k  g G         Move between lines (when not typing)
   Typing           arrows · home/end or ctrl+a/ctrl+e · ctrl+u/ctrl+k cut to start/end · tab two spaces
+                   ctrl+←/→ a word at a time · ctrl+w delete a word · shift+movement selects (esc lets go)
   ctrl+z  ctrl+y   Undo · Redo (a word at a time; also when not typing, and /new can be undone too)
   Suggestions      tables, columns, keywords, JOIN … ON from foreign keys · tab take one · ↑↓ pick (then ↵ takes it)
                    esc close · ctrl+space ask for them anywhere · tab after SELECT * writes out the columns

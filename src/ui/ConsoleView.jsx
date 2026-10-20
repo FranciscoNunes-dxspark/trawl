@@ -35,10 +35,12 @@ export function currentStatement(editor) {
   return statementAt(splitStatements(ed.toText(editor)), editor.row + 1);
 }
 
-/** Runs the statement under the cursor, or the whole console. */
+/** Runs the selection, the statement under the cursor, or the whole console. */
 export function runConsole(ctx, editor, { all = false } = {}) {
   const text = ed.toText(editor);
   if (all) return text.trim() ? a.runSql(ctx, text, { title: 'console (everything)', stay: true }) : ctx.note('The console is empty.', 'error');
+  const sel = ed.selectedText(editor);
+  if (sel?.text.trim()) return a.runSql(ctx, sel.text, { title: oneLine(withoutLeadingComments(sel.text)), lineBase: sel.row + 1, stay: true });
   const st = currentStatement(editor);
   if (!st) return ctx.note('The console is empty: press i (or ↵) and type some SQL.', 'error');
   return a.runSql(ctx, st.text, { title: oneLine(withoutLeadingComments(st.text)), lineBase: st.line, stay: true });
@@ -88,8 +90,8 @@ export function ConsoleView({ editor, editing, ctx, width, height, active }) {
       if (input === 'R') return runConsole(ctx, editor, { all: true });
       if (key.downArrow || input === 'j') return set(ed.move(editor, { rows: 1 }));
       if (key.upArrow || input === 'k') return set(ed.move(editor, { rows: -1 }));
-      if (input === 'g') return set({ ...editor, row: 0, col: 0 });
-      if (input === 'G') return set({ ...editor, row: editor.lines.length - 1, col: 0 });
+      if (input === 'g') return set({ lines: editor.lines, row: 0, col: 0 });
+      if (input === 'G') return set({ lines: editor.lines, row: editor.lines.length - 1, col: 0 });
     },
     { isActive: active && !editing },
   );
@@ -119,6 +121,8 @@ export function ConsoleView({ editor, editing, ctx, width, height, active }) {
       if (key.ctrl && (input === '`' || input === ' ' || input === '@')) return setMenu({ index: 0, force: true });
       // Any other key closes the list; typing a name (or backspacing over one) opens it again below.
       if (open) setMenu(null);
+      // esc lets go of a selection first, then stops typing.
+      if (key.escape && ed.selection(editor)) return set({ lines: editor.lines, row: editor.row, col: editor.col });
       if (key.escape || (key.ctrl && input === 'c')) return ctx.setEditing(false);
       if (key.ctrl && input === 'r') return runConsole(ctx, editor);
       if (key.ctrl && input === 'z') return ctx.undoConsole();
@@ -128,6 +132,22 @@ export function ConsoleView({ editor, editing, ctx, width, height, active }) {
         ctx.setConsole(ed.backspace(editor), { merge: true });
         return open ? setMenu({ index: 0, force: open.force }) : undefined;
       }
+      // shift with a movement selects; ctrl moves (or with shift, selects) a word at a time.
+      const step =
+        key.ctrl && (key.leftArrow || key.rightArrow)
+          ? (e) => ed.wordMove(e, key.leftArrow ? -1 : 1)
+          : key.leftArrow || key.rightArrow
+            ? (e) => ed.move(e, { cols: key.leftArrow ? -1 : 1 })
+            : key.upArrow || key.downArrow
+              ? (e) => ed.move(e, { rows: key.upArrow ? -1 : 1 })
+              : key.home
+                ? ed.lineStart
+                : key.end
+                  ? ed.lineEnd
+                  : null;
+      if (step && key.shift) return set(ed.extend(editor, step));
+      if (step && key.ctrl) return set(step(editor));
+      if (key.ctrl && input === 'w') return set(ed.deleteWordBack(editor));
       if (key.leftArrow) return set(ed.move(editor, { cols: -1 }));
       if (key.rightArrow) return set(ed.move(editor, { cols: 1 }));
       if (key.upArrow) return set(ed.move(editor, { rows: -1 }));
@@ -186,9 +206,11 @@ export function ConsoleView({ editor, editing, ctx, width, height, active }) {
   }
 
   const empty = editor.lines.length === 1 && !editor.lines[0];
+  // ctrl+r runs the selection when there is one, so the gutter marks that instead of the statement.
+  const sel = ed.selection(editor);
   const rows = [];
   for (let i = top.current; i < Math.min(editor.lines.length, top.current + innerH); i++) {
-    const inStatement = st && i + 1 >= st.line && i + 1 <= st.endLine;
+    const inStatement = sel ? i >= sel.start.row && i <= sel.end.row : st && i + 1 >= st.line && i + 1 <= st.endLine;
     const gutter = [
       { text: inStatement ? '▌' : ' ', color: theme.accent },
       { text: `${String(i + 1).padStart(gutterW - 2)} `, color: i === editor.row ? theme.accent : theme.dim },
@@ -202,8 +224,9 @@ export function ConsoleView({ editor, editing, ctx, width, height, active }) {
           const cursor = editing && i === editor.row && x === editor.col;
           const last = segs.at(-1);
           const color = colors[run.kind];
-          if (!cursor && last && !last.cursor && last.color === color) last.text += ch;
-          else segs.push({ text: ch, color, cursor });
+          const bg = ed.isSelected(sel, i, x) ? theme.selBg : undefined;
+          if (!cursor && last && !last.cursor && last.color === color && last.bg === bg) last.text += ch;
+          else segs.push({ text: ch, color, cursor, bg });
         }
         x++;
       }
@@ -241,7 +264,9 @@ export function ConsoleView({ editor, editing, ctx, width, height, active }) {
 
   const hint = items.length
     ? 'tab take it · ↑↓ pick · esc close'
-    : editing
+    : sel
+      ? 'selected · ctrl+r runs just this · typing replaces it · esc let go'
+      : editing
       ? 'typing · ctrl+space suggest · ctrl+r run · ctrl+z undo · esc stop'
       : `${editor.lines.length} lines · ↵ type · ctrl+r run · R run all`;
   return (

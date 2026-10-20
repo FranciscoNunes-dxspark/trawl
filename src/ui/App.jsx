@@ -866,7 +866,7 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     : focus === 'prompt'
       ? 'enter run · tab complete · ↑↓ pick or history · esc back'
       : focus === 'editor'
-        ? 'typing SQL · tab take a suggestion · ctrl+r run the statement · esc stop typing (then 3 for the full results)'
+        ? 'typing SQL · tab take a suggestion · shift+arrows select · ctrl+r run the statement (or selection) · esc stop typing'
         : focus === 'cell'
           ? 'editing the cell · ↵ keep it (s saves) · tab next column · esc leave it as it was · ctrl+u clear'
           : overlay?.settings

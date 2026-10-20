@@ -7,6 +7,7 @@ import { findCommand, suggestionsFor } from '../commands.js';
 import { loadClaudeHistory, loadConsole, saveConfig, saveConsole, withRan } from '../config.js';
 import * as ed from '../editor.js';
 import { commitMode, describeConn, isReadOnly } from '../connections.js';
+import { copyToClipboard } from '../clipboard.js';
 import { osCredentials } from '../credentials.js';
 import { connect as openSession } from '../db.js';
 import { changesText, editTarget } from '../edit.js';
@@ -42,7 +43,7 @@ const VIEWS = [
 const HINTS = {
   explorer: '↵ first rows · d describe · s query it in the console · c CREATE script · /find filter',
   query: '↵ run statement · v select several · R run file · e edit in the console · /console',
-  results: 'h/l columns · ↵ record · e edit · n NULL · d delete · u undo · s save · x export',
+  results: 'h/l columns · ↵ record · y/Y copy cell/row · e edit · n NULL · d delete · u undo · s save · x export',
   history: '↵ run again · e edit in the console · ◆ ran by Claude',
   connections: '↵ connect · n new · p password · f folder · x forget',
 };
@@ -125,7 +126,7 @@ function activityRows(entries) {
  * files by default). `credentials` keeps passwords (the OS store by default) and `open` starts
  * a session (db.js); the tests pass their own. `setTitle(text)` names the terminal window.
  */
-export function App({ config: initialConfig, initialFile, initialConnection, checkLatest, installUpdate, askClaude = askClaudeCli, findDataSources, credentials = osCredentials, open = openSession, setTitle }) {
+export function App({ config: initialConfig, initialFile, initialConnection, checkLatest, installUpdate, askClaude = askClaudeCli, findDataSources, credentials = osCredentials, open = openSession, clipboard = copyToClipboard, setTitle }) {
   const { exit } = useApp();
   const { columns, rows } = useTerminalSize();
   const [config, setConfigState] = useState(initialConfig);
@@ -605,6 +606,15 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     // A password field in place of the prompt: resolves { value, remember } or null.
     askSecret: (req) => confirm({ ...req, secret: true, options: [] }),
     credentials,
+    // Puts text on the clipboard and says so; `what` is "the cell", "12 rows as CSV"…
+    copy: async (text, what) => {
+      try {
+        const via = await clipboard(text);
+        note(`Copied ${what}${via === 'terminal' ? ' (through the terminal, which has to allow it)' : ''}.`, 'ok');
+      } catch (e) {
+        note(`Couldn't copy: ${firstLine(e.message)}`, 'error');
+      }
+    },
     prefill,
     openFile,
     setView,

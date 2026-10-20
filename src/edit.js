@@ -164,7 +164,7 @@ export function toLiteral(text, type) {
 }
 
 /** A value the grid already holds, as a literal for WHERE: from the server, so it fits its type. */
-function valueLiteral(v, type) {
+export function valueLiteral(v, type) {
   if (v == null) return 'NULL';
   if (v instanceof Date) return quote(base(type) === 'date' ? v.toISOString().slice(0, 10) : v.toISOString().replace('Z', ''));
   if (typeof v === 'boolean') return v ? '1' : '0';
@@ -258,4 +258,19 @@ export function savedValue(text, type) {
   if (t === 'bit') return ['1', 'true'].includes(String(text).trim().toLowerCase());
   if (BINARY.has(t)) return Buffer.from(String(text).trim().slice(2), 'hex');
   return String(text);
+}
+
+/** A result set as INSERT statements into `table` (a name as it's typed), a thousand rows a statement. */
+export function insertScript(set, table) {
+  const cols = set.columns.map((c) => `[${c.name.replace(/]/g, ']]')}]`).join(', ');
+  const rows = set.rows.map((row) => `(${row.map((v, i) => valueLiteral(v, set.columns[i].type)).join(', ')})`);
+  const out = [];
+  for (let i = 0; i < rows.length; i += 1000) out.push(`INSERT INTO ${table} (${cols}) VALUES\n  ${rows.slice(i, i + 1000).join(',\n  ')};`);
+  return out.join('\n');
+}
+
+/** A result set as tab-separated text, header first: what pastes into a spreadsheet as cells. */
+export function tsvText(set, { header = true, rows = set.rows } = {}) {
+  const cell = (v) => editText(v).replace(/[\t\r\n]+/g, ' ');
+  return [...(header ? [set.columns.map((c) => c.name).join('\t')] : []), ...rows.map((r) => r.map(cell).join('\t'))].join('\n');
 }

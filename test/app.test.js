@@ -417,6 +417,26 @@ test('c in the Explorer, or /script, puts a CREATE script in the console', async
   app.unmount();
 });
 
+test('y and Y copy the cell and the row, and /copy the whole result set', async () => {
+  const copied = [];
+  const app = start('demo', { clipboard: async (text) => (copied.push(text), 'system') });
+  await until(() => frame().includes('Clubs'), 'the explorer');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('Club A FC'), 'the rows of Clubs');
+  app.stdin.write('l');
+  app.stdin.write('y');
+  await until(() => frame().includes("Copied Name's value."), 'the cell copied');
+  assert.equal(copied[0], 'Club A FC');
+  app.stdin.write('Y');
+  await until(() => frame().includes('Copied row 1, tab-separated.'), 'the row copied');
+  assert.equal(copied[1], '1\tClub A FC\tPT\t1904-03-14\t1');
+  await type(app.stdin, '/copy insert');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('Copied 3 rows as INSERT statements.'), 'the set copied');
+  assert.match(copied[2], /^INSERT INTO \[dbo\]\.\[Clubs\] \(\[Id\], \[Name\], \[Country\], \[Founded\], \[Active\]\) VALUES\n  \(1, N'Club A FC', 'PT', '1904-03-14', 1\),/);
+  app.unmount();
+});
+
 test('e in History puts the statement in the console to edit', async () => {
   const app = start();
   await until(() => frame().includes('Clubs'), 'the explorer');

@@ -6,7 +6,7 @@ import { ADD_USAGE, cleanFolder, commitMode, describeConn, isReadOnly, parseAddA
 import * as ed from './editor.js';
 import { findDataSources, importPlan, planText } from './datagrip.js';
 import { formatSql } from './format.js';
-import { changesText, saveScript, withSaved } from './edit.js';
+import { changesText, insertScript, saveScript, tsvText, withSaved } from './edit.js';
 import { AI_LABELS, AI_LEVELS, aiLevel, askPrompt, canSeeSchema, consoleText, parseAnswer } from './ai.js';
 import { createTableScript, definitionSql, describeObject, findObject, objectName } from './schema.js';
 import { classifyScript, countQuery, oneLine, selectTop, splitStatements, statementAt, toCsv, toJson } from './sql.js';
@@ -476,6 +476,24 @@ export async function saveConsoleAs(ctx, path) {
   } catch (e) {
     ctx.note(`Couldn't write ${full}: ${e.message}`, 'error');
   }
+}
+
+const COPY_FORMATS = ['tsv', 'csv', 'json', 'insert'];
+
+/**
+ * /copy [tsv|csv|json|insert]: the result set on screen, on the clipboard. Tab-separated (the
+ * default) pastes into a spreadsheet as cells; insert gives INSERT statements for the table.
+ */
+export function copyResults(ctx, format) {
+  const set = ctx.currentSet();
+  if (!set) return ctx.note('Run a query first: there is nothing to copy.', 'error');
+  const f = (format || 'tsv').toLowerCase();
+  if (!COPY_FORMATS.includes(f)) return ctx.note(`/copy takes ${COPY_FORMATS.join(', ')} (tab-separated is the default).`, 'error');
+  const res = ctx.results;
+  const table = res?.edit?.table ? `[${res.edit.table.schema}].[${res.edit.table.name}]` : '[TableName]';
+  const text = f === 'csv' ? toCsv(set) : f === 'json' ? toJson(set) : f === 'insert' ? insertScript(set, table) : tsvText(set);
+  const n = `${set.rows.length} row${set.rows.length === 1 ? '' : 's'}`;
+  return ctx.copy(text, f === 'tsv' ? `${n}, tab-separated` : f === 'insert' ? `${n} as INSERT statements${table === '[TableName]' ? ' (into [TableName]: rename it)' : ''}` : `${n} as ${f.toUpperCase()}`);
 }
 
 /** Writes the result set on screen to a .csv or .json file. */

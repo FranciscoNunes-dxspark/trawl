@@ -48,6 +48,7 @@ Results
   [ ]              Previous, next result set
   ↵                The row as a record, one column per line
   x                Export (/export <file.csv|file.json>)
+  y  Y             Copy the cell · the row (tab-separated); /copy [tsv|csv|json|insert] copies the whole set
   Editing (the rows of one table, with its primary key: ↵ in the Explorer, or SELECT … FROM one table)
   e or i           Edit the cell: ↵ keeps it, tab keeps it and edits the next column, esc leaves it
   n                Make the cell NULL           d           Mark the row to delete (again: keep it)
@@ -89,7 +90,7 @@ Slash commands
   /import datagrip [folder]   /connect <name>   /add <name> <server> [database] [--user u] [--domain d] [--folder f] [--prod] [--commit auto|manual] [--trust-cert]
   /forget <name>   /folder <connection> [folder]   /password [connection]   /disconnect   /use <database>   /open <file.sql>   /console   /new   /format   /search <text>   /save <file.sql>
   /describe <table>   /script <name>   /find [text]
-  /export <file>   /limit [rows]   /writes   /tx [auto|manual]   /commit   /rollback   /ask <question>   /ai   /update   /settings   /last   /refresh   /help   /quit
+  /export <file>   /copy [format]   /limit [rows]   /writes   /tx [auto|manual]   /commit   /rollback   /ask <question>   /ai   /update   /settings   /last   /refresh   /help   /quit
 
 Viewer (describe, records, output, this help)
   j k  space  g G  Scroll         esc / q     Close`;

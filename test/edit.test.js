@@ -1,6 +1,6 @@
 import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { canEdit, editTarget, editText, saveScript, savedValue, toLiteral } from '../src/edit.js';
+import { canEdit, editTarget, editText, insertScript, saveScript, savedValue, toLiteral, tsvText } from '../src/edit.js';
 import { demoSession } from '../src/demo.js';
 import { SCHEMA_SQL, buildSchema } from '../src/schema.js';
 import { classifyScript } from '../src/sql.js';
@@ -76,4 +76,20 @@ test('the save script: each change finds exactly its row, or nothing is saved', 
   assert.deepEqual(danger, [], 'every statement has its WHERE');
   assert.throws(() => saveScript(t, set, { cells: new Map([['0:5', 'many']]), deletes: new Set() }), /Goals \(Id = 1\): int takes a whole number/);
   assert.equal(saveScript(t, set, { cells: new Map(), deletes: new Set() }), '');
+});
+
+test('a result set copies as tab-separated text or as INSERT statements', () => {
+  const set = {
+    columns: [{ name: 'Id', type: 'int' }, { name: 'Name', type: 'nvarchar' }, { name: 'Born', type: 'date' }, { name: 'Note', type: 'varchar' }],
+    rows: [
+      [1, "O'Neil", new Date('1990-05-01T00:00:00Z'), null],
+      [2, 'tab\there', null, 'x'],
+    ],
+  };
+  assert.equal(tsvText(set), "Id\tName\tBorn\tNote\n1\tO'Neil\t1990-05-01\t\n2\ttab here\t\tx");
+  assert.equal(tsvText(set, { header: false, rows: [set.rows[0]] }), "1\tO'Neil\t1990-05-01\t");
+  assert.equal(
+    insertScript(set, '[dbo].[People]'),
+    "INSERT INTO [dbo].[People] ([Id], [Name], [Born], [Note]) VALUES\n  (1, N'O''Neil', '1990-05-01', NULL),\n  (2, N'tab\there', NULL, 'x');",
+  );
 });

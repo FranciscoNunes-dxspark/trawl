@@ -1,7 +1,7 @@
 import React, { useMemo, useRef, useState } from 'react';
 import { Box, useInput } from 'ink';
 import * as a from '../actions.js';
-import { canEdit, changesText, editText } from '../edit.js';
+import { canEdit, changesText, editText, tsvText } from '../edit.js';
 import { formatValue, isNumericType } from '../sql.js';
 import { theme } from '../theme.js';
 import { clean, fit, stringWidth } from '../text.js';
@@ -174,6 +174,8 @@ export function ResultsView({ results, changes, setIndex, ctx, width, height, ac
       else if (input === '[' && setIndex > 0) (ctx.setResultIndex(setIndex - 1), setColOffset(0), setCol(0));
       else if (input === ']' && setIndex < sets.length - 1) (ctx.setResultIndex(setIndex + 1), setColOffset(0), setCol(0));
       else if (input === 'x') ctx.prefill('/export ');
+      else if (input === 'y' && set?.rows[row]) ctx.copy(editText(set.rows[row][cur]), `${set.columns[cur].name}'s value`);
+      else if (input === 'Y' && set?.rows[row]) ctx.copy(tsvText(set, { header: false, rows: [set.rows[row]] }), `row ${row + 1}, tab-separated`);
       else if (k.return && set?.rows[row]) ctx.showText(`Row ${row + 1} of ${set.rows.length}`, recordText(set, set.rows[row]));
       else if (!set?.rows[row]) return;
       else if (input === 'e' || input === 'i') startEditing(row, cur);

@@ -21,6 +21,7 @@ export const COMMANDS = [
   { name: 'describe', args: '<table>', desc: 'Columns, types and keys of a table or view', complete: 'objects', run: (ctx, s) => a.describe(ctx, s) },
   { name: 'script', args: '<name>', desc: 'CREATE script of a table, view, procedure or function, into the console', complete: 'everything', run: (ctx, s) => a.scriptObject(ctx, s) },
   { name: 'find', args: '[text]', desc: 'Filter the Explorer by name (empty clears it)', run: (ctx, s) => ctx.find(s) },
+  { name: 'copy', args: '[tsv|csv|json|insert]', desc: 'Copy the result set on screen (tab-separated pastes into a spreadsheet)', run: (ctx, s) => a.copyResults(ctx, s.trim()) },
   { name: 'export', args: '<file.csv|file.json>', desc: 'Save the result set on screen', run: (ctx, s) => a.exportResults(ctx, s) },
   { name: 'limit', args: '[rows]', desc: 'Rows kept per result set (the query stops there)', run: (ctx, s) => a.setLimit(ctx, s) },
   { name: 'writes', desc: 'Allow writes on a read-only connection until you disconnect', run: (ctx) => a.allowWrites(ctx) },

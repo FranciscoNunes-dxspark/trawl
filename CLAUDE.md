@@ -45,6 +45,8 @@ Updates (`src/update.js`): the only network call besides the database. Once a da
 
 Glim (`src/glim.js`, `src/ui/Glim.jsx`): the anglerfish mascot's pixel art and mood-from-session logic, as Tiller's Knot. `assets/` is generated from it by `scripts/logo.js`; don't hand-edit those files. The accent is blue (`theme.accent`, also Glim's outline).
 
+Clipboard (`src/clipboard.js`): through the OS's own tools, as `credentials.js` (PowerShell's `Set-Clipboard`, `pbcopy`, `wl-copy`/`xclip`/`xsel`), falling back to OSC 52 over SSH or when they fail. `App` takes it as the `clipboard` prop; tests pass a recorder.
+
 Theme and text: use `BULLET` instead of `⏺` (Windows draws it wide), and `src/text.js` (`fit`, `fitSegments`, `stringWidth`) for width-aware truncation, never `.length`.
 
 ## Tests

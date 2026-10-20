@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import React from 'react';
 import { render } from 'ink-testing-library';
 import { DEMO_CONNECTIONS } from '../src/connections.js';
+import { BULLET } from '../src/theme.js';
 import { App } from '../src/ui/App.jsx';
 
 const KEYS = { esc: '\x1b' };
@@ -130,7 +131,7 @@ test('clicks pick rows, cells and tabs, double-clicks do what ↵ does (but neve
     await until(() => /❯.*SELECT TOP \(500\)/.test(frame()), 'the cursor on the statement');
     await new Promise((r) => setTimeout(r, 200));
     assert.match(frame(), /─ History /);
-    assert.equal(frame().split('● SELECT TOP (500)').length, 2, 'it ran once, from the Explorer');
+    assert.equal(frame().split(`${BULLET} SELECT TOP (500)`).length, 2, 'it ran once, from the Explorer');
 
     // The prompt: a click focuses it, and a click on the view gives the keys back, keeping the text.
     p = at('Press / for commands');

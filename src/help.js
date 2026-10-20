@@ -5,15 +5,19 @@ export const HELP = `Anywhere
   r                Reload the schema
   esc              Cancel the running query, or clear the activity lines
   ?                This help
-  ,                Settings (/settings)
+  ,                Settings (/settings): row limit, accent colour, mouse, updates
   q / ctrl+c       Quit (asks first if a transaction is open)
+  mouse            Click a tab, a row, a cell or the prompt · double-click does ↵ (but never runs a statement)
+                   the wheel scrolls (shift+wheel: Results' columns) · drag to select text, copied when you let go
+                   in the console: double-click a word, triple-click a line, click the gutter for the statement,
+                   click a suggestion to take it; a drag selects the SQL (ctrl+r runs just that)
 
 Lists
   j k / ↑ ↓        Move            g G         Top, bottom
   ctrl+d ctrl+u    Page down, up   J K         Scroll the right-hand pane
 
-Explorer (tables, views and routines of the current database)
-  ↵                First rows (SELECT TOP (limit) *)
+Explorer (the server's databases; the current one's tables, views and routines)
+  ↵                First rows (SELECT TOP (limit) *); on another database, switch to it (/use)
   d                Describe: columns, types, keys
   s                Start a query on it in the console
   c                Its CREATE script, into the console (a table's from the catalog; others' from the server)

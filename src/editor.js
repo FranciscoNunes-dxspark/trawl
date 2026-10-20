@@ -1,5 +1,6 @@
 // The console's text editing, as pure functions over { lines, row, col }. The UI only maps keys
 // to these, so every edit can be tested without a terminal.
+import { stringWidth } from './text.js';
 
 export const fromText = (text) => {
   const lines = String(text ?? '').replace(/\r\n?/g, '\n').split('\n');
@@ -74,6 +75,26 @@ export function lineStart(ed) {
 
 export const lineEnd = (ed) => ({ ...plain(ed), col: ed.lines[ed.row].length, goal: undefined });
 
+/**
+ * A click on the text: the cursor goes to line `row`, on the character drawn `x` cells into it when
+ * the line is drawn from column `left` (wide characters take two cells). Past the end of a line is
+ * its end; below the last line, the end of the text.
+ */
+export function clickAt(ed, row, x, { left = 0 } = {}) {
+  if (row >= ed.lines.length) return lineEnd({ ...ed, row: ed.lines.length - 1 });
+  const r = Math.max(0, row);
+  const line = ed.lines[r];
+  let col = Math.min(left, line.length);
+  for (let cells = 0; col < line.length; ) {
+    const ch = String.fromCodePoint(line.codePointAt(col));
+    const w = stringWidth(ch);
+    if (cells + w > x) break;
+    cells += w;
+    col += ch.length;
+  }
+  return { ...plain(ed), row: r, col, goal: undefined };
+}
+
 const WORD = /[\w@#$]/;
 
 /** ctrl+← and ctrl+→: to the start of this word or the one before, or past the end of the next. */
@@ -103,6 +124,25 @@ export function deleteWordBack(ed) {
 }
 
 // Selection: `anchor` is where it started ({ row, col }) and the cursor is the other end.
+
+/** A double-click: the word under the cursor selected, or the run of spaces, or the one character. */
+export function selectWord(ed) {
+  const line = ed.lines[ed.row];
+  if (!line) return plain(ed);
+  const kind = (ch) => (WORD.test(ch) ? 'word' : /\s/.test(ch) ? 'space' : 'other');
+  const at = Math.min(ed.col, line.length - 1);
+  const k = kind(line[at]);
+  let from = at;
+  let to = at + 1;
+  if (k !== 'other') {
+    while (from > 0 && kind(line[from - 1]) === k) from--;
+    while (to < line.length && kind(line[to]) === k) to++;
+  }
+  return { lines: ed.lines, row: ed.row, col: to, anchor: { row: ed.row, col: from } };
+}
+
+/** A triple-click: the cursor's line selected, end to end. */
+export const selectLine = (ed) => ({ lines: ed.lines, row: ed.row, col: ed.lines[ed.row].length, anchor: { row: ed.row, col: 0 } });
 
 /** Applies a movement with shift held: the selection grows from where it started. */
 export function extend(ed, moveFn) {

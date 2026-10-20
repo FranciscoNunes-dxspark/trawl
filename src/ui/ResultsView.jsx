@@ -1,11 +1,11 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Box, useInput } from 'ink';
 import * as a from '../actions.js';
 import { canEdit, changesText, editText, tsvText } from '../edit.js';
 import { formatValue, isNumericType, viewOrder } from '../sql.js';
 import { theme } from '../theme.js';
 import { clean, fit, stringWidth } from '../text.js';
-import { useListNav } from './hooks.js';
+import { useListNav, useMouse } from './hooks.js';
 import { Lines, Panel, Row } from './parts.jsx';
 
 const SEP = ' │ ';
@@ -44,7 +44,7 @@ function editingSegments({ text, cursor }, w) {
  * edit.js), cells can be edited and rows deleted: changes are staged (`changes`, kept by App) and
  * `s` saves them all at once.
  */
-export function ResultsView({ results, changes, setIndex, view, ctx, width, height, active }) {
+export function ResultsView({ results, changes, setIndex, view, ctx, width, height, top = 0, active }) {
   const sets = results?.sets ?? [];
   const set = sets[setIndex];
   // o sorts and /filter narrows the rows on screen; they stay where they are in `set.rows`, so
@@ -97,13 +97,17 @@ export function ResultsView({ results, changes, setIndex, view, ctx, width, heig
     }
     return shown;
   };
-  let firstCol = Math.min(colOffset, Math.max(0, widths.length - 1), cur);
+  // shift+wheel scrolls the columns and leaves the cell cursor where it was, out of sight if need be,
+  // until it moves again.
+  const colFree = useRef(false);
+  let firstCol = Math.min(colOffset, Math.max(0, widths.length - 1), colFree.current ? Infinity : cur);
   let shown = layout(firstCol);
-  while (shown.length && cur > shown.at(-1).i && firstCol < cur) shown = layout(++firstCol);
+  while (!colFree.current && shown.length && cur > shown.at(-1).i && firstCol < cur) shown = layout(++firstCol);
   if (firstCol !== colOffset) queueMicrotask(() => setColOffset(firstCol));
 
   const setCol = (c) => {
     const next = Math.max(0, Math.min(widths.length - 1, c));
+    colFree.current = false;
     colRef.current = next;
     setColState(next);
     if (!editable) setColOffset(next);
@@ -171,44 +175,81 @@ export function ResultsView({ results, changes, setIndex, view, ctx, width, heig
     if (text) put(e.text.slice(0, e.cursor) + text + e.text.slice(e.cursor), e.cursor + text.length);
   };
 
-  useInput(
-    (input, k) => {
-      if (ctx.cellHasKeys()) return cellKeys(input, k);
-      if (!ctx.viewHasKeys()) return;
-      if (nav.handle(input, k)) return;
-      const row = order[nav.current()];
-      const cur = Math.min(editable ? colRef.current : colOffset, Math.max(0, widths.length - 1));
-      if (k.leftArrow || input === 'h') setCol(cur - 1);
-      else if (k.rightArrow || input === 'l') setCol(cur + 1);
-      else if (input === '[' && setIndex > 0) (ctx.setResultIndex(setIndex - 1), setColOffset(0), setCol(0));
-      else if (input === ']' && setIndex < sets.length - 1) (ctx.setResultIndex(setIndex + 1), setColOffset(0), setCol(0));
-      else if (input === 'x') ctx.prefill('/export ');
-      else if (input === 'o' && set) ctx.sortResults(cur);
-      else if (input === 'f' && set) ctx.prefill('/filter ');
-      else if (input === 'y' && set?.rows[row]) ctx.copy(editText(set.rows[row][cur]), `${set.columns[cur].name}'s value`);
-      else if (input === 'Y' && set?.rows[row]) ctx.copy(tsvText(set, { header: false, rows: [set.rows[row]] }), `row ${row + 1}, tab-separated`);
-      else if (k.return && set?.rows[row]) ctx.showText(`Row ${row + 1} of ${set.rows.length}`, recordText(set, set.rows[row]));
-      else if (!set?.rows[row]) return;
-      else if (input === 'e' || input === 'i') startEditing(row, cur);
-      else if (input === 'n') {
-        const refusal = cellRefusal(cur);
-        if (refusal) return ctx.note(refusal, 'error');
-        const tc = edit.columns.get(cur);
-        if (!tc.nullable) return ctx.note(`${tc.name} can't be NULL.`, 'error');
-        stage(row, cur, null);
-      } else if (input === 'd') {
-        if (!edit?.table) return ctx.note(`These rows can't be deleted from here: ${edit?.reason ?? 'nothing to edit'}.`, 'error');
-        ctx.setChanges((ch) => {
-          const deletes = new Set(ch.deletes);
-          deletes.has(row) ? deletes.delete(row) : deletes.add(row);
-          return { ...ch, deletes };
+  const keys = (input, k) => {
+    if (ctx.cellHasKeys()) return cellKeys(input, k);
+    if (!ctx.viewHasKeys()) return;
+    if (nav.handle(input, k)) return;
+    const row = order[nav.current()];
+    const cur = Math.min(editable ? colRef.current : colOffset, Math.max(0, widths.length - 1));
+    if (k.leftArrow || input === 'h') setCol(cur - 1);
+    else if (k.rightArrow || input === 'l') setCol(cur + 1);
+    else if (input === '[' && setIndex > 0) (ctx.setResultIndex(setIndex - 1), setColOffset(0), setCol(0));
+    else if (input === ']' && setIndex < sets.length - 1) (ctx.setResultIndex(setIndex + 1), setColOffset(0), setCol(0));
+    else if (input === 'x') ctx.prefill('/export ');
+    else if (input === 'o' && set) ctx.sortResults(cur);
+    else if (input === 'f' && set) ctx.prefill('/filter ');
+    else if (input === 'y' && set?.rows[row]) ctx.copy(editText(set.rows[row][cur]), `${set.columns[cur].name}'s value`);
+    else if (input === 'Y' && set?.rows[row]) ctx.copy(tsvText(set, { header: false, rows: [set.rows[row]] }), `row ${row + 1}, tab-separated`);
+    else if (k.return && set?.rows[row]) ctx.showText(`Row ${row + 1} of ${set.rows.length}`, recordText(set, set.rows[row]));
+    else if (!set?.rows[row]) return;
+    else if (input === 'e' || input === 'i') startEditing(row, cur);
+    else if (input === 'n') {
+      const refusal = cellRefusal(cur);
+      if (refusal) return ctx.note(refusal, 'error');
+      const tc = edit.columns.get(cur);
+      if (!tc.nullable) return ctx.note(`${tc.name} can't be NULL.`, 'error');
+      stage(row, cur, null);
+    } else if (input === 'd') {
+      if (!edit?.table) return ctx.note(`These rows can't be deleted from here: ${edit?.reason ?? 'nothing to edit'}.`, 'error');
+      ctx.setChanges((ch) => {
+        const deletes = new Set(ch.deletes);
+        deletes.has(row) ? deletes.delete(row) : deletes.add(row);
+        return { ...ch, deletes };
+      });
+    } else if (input === 'u') {
+      ctx.setChanges((ch) => ({ cells: new Map([...ch.cells].filter(([at]) => !at.startsWith(`${row}:`))), deletes: new Set([...ch.deletes].filter((r) => r !== row)) }));
+    } else if (input === 'U') ctx.setChanges({ cells: new Map(), deletes: new Set() });
+    else if (input === 's') a.saveEdits(ctx);
+  };
+  useInput(keys, { isActive: active });
+
+  // Clicking away from the cell being typed into (the prompt, another tab) keeps what was typed, as ↵ does.
+  const leaveCell = useRef(null);
+  leaveCell.current = () => editingRef.current && cellKeys('', { return: true });
+  useEffect(() => {
+    if (!active) leaveCell.current();
+  }, [active]);
+  useEffect(() => () => leaveCell.current(), []);
+
+  const scrollCols = (n) => {
+    colFree.current = editable;
+    setColOffset((o) => Math.max(0, Math.min(widths.length - 1, o + n)));
+  };
+  // The grid's rows start under the border, the column names and the line under them; its cells
+  // after the border and the ❯, each followed by a separator (a click on one goes to the cell before).
+  useMouse(
+    ctx,
+    (e) => {
+      if (!set) return;
+      if (e.wheel) return e.shift ? scrollCols(e.wheel) : nav.scrollBy(e.wheel * 3);
+      leaveCell.current();
+      // Under the console: a click there is about the results, so typing stops.
+      if (top) ctx.setEditing(false);
+      if (!nav.pick(e.y - 3)) return;
+      if (editable) {
+        let x = 3;
+        const starts = shown.map(({ w }) => {
+          const from = x;
+          x += w + SEP.length;
+          return from;
         });
-      } else if (input === 'u') {
-        ctx.setChanges((ch) => ({ cells: new Map([...ch.cells].filter(([at]) => !at.startsWith(`${row}:`))), deletes: new Set([...ch.deletes].filter((r) => r !== row)) }));
-      } else if (input === 'U') ctx.setChanges({ cells: new Map(), deletes: new Set() });
-      else if (input === 's') a.saveEdits(ctx);
+        const hit = shown.findLast((_, k) => k === 0 || e.x >= starts[k]);
+        if (hit) setCol(hit.i);
+      }
+      // A double-click shows the record, as ↵ does.
+      if (e.double) keys('', { return: true });
     },
-    { isActive: active },
+    { top },
   );
 
   if (!results) {

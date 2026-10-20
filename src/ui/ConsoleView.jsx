@@ -6,6 +6,7 @@ import * as ed from '../editor.js';
 import { highlight, oneLine, splitStatements, statementAt, withoutLeadingComments } from '../sql.js';
 import { fit, fitSegments } from '../text.js';
 import { theme } from '../theme.js';
+import { useMouse } from './hooks.js';
 import { Panel, Row } from './parts.jsx';
 
 const COLORS = () => ({ keyword: theme.accent, string: theme.warn, comment: theme.dim, number: theme.number, variable: theme.routine });
@@ -61,11 +62,18 @@ export function ConsoleView({ editor, editing, ctx, width, height, active }) {
   const textW = Math.max(10, width - 2 - gutterW);
   const colors = COLORS();
 
+  // Scrolled with the wheel, the text stays where it was put, the cursor out of sight if need be,
+  // until a key changes the text, moves the cursor or starts or stops typing.
+  const free = useRef(null);
+  const [, setScrolled] = useState(0);
+  if (free.current && (free.current.editor !== editor || free.current.editing !== editing)) free.current = null;
   // Keep the cursor in view.
-  if (editor.row < top.current) top.current = editor.row;
-  if (editor.row >= top.current + innerH) top.current = editor.row - innerH + 1;
-  if (editor.col < left.current) left.current = editor.col;
-  if (editor.col >= left.current + textW) left.current = editor.col - textW + 1;
+  if (!free.current) {
+    if (editor.row < top.current) top.current = editor.row;
+    if (editor.row >= top.current + innerH) top.current = editor.row - innerH + 1;
+    if (editor.col < left.current) left.current = editor.col;
+    if (editor.col >= left.current + textW) left.current = editor.col - textW + 1;
+  }
 
   const set = (next) => ctx.setConsole(next);
 
@@ -79,25 +87,70 @@ export function ConsoleView({ editor, editing, ctx, width, height, active }) {
   };
 
   // Keys while not typing: start typing, run, and move between statements.
-  useInput(
-    (input, key) => {
-      if (!ctx.viewHasKeys()) return;
+  const keys = (input, key) => {
+    if (!ctx.viewHasKeys()) return;
+    const editor = ctx.console;
+    if (key.return || input === 'i') return ctx.setEditing(true);
+    if (key.ctrl && input === 'r') return runConsole(ctx, editor);
+    if (key.ctrl && input === 'z') return ctx.undoConsole();
+    if (key.ctrl && input === 'y') return ctx.redoConsole();
+    if (input === 'R') return runConsole(ctx, editor, { all: true });
+    if (key.ctrl && input === 'f') return ctx.prefill('/search ');
+    if (input === 'f') return a.formatConsole(ctx);
+    if (input === 'p') return a.showPlan(ctx);
+    if (input === 'n' || input === 'N') return a.searchConsole(ctx, '', { back: input === 'N' });
+    if (key.downArrow || input === 'j') return set(ed.move(editor, { rows: 1 }));
+    if (key.upArrow || input === 'k') return set(ed.move(editor, { rows: -1 }));
+    if (input === 'g') return set({ lines: editor.lines, row: 0, col: 0 });
+    if (input === 'G') return set({ lines: editor.lines, row: editor.lines.length - 1, col: 0 });
+  };
+  useInput(keys, { isActive: active && !editing });
+
+  // The mouse, typing or not. The text starts under the top border, after the border and the gutter.
+  // A click puts the cursor on the character under it, a double-click selects the word and a triple
+  // the line; a click in the gutter selects the statement, and one on a suggestion takes it. A drag
+  // selects the SQL it covers (and copies it), running on past the top or bottom as it scrolls.
+  const popupRef = useRef(null);
+  const dragFrom = useRef(null);
+  const cellAt = (editor, x, y) => ed.clickAt(editor, top.current + y - 1, x - 1 - gutterW, { left: left.current });
+  useMouse(
+    ctx,
+    (e) => {
       const editor = ctx.console;
-      if (key.return || input === 'i') return ctx.setEditing(true);
-      if (key.ctrl && input === 'r') return runConsole(ctx, editor);
-      if (key.ctrl && input === 'z') return ctx.undoConsole();
-      if (key.ctrl && input === 'y') return ctx.redoConsole();
-      if (input === 'R') return runConsole(ctx, editor, { all: true });
-      if (key.ctrl && input === 'f') return ctx.prefill('/search ');
-      if (input === 'f') return a.formatConsole(ctx);
-      if (input === 'p') return a.showPlan(ctx);
-      if (input === 'n' || input === 'N') return a.searchConsole(ctx, '', { back: input === 'N' });
-      if (key.downArrow || input === 'j') return set(ed.move(editor, { rows: 1 }));
-      if (key.upArrow || input === 'k') return set(ed.move(editor, { rows: -1 }));
-      if (input === 'g') return set({ lines: editor.lines, row: 0, col: 0 });
-      if (input === 'G') return set({ lines: editor.lines, row: editor.lines.length - 1, col: 0 });
+      if (e.wheel) {
+        top.current = Math.max(0, Math.min(top.current + e.wheel * 3, editor.lines.length - innerH));
+        free.current = { editor, editing };
+        return setScrolled((n) => n + 1);
+      }
+      if (e.drag) {
+        setMenu(null);
+        dragFrom.current ??= cellAt(editor, e.from.x, e.from.y);
+        const next = { ...cellAt(editor, e.x, e.y), anchor: { row: dragFrom.current.row, col: dragFrom.current.col } };
+        set(next);
+        if (!e.release) return;
+        dragFrom.current = null;
+        const sel = ed.selectedText(next);
+        if (sel?.text) ctx.copySelection(sel.text);
+        return;
+      }
+      if (e.y < 1 || e.y > innerH) return;
+      const pop = popupRef.current;
+      const k = e.y - 1 - (pop?.y ?? 0);
+      if (pop?.items && k >= 0 && k < pop.items.length && e.x - 1 >= pop.x && e.x - 1 < pop.x + pop.w) {
+        const pick = pop.items[k];
+        set(accept(editor, pop.completion, pick));
+        // Taking "dbo." goes straight on to that schema's tables, as tab does.
+        return setMenu(pick.insert.endsWith('.') ? { index: 0 } : null);
+      }
+      setMenu(null);
+      const at = cellAt(editor, e.x, e.y);
+      if (e.x - 1 < gutterW && top.current + e.y - 1 < editor.lines.length) {
+        const st = statementAt(splitStatements(ed.toText(editor)), at.row + 1);
+        if (st && at.row + 1 <= st.endLine) return set({ lines: editor.lines, row: st.endLine - 1, col: editor.lines[st.endLine - 1].length, anchor: { row: st.line - 1, col: 0 } });
+      }
+      set(e.triple ? ed.selectLine(at) : e.double ? ed.selectWord(at) : at);
     },
-    { isActive: active && !editing },
+    { drags: (e) => e.y >= 1 && e.y <= innerH },
   );
 
   // Keys while typing. Ink gives a paste as one input; insert() splits its lines.
@@ -198,6 +251,10 @@ export function ConsoleView({ editor, editing, ctx, width, height, active }) {
     popup = {
       y: innerH - y - 1 >= shown ? y + 1 : y - shown,
       x: gutterW + Math.max(0, Math.min(completion.from - left.current, textW - w)),
+      // For clicks: what each line is, and how wide they all are.
+      items: visible,
+      completion,
+      w,
       lines: visible.map((item, k) => {
         const on = first + k === sel;
         const bg = on ? theme.accent : theme.selBg;
@@ -229,6 +286,8 @@ export function ConsoleView({ editor, editing, ctx, width, height, active }) {
       popup = { y: y > 0 ? y - 1 : y + 1, x: gutterW + Math.max(0, Math.min(editor.col - left.current - 1, textW - w)), lines: [fitSegments(segs, w)] };
     }
   }
+
+  popupRef.current = popup;
 
   const empty = editor.lines.length === 1 && !editor.lines[0];
   // ctrl+r runs the selection when there is one, so the gutter marks that instead of the statement.

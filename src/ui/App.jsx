@@ -57,6 +57,11 @@ const firstLine = (s) => String(s ?? '').split('\n')[0];
 // Changes staged in Results: "row:col" → the text typed (null for NULL), and rows to delete.
 const NO_CHANGES = { cells: new Map(), deletes: new Set() };
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+// What a mouse selection copied: "3 lines", "12 characters".
+const copiedText = (text) => {
+  const n = text.split('\n').length;
+  return n > 1 ? `${n} lines` : plural(text.length, 'character');
+};
 
 /** The activity line under a run: "12 rows · 3 rows affected · 41 ms". */
 // STATISTICS IO and TIME (/stats) send several messages a statement: one line says it all.
@@ -99,14 +104,25 @@ function Header({ session, tranCount, writesAllowed, file, width, connecting, mo
   return <Row pointer={false} width={width} segments={[...fitSegments(segs, width - pathW - 1), { text: ' ' }, { text: path, color: theme.dim }]} />;
 }
 
+/** The tabs' labels and the columns each one covers (`from` up to `to`), which clicks are matched against. */
+function tabLabels(results) {
+  let x = 0;
+  return VIEWS.map((v, i) => {
+    let label = ` ${i + 1} ${v.label}`;
+    if (v.id === 'results' && results?.sets.length > 1) label += ` ${results.sets.length}`;
+    label += ' ';
+    const from = x;
+    x += stringWidth(label) + 1;
+    return { id: v.id, label, from, to: from + stringWidth(label) };
+  });
+}
+
 function Tabs({ view, results, width }) {
   const segs = [];
-  VIEWS.forEach((v, i) => {
-    let label = `${i + 1} ${v.label}`;
-    if (v.id === 'results' && results?.sets.length > 1) label += ` ${results.sets.length}`;
-    const on = v.id === view;
-    segs.push({ text: ` ${label} `, bg: on ? theme.accent : undefined, color: on ? theme.ink : theme.dim, bold: on }, { text: ' ' });
-  });
+  for (const t of tabLabels(results)) {
+    const on = t.id === view;
+    segs.push({ text: t.label, bg: on ? theme.accent : undefined, color: on ? theme.ink : theme.dim, bold: on }, { text: ' ' });
+  }
   return <Row pointer={false} width={width} segments={segs} />;
 }
 
@@ -125,15 +141,18 @@ function activityRows(entries) {
   return out.slice(-6);
 }
 
+const DOUBLE_CLICK_MS = 400;
+
 /**
  * `checkLatest({ signal })` looks up the latest release (update.js fetchLatest), and
  * `installUpdate(version, { signal })` puts it in place of this executable; without them, as in
  * the tests, Trawl never checks for updates or replaces anything. `askClaude({ prompt, signal })` answers /ask
  * (the claude CLI by default) and `findDataSources` feeds /import datagrip (DataGrip's own
  * files by default). `credentials` keeps passwords (the OS store by default) and `open` starts
- * a session (db.js); the tests pass their own. `setTitle(text)` names the terminal window.
+ * a session (db.js); the tests pass their own. `setTitle(text)` names the terminal window. `mouse` is
+ * mouse.js's terminalMouse() from cli.jsx (missing where the terminal can't report it); tests pass their own.
  */
-export function App({ config: initialConfig, initialFile, initialConnection, checkLatest, installUpdate, askClaude = askClaudeCli, findDataSources, credentials = osCredentials, open = openSession, clipboard = copyToClipboard, setTitle }) {
+export function App({ config: initialConfig, initialFile, initialConnection, checkLatest, installUpdate, askClaude = askClaudeCli, findDataSources, credentials = osCredentials, open = openSession, clipboard = copyToClipboard, setTitle, mouse }) {
   const { exit } = useApp();
   const { columns, rows } = useTerminalSize();
   const [config, setConfigState] = useState(initialConfig);
@@ -167,6 +186,13 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     const t = setTimeout(() => setMoodTick((n) => n + 1), 8100);
     return () => clearTimeout(t);
   }, [entries]);
+  // A word in the bottom line for a moment ("Copied 3 lines"), where it moves nothing on screen.
+  const [flash, setFlash] = useState(null);
+  useEffect(() => {
+    if (!flash) return;
+    const t = setTimeout(() => setFlash(null), 3000);
+    return () => clearTimeout(t);
+  }, [flash]);
 
   // Async actions read the latest state through refs, not through stale closures.
   const sessionRef = useRef(null);
@@ -596,6 +622,8 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
       get changes() {
         return changesRef.current;
       },
+      // What useMouse registers: the component on screen takes the main area's clicks and wheel.
+      mouseHandlers: [],
     };
   }
   const ctx = ctxRef.current;
@@ -625,6 +653,8 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     // A password field in place of the prompt: resolves { value, remember } or null.
     askSecret: (req) => confirm({ ...req, secret: true, options: [] }),
     credentials,
+    // Whether this terminal can report the mouse at all (Settings says so).
+    mouseAvailable: Boolean(mouse),
     // Puts text on the clipboard and says so; `what` is "the cell", "12 rows as CSV"…
     copy: async (text, what) => {
       try {
@@ -634,6 +664,12 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
         note(`Couldn't copy: ${firstLine(e.message)}`, 'error');
       }
     },
+    // Text selected with the mouse (the console's SQL): copied, and said for a moment in the bottom line.
+    copySelection: (text) =>
+      Promise.resolve(clipboard(text)).then(
+        () => setFlash({ text: `Copied ${copiedText(text)}` }),
+        (e) => note(`Couldn't copy: ${firstLine(e.message)}`, 'error'),
+      ),
     prefill,
     openFile,
     setView,
@@ -839,6 +875,85 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     globalKeys(input, key);
   });
 
+  // The terminal reports the mouse while the setting is on (it is unless set off).
+  useEffect(() => {
+    mouse?.enable(config.mouse !== false);
+  }, [config.mouse]);
+
+  // Where things were drawn, for matching clicks against (set as the layout below is worked out).
+  const layout = useRef(null);
+  const lastPress = useRef(null);
+  // The component under a point of the main area (`y` counted from its top), and that `y` in it.
+  const mouseTarget = (y) => {
+    const target = ctx.mouseHandlers.findLast((h) => h.top <= y);
+    return target && { target, y: y - target.top };
+  };
+  const onMouse = (e) => {
+    if (e.type === 'copy') return setFlash({ text: `Copied ${copiedText(e.text)}` });
+    if (e.button === 'left' && !e.release && !e.drag) {
+      const prev = lastPress.current;
+      const now = Date.now();
+      const count = prev && prev.x === e.x && prev.y === e.y && now - prev.at < DOUBLE_CLICK_MS ? prev.count + 1 : 1;
+      e.double = count === 2;
+      e.triple = count === 3;
+      // A fourth click starts over rather than counting on.
+      lastPress.current = count < 3 ? { x: e.x, y: e.y, at: now, count } : null;
+    } else if (!e.drag && e.button !== 'wheel') return;
+    // A confirmation's options (and a password field) take keys only.
+    if (confirmRef.current || !layout.current) return;
+    const { mainTop, mainH, promptTop, sugCount, tabs } = layout.current;
+    if (e.drag) {
+      // A drag the component it started in takes itself (claimDrags below): the console selecting SQL.
+      const hit = mouseTarget(e.from.y - mainTop);
+      if (!hit) return;
+      if (focusRef.current === 'prompt') setFocus('view');
+      return hit.target.handle({ ...e, y: e.y - mainTop - hit.target.top, from: { x: e.from.x, y: hit.y } });
+    }
+    if (e.y === mainTop - 1 && !e.wheel) {
+      const tab = tabs.find((t) => e.x >= t.from && e.x < t.to);
+      if (!tab) return;
+      // Whatever is open over the view closes: a click on a tab should never do nothing.
+      if (overlayRef.current) setOverlay(null);
+      if (focusRef.current === 'prompt') setFocus('view');
+      return setView(tab.id);
+    }
+    if (e.y >= mainTop && e.y < mainTop + mainH) {
+      // Like esc, a click on the view leaves the prompt's text for later.
+      if (!e.wheel && focusRef.current === 'prompt') setFocus('view');
+      const hit = mouseTarget(e.y - mainTop);
+      return hit?.target.handle({ ...e, y: hit.y });
+    }
+    if (e.wheel) return;
+    if (e.y >= promptTop && e.y < promptTop + 3) {
+      // The text starts after the border, the padding and "> ", scrolled as PromptBox scrolls it.
+      const { value, cursor } = promptRef.current;
+      const inner = columns - 6;
+      const start = focusRef.current === 'prompt' ? Math.max(0, cursor - inner + 1) : 0;
+      setPrompt(value, Math.max(0, Math.min(value.length, start + e.x - 4)));
+      return setFocus('prompt');
+    }
+    const sug = e.y - promptTop - 3;
+    if (sug >= 0 && sug < sugCount) {
+      setSugIndex(sug);
+      // As ↵ would, on the suggestion under the pointer.
+      if (e.double) promptKeys('', { return: true });
+    }
+  };
+  const mouseRef = useRef(onMouse);
+  mouseRef.current = onMouse;
+  useEffect(() => mouse?.subscribe((e) => mouseRef.current(e)), [mouse]);
+  // Drags that start where the component on screen selects for itself skip the screen selection.
+  useEffect(
+    () =>
+      mouse?.claimDrags?.((e) => {
+        const at = layout.current;
+        if (confirmRef.current || !at || e.y < at.mainTop || e.y >= at.mainTop + at.mainH) return false;
+        const hit = mouseTarget(e.y - at.mainTop);
+        return Boolean(hit?.target.drags?.({ ...e, y: hit.y }));
+      }),
+    [mouse],
+  );
+
   // Layout: everything is sized to the terminal, one row short of it so Ink never clears the screen.
   const W = columns;
   const H = Math.max(12, rows - 1);
@@ -849,6 +964,13 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
   const showWelcome = welcome && H >= 28;
   const mainH = Math.max(6, H - 2 - act.length - (busy ? 1 : 0) - bottom - 1 - (showWelcome ? WELCOME_HEIGHT : 0));
   const viewActive = focus === 'view' && !overlay && !confirmReq;
+  layout.current = {
+    mainTop: 2,
+    mainH,
+    promptTop: 2 + mainH + (showWelcome ? WELCOME_HEIGHT : 0) + act.length + (busy ? 1 : 0),
+    sugCount: suggestions.length,
+    tabs: tabLabels(results),
+  };
 
   let main;
   // An overlay closes on a key (esc, q) once every handler has had it: App's dispatcher runs after the
@@ -859,7 +981,7 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     const settingsActive = focus === 'view' && !confirmReq;
     main = <SettingsView config={config} ctx={ctx} updates={{ check: Boolean(checkLatest), install: Boolean(installUpdate) }} update={update} width={W} height={mainH} active={settingsActive} onClose={closeOnKey} />;
   } else if (overlay) {
-    main = <TextViewer {...overlay} width={W} height={mainH} active={focus === 'view' && (!confirmReq || confirmReq.scrollsOverlay)} pageOnly={Boolean(confirmReq)} onClose={closeOnKey} />;
+    main = <TextViewer {...overlay} ctx={ctx} width={W} height={mainH} active={focus === 'view' && (!confirmReq || confirmReq.scrollsOverlay)} pageOnly={Boolean(confirmReq)} onClose={closeOnKey} />;
   } else if (view === 'connections') {
     main = <ConnectionsView connections={config.connections} current={session?.conn} ctx={ctx} width={W} height={mainH} active={viewActive} />;
   } else if (view === 'query' && queryMode === 'console') {
@@ -869,7 +991,7 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     main = (
       <Box flexDirection="column" width={W} height={mainH}>
         <ConsoleView editor={editor} editing={editing} ctx={ctx} width={W} height={mainH - under} active={(viewActive || editing) && !overlay && !confirmReq} />
-        {under ? <ResultsView results={results} changes={changes} setIndex={resultIndex} view={resultView} ctx={ctx} width={W} height={under} active={false} /> : null}
+        {under ? <ResultsView results={results} changes={changes} setIndex={resultIndex} view={resultView} ctx={ctx} width={W} height={under} top={mainH - under} active={false} /> : null}
       </Box>
     );
   } else if (view === 'query') {
@@ -890,7 +1012,9 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     main = <ExplorerView schema={schema} ctx={ctx} width={W} height={mainH} active={viewActive} filter={filter} />;
   }
 
-  const left = confirmReq?.secret
+  const left = flash
+    ? flash.text
+    : confirmReq?.secret
     ? 'type the password (shown as *) · ↵ done · esc cancel'
     : focus === 'prompt'
       ? 'enter run · tab complete · ↑↓ pick or history · esc back'

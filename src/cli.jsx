@@ -6,6 +6,7 @@ import { loadConfig } from './config.js';
 import { DEMO_CONNECTIONS } from './connections.js';
 import { setAccent } from './theme.js';
 import { App } from './ui/App.jsx';
+import { terminalMouse } from './mouse.js';
 
 // A title is printed raw, so nothing in it may end or start an escape sequence.
 const clean = (s) => String(s).replace(/[\x00-\x1f\x7f]/g, '');
@@ -69,6 +70,9 @@ async function runApp() {
   const checkLatest = COMPILED ? (opts) => fetchLatest({ current: VERSION, ...opts }) : undefined;
   // What an earlier update moved aside; quietly, and it doesn't hold up the start.
   if (COMPILED) removeOldExecutables();
+  // Clicks and the wheel, where the terminal can report them; App turns reporting on unless the setting
+  // is off. Set up before rendering, so mouse reports never reach Ink as keys.
+  const mouse = await terminalMouse(process.stdin, process.stdout);
   const app = render(
     <App
       config={config}
@@ -77,8 +81,10 @@ async function runApp() {
       checkLatest={checkLatest}
       installUpdate={COMPILED ? installUpdate : undefined}
       setTitle={setTitle}
+      mouse={mouse}
     />,
-    { exitOnCtrlC: false },
+    // Through the mouse's stdout, which watches the frames to select text from.
+    { exitOnCtrlC: false, stdout: mouse?.stdout ?? process.stdout },
   );
   await app.waitUntilExit();
   process.exit(0);

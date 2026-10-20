@@ -1,9 +1,16 @@
-// Checks GitHub Releases for a newer Trawl. It only tells you: nothing is downloaded or replaced.
-// It asks the GitHub API with "trawl/<version>" as the user agent and, because the repository is
-// private, again through the gh CLI when that finds nothing. No connection, query or machine
-// details are sent.
+// Checks GitHub Releases for a newer Trawl and, in the downloaded executable, installs it, as Tiller
+// does. It asks the GitHub API with "trawl/<version>" as the user agent and, because the repository
+// is private, again through the gh CLI when that finds nothing; downloads go the same way. No
+// connection, query or machine details are sent.
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { createWriteStream } from 'node:fs';
+import { chmod, mkdtemp, readFile, readdir, rename, rm, stat } from 'node:fs/promises';
+import { basename, dirname, join } from 'node:path';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
+import { VERSION } from './version.js';
 
 export const REPO = 'FranciscoNunes-dxspark/trawl';
 export const RELEASES_URL = `https://github.com/${REPO}/releases`;
@@ -36,10 +43,18 @@ export function isDue(check, now = Date.now()) {
   return !check?.at || now - check.at >= DAY;
 }
 
-/** The release file for this machine, as scripts/build.js names them. */
+// The release file for each platform; these names come from TARGETS in scripts/build.js.
+const ASSETS = {
+  'win32-x64': 'trawl-windows-x64.exe',
+  'linux-x64': 'trawl-linux-x64',
+  'linux-arm64': 'trawl-linux-arm64',
+  'darwin-x64': 'trawl-macos-x64',
+  'darwin-arm64': 'trawl-macos-arm64',
+};
+
+/** The release file that runs on `platform` and `arch`, or null if there's none. */
 export function assetName(platform = process.platform, arch = process.arch) {
-  const os = platform === 'win32' ? 'windows' : platform === 'darwin' ? 'macos' : platform;
-  return `trawl-${os}-${arch}${platform === 'win32' ? '.exe' : ''}`;
+  return ASSETS[`${platform}-${arch}`] ?? null;
 }
 
 /**
@@ -108,4 +123,115 @@ export function openUrl(url) {
   const [cmd, args] =
     process.platform === 'win32' ? ['rundll32', ['url.dll,FileProtocolHandler', url]] : process.platform === 'darwin' ? ['open', [url]] : ['xdg-open', [url]];
   execFile(cmd, args, { windowsHide: true }, () => {});
+}
+
+const CHECKSUMS = 'SHA256SUMS.txt';
+const DOWNLOAD_MS = 10 * 60 * 1000;
+const WORK_PREFIX = '.trawl-update-';
+
+/** sha256sum's output ("<hash>  <name>", or "<hash> *<name>" for binary mode) as a Map from name to hash. */
+export function parseChecksums(text) {
+  const out = new Map();
+  for (const line of String(text ?? '').split(/\r?\n/)) {
+    const m = /^([0-9a-f]{64}) [ *](.+)$/i.exec(line.trim());
+    if (m) out.set(m[2], m[1].toLowerCase());
+  }
+  return out;
+}
+
+/** Downloads release `version`'s files `names` into `dir`: straight from GitHub, or through gh while the repository is private. */
+async function downloadAssets(version, names, dir, { signal } = {}) {
+  const limit = signal ? AbortSignal.any([signal, AbortSignal.timeout(DOWNLOAD_MS)]) : AbortSignal.timeout(DOWNLOAD_MS);
+  try {
+    for (const name of names) {
+      const res = await fetch(`https://github.com/${REPO}/releases/download/v${version}/${name}`, {
+        headers: { 'user-agent': `trawl/${VERSION}` },
+        signal: limit,
+      });
+      if (!res.ok) throw new Error(`GitHub answered ${res.status}`);
+      await pipeline(Readable.fromWeb(res.body), createWriteStream(join(dir, name)));
+    }
+    return;
+  } catch (e) {
+    if (signal?.aborted) throw e;
+    // A private repository answers 404; gh has a sign-in that can read it.
+  }
+  await new Promise((resolve, reject) => {
+    const args = ['release', 'download', `v${version}`, '--repo', REPO, '--dir', dir, '--clobber', ...names.flatMap((n) => ['--pattern', n])];
+    execFile('gh', args, { signal: limit, windowsHide: true, encoding: 'utf8' }, (err, _, stderr) => {
+      if (!err) return resolve();
+      reject(new Error(err.code === 'ENOENT' ? "the download needs gh, which isn't installed" : (stderr || err.message).trim().split('\n')[0]));
+    });
+  });
+}
+
+/** The version an executable says it is (`trawl --version`), or null if it doesn't answer. */
+function versionOf(exe) {
+  return new Promise((resolve) => {
+    execFile(exe, ['--version'], { timeout: 10000, windowsHide: true, encoding: 'utf8' }, (err, stdout) => resolve(err ? null : (/trawl (\S+)/.exec(stdout)?.[1] ?? null)));
+  });
+}
+
+/**
+ * Replaces the executable `exe` with release `version`, which then runs from the next start. The
+ * download goes into a folder next to `exe` (the same disk, so the swap is a rename) and must match the
+ * release's SHA256SUMS.txt. Windows won't overwrite a running program but will rename it, so there the
+ * old one moves aside to `<exe>.old.<time>`, for removeOldExecutables to delete on a later start.
+ * Resolves with "installed", or "already" if `exe` is that version already (another Trawl window got
+ * there first). Throws, with `exe` as it was, if anything goes wrong: a folder Trawl can't write to,
+ * no download, a checksum that doesn't match.
+ */
+export async function installUpdate(
+  version,
+  { exe = process.execPath, platform = process.platform, arch = process.arch, signal, download = downloadAssets, installed = versionOf } = {},
+) {
+  const name = assetName(platform, arch);
+  if (!name) throw new Error(`there's no release build for ${platform} ${arch}`);
+  if ((await installed(exe)) === version) return 'already';
+  const work = await mkdtemp(join(dirname(exe), WORK_PREFIX));
+  try {
+    await download(version, [name, CHECKSUMS], work, { signal });
+    const want = parseChecksums(await readFile(join(work, CHECKSUMS), 'utf8')).get(name);
+    if (!want) throw new Error(`the release has no checksum for ${name}`);
+    const file = join(work, name);
+    const got = createHash('sha256')
+      .update(await readFile(file))
+      .digest('hex');
+    if (got !== want) throw new Error(`the download of ${name} doesn't match its checksum`);
+    if (platform !== 'win32') {
+      await chmod(file, 0o755);
+      // Replaces it in one step; a Trawl still running keeps the copy it started from.
+      await rename(file, exe);
+    } else {
+      const aside = `${exe}.old.${Date.now()}`;
+      await rename(exe, aside);
+      try {
+        await rename(file, exe);
+      } catch (e) {
+        await rename(aside, exe);
+        throw e;
+      }
+    }
+    return 'installed';
+  } finally {
+    await rm(work, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+/**
+ * Deletes what earlier updates left next to `exe`: old executables moved aside (one still running stays
+ * until a later start) and download folders of updates that were interrupted (an hour old, so a
+ * download in another Trawl window right now isn't touched).
+ */
+export async function removeOldExecutables(exe = process.execPath, { now = Date.now() } = {}) {
+  const dir = dirname(exe);
+  const old = `${basename(exe)}.old.`;
+  for (const f of await readdir(dir).catch(() => [])) {
+    const path = join(dir, f);
+    if (f.startsWith(old)) await rm(path, { force: true }).catch(() => {});
+    else if (f.startsWith(WORK_PREFIX)) {
+      const s = await stat(path).catch(() => null);
+      if (s && now - s.mtimeMs > 60 * 60 * 1000) await rm(path, { recursive: true, force: true }).catch(() => {});
+    }
+  }
 }

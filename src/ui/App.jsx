@@ -62,12 +62,15 @@ function summarize(res, limit) {
   return [[...parts, ...res.messages.filter((m) => /rows? affected$/.test(m)), `${res.ms} ms`].join(' · '), ...res.messages.filter((m) => !/rows? affected$/.test(m))];
 }
 
+// How far installing a newer release has got, after its version in the header.
+const UPDATE_STATES = { installing: ' downloading…', installed: ' at next start' };
+
 function Header({ session, tranCount, writesAllowed, file, width, connecting, mood, update }) {
   const segs = [
     { text: `${FACES[mood]} `, color: mood === 'alert' ? theme.warn : theme.accent, bold: true },
     { text: 'Trawl', bold: true },
   ];
-  if (update) segs.push({ text: ` ↑ ${update.version}`, color: theme.warn, bold: true });
+  if (update) segs.push({ text: ` ↑ ${update.version}${UPDATE_STATES[update.state] ?? ''}`, color: update.state === 'installed' ? theme.ok : theme.warn, bold: true });
   if (session) {
     const { conn } = session;
     segs.push({ text: '  │  ', color: theme.border }, { text: conn.name, bold: true });
@@ -114,13 +117,14 @@ function activityRows(entries) {
 }
 
 /**
- * `checkLatest({ signal })` looks up the latest release (update.js fetchLatest); without it,
- * as in the tests, Trawl never checks for updates. `askClaude({ prompt, signal })` answers /ask
+ * `checkLatest({ signal })` looks up the latest release (update.js fetchLatest), and
+ * `installUpdate(version, { signal })` puts it in place of this executable; without them, as in
+ * the tests, Trawl never checks for updates or replaces anything. `askClaude({ prompt, signal })` answers /ask
  * (the claude CLI by default) and `findDataSources` feeds /import datagrip (DataGrip's own
  * files by default). `credentials` keeps passwords (the OS store by default) and `open` starts
  * a session (db.js); the tests pass their own. `setTitle(text)` names the terminal window.
  */
-export function App({ config: initialConfig, initialFile, initialConnection, checkLatest, askClaude = askClaudeCli, findDataSources, credentials = osCredentials, open = openSession, setTitle }) {
+export function App({ config: initialConfig, initialFile, initialConnection, checkLatest, installUpdate, askClaude = askClaudeCli, findDataSources, credentials = osCredentials, open = openSession, setTitle }) {
   const { exit } = useApp();
   const { columns, rows } = useTerminalSize();
   const [config, setConfigState] = useState(initialConfig);
@@ -439,27 +443,79 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
   // Remembers what GitHub said, and returns the release when it's newer than this copy.
   const recordCheck = (latest) => {
     setConfig((c) => ({ ...c, updateCheck: { at: Date.now(), latest } }));
-    const newer = latest && isNewer(latest.version, VERSION) ? latest : null;
-    setUpdate(newer);
-    return newer;
+    return latest && isNewer(latest.version, VERSION) ? latest : null;
   };
 
+  // Installing a newer release in place of this executable (only the downloaded Trawl has
+  // installUpdate). `installing` is { version, done } while one is under way or once it's in.
+  const installing = useRef(null);
+  const install = async (latest, signal) => {
+    installing.current = { version: latest.version, done: false };
+    setUpdate({ ...latest, state: 'installing' });
+    try {
+      await installUpdate(latest.version, { signal });
+      installing.current.done = true;
+      setUpdate({ ...latest, state: 'installed' });
+    } catch (e) {
+      installing.current = null;
+      setUpdate({ ...latest, state: 'out' });
+      throw e;
+    }
+  };
+
+  // A newer release found by the daily check: installed in the background, without the spinner
+  // (nothing waits on it, and it only counts from the next start), unless "autoUpdate" is false.
+  const offerUpdate = (latest) => {
+    const out = (why = '') => note(`Trawl ${latest.version} is out (you have ${VERSION})${why}. /update says how to get it.`, why ? 'error' : 'info');
+    if (!installUpdate || configRef.current.autoUpdate === false) {
+      setUpdate({ ...latest, state: 'out' });
+      return out();
+    }
+    if (installing.current) return;
+    install(latest).then(
+      () => note(`Trawl ${latest.version} is installed. It starts the next time you open Trawl.`, 'ok'),
+      (e) => out(`, but it couldn't be installed: ${firstLine(e.message)}`),
+    );
+  };
+
+  // /update: checks now and, in the downloaded Trawl, installs a newer release (whatever
+  // "autoUpdate" says, since you asked); otherwise says how to get it.
   const checkUpdates = async () => {
     if (!checkLatest) return note('Update checks are off in this copy.');
-    let latest = null;
+    let newer = null;
     const r = await task(
       'Check for updates',
       async (signal) => {
-        latest = await checkLatest({ signal });
-        recordCheck(latest);
+        const latest = await checkLatest({ signal });
+        newer = recordCheck(latest);
+        if (newer && installUpdate) return [`Trawl ${newer.version} is out (you have ${VERSION}).`];
+        if (newer) setUpdate({ ...newer, state: 'out' });
         return updateAdvice({ latest, current: VERSION, compiled: COMPILED });
       },
       { label: 'Checking for updates' },
     );
-    if (r.ok && latest && isNewer(latest.version, VERSION)) {
-      const ok = await confirm({ title: `Open the Trawl ${latest.version} release page in your browser?`, options: [{ label: 'Yes, open it', value: true }, { label: 'No', value: false }] });
-      if (ok) openUrl(latest.url);
+    if (!r.ok || !newer) return;
+    if (installUpdate) {
+      const now = installing.current;
+      if (now?.version === newer.version) return note(now.done ? `Trawl ${newer.version} is installed already. It starts the next time you open Trawl.` : `Trawl ${newer.version} is downloading in the background.`);
+      if (now && !now.done) return note(`Wait for Trawl ${now.version} to finish downloading.`, 'error');
+      return task(
+        `install Trawl ${newer.version}`,
+        async (signal) => {
+          try {
+            await install(newer, signal);
+          } catch (e) {
+            if (signal.aborted) e.cancelled = true;
+            else e.message = [firstLine(e.message), ...updateAdvice({ latest: newer, current: VERSION, compiled: true }).slice(1)].join('\n');
+            throw e;
+          }
+          return ['It starts the next time you open Trawl.'];
+        },
+        { label: `Downloading Trawl ${newer.version}` },
+      );
     }
+    const ok = await confirm({ title: `Open the Trawl ${newer.version} release page in your browser?`, options: [{ label: 'Yes, open it', value: true }, { label: 'No', value: false }] });
+    if (ok) openUrl(newer.url);
   };
 
   const quit = async () => {
@@ -604,24 +660,20 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     else if (!initialFile) setView('connections');
   }, []);
 
-  // At most once a day, in the background: a newer release gets one line in the activity log and
-  // a ↑ in the header. A failed check (offline, rate-limited) says nothing and waits a day.
+  // At most once a day, in the background: a newer release gets a ↑ in the header and is installed
+  // (offerUpdate). A failed check (offline, rate-limited) says nothing and waits a day.
   useEffect(() => {
     if (!checkLatest || checksDisabled(configRef.current)) return;
     const cached = configRef.current.updateCheck;
-    const announce = (latest) => note(`Trawl ${latest.version} is out (you have ${VERSION}). /update says how to get it.`);
     const known = cached?.latest && isNewer(cached.latest.version, VERSION) ? cached.latest : null;
-    if (known) {
-      setUpdate(known);
-      announce(known);
-    }
+    if (known) offerUpdate(known);
     if (!isDue(cached)) return;
     let live = true;
     checkLatest({ signal: AbortSignal.timeout(5000) }).then(
       (latest) => {
         if (!live) return;
         const newer = recordCheck(latest);
-        if (newer && newer.version !== known?.version) announce(newer);
+        if (newer && newer.version !== known?.version) offerUpdate(newer);
       },
       () => live && setConfig((c) => ({ ...c, updateCheck: { at: Date.now(), latest: cached?.latest ?? null } })),
     );

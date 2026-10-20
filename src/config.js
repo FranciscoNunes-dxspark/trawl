@@ -6,8 +6,9 @@ import { join } from 'node:path';
 export const configDir = () => process.env.TRAWL_HOME || join(homedir(), '.trawl');
 
 // `history` is what was typed at the prompt; `ran` is every statement that reached a database.
-// `updateCheck` remembers the last look at GitHub Releases, so it happens at most once a day.
-const DEFAULTS = { connections: [], history: [], ran: [], limit: 500, last: null, checkUpdates: true, updateCheck: null };
+// `updateCheck` remembers the last look at GitHub Releases, so it happens at most once a day;
+// `autoUpdate: false` keeps the check but only says a release is out, instead of installing it.
+const DEFAULTS = { connections: [], history: [], ran: [], limit: 500, last: null, checkUpdates: true, autoUpdate: true, updateCheck: null };
 
 export function loadConfig() {
   try {

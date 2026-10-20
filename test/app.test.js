@@ -182,6 +182,35 @@ test('a newer release shows in the header and the activity log, once a day', asy
   lastApp.unmount();
 });
 
+test('the downloaded Trawl installs a newer release in the background, says when it can’t, and can be told only to tell', async () => {
+  const checkLatest = async () => ({ version: '9.0.0', url: 'https://example.test/r', download: null, signedIn: true });
+  const fresh = { updateCheck: null };
+  const asked = [];
+  let app = start('demo', { checkLatest, installUpdate: async (v) => void asked.push(v) });
+  await until(() => frame().includes('Trawl 9.0.0 is installed') && frame().includes('↑ 9.0.0 at next start'), 'the installed note');
+  assert.deepEqual(asked, ['9.0.0']);
+  app.unmount();
+
+  const config = (extra) => ({ connections: [...DEMO_CONNECTIONS], history: [], ran: [], limit: 500, last: null, ...fresh, ...extra });
+  lastApp = render(React.createElement(App, { config: config(), initialConnection: 'demo', checkLatest, installUpdate: async () => {
+    throw new Error("EACCES: can't write to C:\\Program Files\\Trawl\nmore detail");
+  } }));
+  await until(() => frame().includes("couldn't be installed: EACCES") && frame().includes('↑ 9.0.0'), 'the failure');
+  assert.doesNotMatch(frame(), /more detail/);
+  lastApp.unmount();
+
+  // Only told; /update still installs, since you asked.
+  const told = [];
+  lastApp = render(React.createElement(App, { config: config({ autoUpdate: false }), initialConnection: 'demo', checkLatest, installUpdate: async (v) => void told.push(v) }));
+  await until(() => frame().includes('Trawl 9.0.0 is out') && frame().includes('Clubs'), 'the notice');
+  assert.deepEqual(told, []);
+  await type(lastApp.stdin, '/update');
+  lastApp.stdin.write(KEYS.enter);
+  await until(() => frame().includes('install Trawl 9.0.0') && frame().includes('It starts the next time you open Trawl'), 'the install');
+  assert.deepEqual(told, ['9.0.0']);
+  lastApp.unmount();
+});
+
 test('the console: type SQL, ctrl+r runs it with the results underneath, and it is kept', async () => {
   const app = start();
   await until(() => frame().includes('Clubs'), 'the explorer');

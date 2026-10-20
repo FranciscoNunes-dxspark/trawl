@@ -204,3 +204,17 @@ test('console tabs: + opens one, [ and ] switch, each keeps its own text and fil
   await until(() => frame().includes('SELECT 1 AS first') && /╭─ Console ─/.test(frame()), 'back to one tab');
   app.unmount();
 });
+
+test('/import-csv opens the INSERTs in a console tab of their own, and --run goes through the usual checks', async () => {
+  const csv = join(base, 'players.csv');
+  writeFileSync(csv, 'ClubId;Name;Goals\r\n1;"Nova, Ana";3\r\n2;Rui;0\r\n');
+  const app = start('demo-prod');
+  await until(() => frame().includes('PROD') && frame().includes('Clubs'), 'the explorer');
+  await command(app, `/import-csv ${csv} Players`);
+  await until(() => frame().includes('[2 import]') && frame().includes("(1, N'Nova, Ana', 3),"), 'the script in its own tab');
+  assert.match(frame(), /INSERT INTO \[dbo\]\.\[Players\] \(\[ClubId\], \[Name\], \[Goals\]\) VALUES/);
+  assert.match(frame(), /-- Not in the file, and NOT NULL: Position/);
+  await command(app, `/import-csv ${csv} dbo.Players --run`);
+  await until(() => frame().includes('demo-prod is read-only (production)'), 'refused on a read-only connection');
+  app.unmount();
+});

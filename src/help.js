@@ -84,6 +84,11 @@ Schema diff
                    functions. < only here · > only there · ~ different. Then it offers the script that makes this
                    one match, in the console to read (dropping tables or columns is left commented out); nothing runs.
 
+CSV import
+  /import-csv <file.csv> <table> [--run]   The file's rows as INSERTs into the table, columns matched to its header
+                   (case, spaces and _ ignored; identity columns left out); comma, semicolon or tab, quotes and
+                   line breaks inside them. They open in a console tab to read; --run runs them (the usual checks apply).
+
 Fan-out (one read-only query on every connection in a folder)
   /fanout <folder> [sql]   Runs it on each (and those in folders under it), four at a time; the rows come back
                    as one result set led by connection and database; a failing one says why and the rest go on.
@@ -123,7 +128,7 @@ Prompt
   ctrl+u ctrl+w    Clear the line · Delete a word
 
 Slash commands
-  /import datagrip [folder]   /connect <name>   /add <name> <server> [database] [--user u] [--domain d] [--folder f] [--prod] [--commit auto|manual] [--trust-cert]
+  /import datagrip [folder]   /import-csv <file.csv> <table> [--run]   /connect <name>   /add <name> <server> [database] [--user u] [--domain d] [--folder f] [--prod] [--commit auto|manual] [--trust-cert]
   /forget <name>   /folder <connection> [folder]   /password [connection]   /disconnect   /use <database>   /open <file.sql>   /console   /tab …   /new   /format   /search <text>   /save <file.sql>
   /describe <table>   /script <name>   /find [text]
   /export <file>   /filter [text]   /follow   /copy [format]   /limit [rows]   /writes   /tx [auto|manual]   /commit   /rollback   /ask <question>   /ai   /update   /settings   /stats [on|off]   /plan [sql]   /diff <connection> [database]   /fanout <folder> [sql]   /activity   /kill <session>   /last   /refresh   /help   /quit

@@ -1,8 +1,9 @@
 // Every operation the UI offers, written once. Keys and slash commands both call these.
 // `ctx` is the app's handle: session, schema, query, confirm, note, prefill, and so on (see App.jsx).
-import { writeFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import { extname, resolve } from 'node:path';
-import { ADD_USAGE, cleanFolder, commitMode, describeConn, isReadOnly, parseAddArgs } from './connections.js';
+import { ADD_USAGE, cleanFolder, commitMode, describeConn, isReadOnly, parseAddArgs, splitArgs } from './connections.js';
+import { csvInsertScript, parseCsv } from './csv.js';
 import * as ed from './editor.js';
 import { findDataSources, importPlan, planText } from './datagrip.js';
 import { formatSql } from './format.js';
@@ -814,6 +815,40 @@ export async function consoleTab(ctx, rest) {
   const i = findTab(tabs, rest.trim());
   if (i < 0) return ctx.note(`No console tab called ${rest.trim()}. /tab lists them; /tab new <name> opens one.`, 'error');
   ctx.showConsoleTab(i);
+}
+
+/**
+ * /import-csv <file.csv> <table> [--run]: the file's rows as INSERT statements into the table, its
+ * columns matched to the header by name. They open in a console tab of their own to read through, or
+ * with --run go straight through the usual checks (read-only, manual commit) as any SQL does.
+ */
+export async function importCsv(ctx, rest) {
+  if (!needSession(ctx)) return;
+  const args = splitArgs(rest);
+  const run = args.includes('--run');
+  const [path, name] = args.filter((x) => x !== '--run');
+  if (!path || !name) return ctx.prefill('/import-csv ');
+  const table = findObject({ objects: (ctx.schema?.objects ?? []).filter((o) => o.kind === 'table') }, name);
+  if (!table) return ctx.note(`No table called ${name} in ${ctx.session.database}.`, 'error');
+  const full = resolve(path);
+  let built;
+  try {
+    built = csvInsertScript(parseCsv(await readFile(full, 'utf8')), table);
+  } catch (e) {
+    return ctx.note(`${full}: ${e.code === 'ENOENT' ? 'no such file' : e.message.split('\n')[0]}`, 'error');
+  }
+  const what = `${built.rows} row${built.rows === 1 ? '' : 's'} from ${full.split(/[\\/]/).pop()} into ${objectName(table)}`;
+  const notes = [
+    `-- ${what}: ${built.columns.join(', ')}`,
+    ...built.skipped.map((s) => `-- Left out ${s}.`),
+    ...(built.missing.length ? [`-- Not in the file, and NOT NULL: ${built.missing.join(', ')} (the insert fails unless they have defaults).`] : []),
+  ];
+  const script = `${notes.join('\n')}\n${built.script}\n`;
+  if (run) return runSql(ctx, script, { title: `import ${what}` });
+  const tabs = ctx.consoleTabs.names.map((n) => ({ name: n }));
+  ctx.addConsoleTab(freeName(tabs, 'import'));
+  ctx.setConsole(ed.fromText(script));
+  ctx.note(`The INSERT script for ${what} is in a console tab of its own: R runs it.`, 'ok');
 }
 
 /** Empties the console, asking first when there's something in it. */

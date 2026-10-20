@@ -9,8 +9,9 @@ import { formatSql } from './format.js';
 import { changesText, insertScript, saveScript, tsvText, withSaved } from './edit.js';
 import { AI_LABELS, AI_LEVELS, aiLevel, askPrompt, canSeeSchema, consoleText, parseAnswer } from './ai.js';
 import { folderNames, inFolder, inParallel, mergeResults, readOnlyScript } from './fanout.js';
+import { DIFF_SQL, buildExtras, diffText, schemaDiff, syncScript } from './diff.js';
 import { ACTIVITY_SQL, buildActivity, killSql } from './activity.js';
-import { createTableScript, definitionSql, describeObject, findObject, objectName } from './schema.js';
+import { SCHEMA_SQL, buildSchema, createTableScript, definitionSql, describeObject, findObject, objectName } from './schema.js';
 import { classifyScript, countQuery, oneLine, selectTop, splitStatements, statementAt, toCsv, toJson, withoutLeadingComments } from './sql.js';
 
 // A WHERE that still changes more rows than this is asked about too.
@@ -496,6 +497,67 @@ export async function fanOut(ctx, rest) {
   const at = Date.now();
   for (const p of parts) ctx.recordRun({ sql: text, conn: p.conn, database: p.database, at, ok: !p.error, summary: p.error ?? `${p.sets.map((x) => `${x.rows.length} rows`).join(' · ') || 'no rows'} (/fanout ${folder})` });
   ctx.present({ title, sql: text, sets: merged.sets, messages: merged.messages, ms: Date.now() - started, edit: { reason: 'these rows come from several databases' }, conn: `${folder}/`, database: null });
+}
+
+/**
+ * /diff <connection> [database], or /diff <database> for another one on this server: compares the
+ * schema here with that one (tables, columns, keys, indexes, and the definitions of views, procedures
+ * and functions), shows the differences, and offers the script that would make this database match,
+ * in the console to read through. Nothing runs by itself.
+ */
+export async function diffSchema(ctx, rest) {
+  if (!needSession(ctx)) return;
+  const args = splitArgsLoose(rest);
+  if (!args.length) return ctx.prefill('/diff ');
+  const session = ctx.session;
+  let conn = ctx.config.connections.find((c) => c.name.toLowerCase() === args[0].toLowerCase());
+  let database = args[1];
+  if (!conn) {
+    database = args.length === 1 ? ctx.schema?.databases.find((d) => d.toLowerCase() === args[0].toLowerCase()) : null;
+    if (!database) return ctx.note(`No connection or database called ${args[0]}. /diff <connection> [database], or /diff <database> on this server.`, 'error');
+    conn = session.conn;
+  }
+  const left = `${session.conn.name}/${session.database}`;
+  let right = `${conn.name}/${database ?? conn.database ?? ''}`;
+  let found = null;
+  const r = await ctx.task(
+    `diff ${left} with ${right}`,
+    async (signal) => {
+      const read = async (s) => ({ schema: buildSchema((await s.run(SCHEMA_SQL, { signal, limit: 1_000_000 })).sets), ...buildExtras((await s.run(DIFF_SQL, { signal, limit: 1_000_000 })).sets) });
+      const mine = await read(session);
+      let other = null;
+      let theirs;
+      try {
+        other = await ctx.openSession(conn, { database, signal });
+        right = `${conn.name}/${other.database}`;
+        theirs = await read(other);
+      } catch (e) {
+        if (e.needsPassword) e.message = `${conn.name} needs its password: connect to it once in Trawl to save it.`;
+        throw e;
+      } finally {
+        other?.close();
+      }
+      const changes = schemaDiff(mine, theirs);
+      found = { changes, mine, theirs };
+      return [changes.length ? `${changes.length} difference${changes.length === 1 ? '' : 's'}: the list is on screen.` : 'The schemas are the same.'];
+    },
+    { label: `Comparing with ${right}` },
+  );
+  if (!r.ok || !found) return;
+  const { changes, theirs } = found;
+  const title = `Schema diff: ${left} ←→ ${right}`;
+  const text = diffText(changes, { left, right });
+  ctx.rememberOutput(title, text);
+  ctx.showText(title, text);
+  if (!changes.length) return;
+  const open = await ctx.confirm({
+    title: `Put the script that makes ${left} match ${right} in the console?`,
+    detail: 'The differences are above (pgup/pgdn scroll them). It goes into the console to read through; nothing runs.',
+    scrollsOverlay: true,
+    options: YES_NO('Yes, into the console'),
+  });
+  ctx.closeOverlay();
+  if (open) ctx.editInConsole(syncScript(changes, { left, right, rightSchema: theirs.schema, rightDefinitions: theirs.definitions }));
 }
 
 export function setLimit(ctx, value) {

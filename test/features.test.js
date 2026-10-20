@@ -102,3 +102,18 @@ test('/fanout runs one query on every connection in a folder, rows tagged by con
   await until(() => frame().includes('club-b/ClubB'), 'History');
   app.unmount();
 });
+
+test('/diff compares this database with another, and puts the sync script in the console when asked', async () => {
+  mkdirSync(process.env.TRAWL_HOME, { recursive: true });
+  writeFileSync(join(process.env.TRAWL_HOME, 'console.sql'), '');
+  const app = start();
+  await until(() => frame().includes('Clubs'), 'the explorer');
+  await command(app, '/diff ClubB');
+  await until(() => frame().includes('Schema diff: demo/ClubA ←→ demo/ClubB') && frame().includes('Put the script'), 'the differences and the question');
+  assert.match(frame(), /~ Shirt: tinyint null → smallint null/);
+  assert.match(frame(), /> dbo\.Stadiums/);
+  app.stdin.write('1');
+  await until(() => frame().includes('-- Makes demo/ClubA match demo/ClubB') && frame().includes('typing SQL'), 'the script in the console');
+  assert.doesNotMatch(frame(), /ALTER COLUMN.*rows affected/);
+  app.unmount();
+});

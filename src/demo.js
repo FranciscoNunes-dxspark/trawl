@@ -10,7 +10,9 @@ import { splitStatements, withoutLeadingComments } from './sql.js';
 const col = (name, type, extra = {}) => ({ name, type, nullable: false, identity: false, pk: false, ...extra });
 const d = (s) => new Date(`${s}T00:00:00Z`);
 
-function makeDatabase(club, { extraLanguage = true } = {}) {
+// ClubB's schema has drifted a little from ClubA's, so a schema diff (/diff) has something to show:
+// a Stadiums table, Shirt as smallint, another index, and a view that reads differently.
+function makeDatabase(club, { extraLanguage = true, drifted = false } = {}) {
   const clubs = [
     [1, `${club} FC`, 'PT', d('1904-03-14'), true],
     [2, 'Atlético Norte', 'ES', d('1921-09-01'), true],
@@ -28,7 +30,7 @@ function makeDatabase(club, { extraLanguage = true } = {}) {
   return {
     tables: [
       { schema: 'dbo', name: 'Clubs', kind: 'table', columns: [col('Id', 'int', { pk: true, identity: true }), col('Name', 'nvarchar(100)'), col('Country', 'char(2)'), col('Founded', 'date'), col('Active', 'bit')], rows: clubs },
-      { schema: 'dbo', name: 'Players', kind: 'table', columns: [col('Id', 'int', { pk: true, identity: true }), col('ClubId', 'int'), col('Name', 'nvarchar(100)'), col('Position', 'char(2)'), col('Shirt', 'tinyint', { nullable: true }), col('Goals', 'int')], rows: players },
+      { schema: 'dbo', name: 'Players', kind: 'table', columns: [col('Id', 'int', { pk: true, identity: true }), col('ClubId', 'int'), col('Name', 'nvarchar(100)'), col('Position', 'char(2)'), col('Shirt', drifted ? 'smallint' : 'tinyint', { nullable: true }), col('Goals', 'int')], rows: players },
       { schema: 'dbo', name: 'Matches', kind: 'table', columns: [col('Id', 'int', { pk: true, identity: true }), col('HomeId', 'int'), col('AwayId', 'int'), col('PlayedOn', 'date'), col('HomeGoals', 'tinyint'), col('AwayGoals', 'tinyint')], rows: matches },
       { schema: 'i18n', name: 'Translations', kind: 'table', columns: [col('ResourceKey', 'nvarchar(200)', { pk: true }), col('Value', 'nvarchar(max)'), col('Culture', 'nvarchar(10)', { pk: true }), col('ResourceSet', 'nvarchar(50)')], rows: translations },
       {
@@ -37,7 +39,7 @@ function makeDatabase(club, { extraLanguage = true } = {}) {
         kind: 'view',
         columns: [col('Name', 'nvarchar(100)'), col('Goals', 'int')],
         rows: players.filter((p) => p[5] > 0).map((p) => [p[2], p[5]]),
-        definition: 'CREATE VIEW dbo.vTopScorers AS\nSELECT Name, Goals\nFROM dbo.Players\nWHERE Goals > 0;',
+        definition: `CREATE VIEW dbo.vTopScorers AS\nSELECT Name, Goals\nFROM dbo.Players\nWHERE Goals > ${drifted ? 1 : 0};`,
       },
       {
         schema: 'dbo',
@@ -48,18 +50,24 @@ function makeDatabase(club, { extraLanguage = true } = {}) {
         params: [col('@Season', 'int'), col('@DryRun', 'bit')],
         definition: 'CREATE PROCEDURE dbo.usp_RecalculateTable @Season int, @DryRun bit = 0 AS\nBEGIN\n  SET NOCOUNT ON;\n  -- The demo has no body to run.\n  SELECT @Season AS Season, @DryRun AS DryRun;\nEND',
       },
+      ...(drifted
+        ? [{ schema: 'dbo', name: 'Stadiums', kind: 'table', columns: [col('Id', 'int', { pk: true, identity: true }), col('ClubId', 'int'), col('Name', 'nvarchar(100)'), col('Capacity', 'int', { nullable: true })], rows: [[1, 1, 'Estádio Norte', 30000]] }]
+        : []),
     ],
     // [name, table, column, referenced table, its column]
     foreignKeys: [
       ['FK_Players_Clubs', 'Players', 'ClubId', 'Clubs', 'Id'],
       ['FK_Matches_Home', 'Matches', 'HomeId', 'Clubs', 'Id'],
       ['FK_Matches_Away', 'Matches', 'AwayId', 'Clubs', 'Id'],
+      ...(drifted ? [['FK_Stadiums_Clubs', 'Stadiums', 'ClubId', 'Clubs', 'Id']] : []),
     ],
+    // [name, table, unique, columns], the indexes besides the primary keys.
+    indexes: [['IX_Players_ClubId', 'Players', false, '[ClubId]'], ...(drifted ? [['IX_Matches_PlayedOn', 'Matches', false, '[PlayedOn] DESC']] : [])],
   };
 }
 
 // ClubB is one language short, so comparing the two shows a difference.
-const DATABASES = { master: { tables: [], foreignKeys: [] }, ClubA: makeDatabase('Club A'), ClubB: makeDatabase('Club B', { extraLanguage: false }) };
+const DATABASES = { master: { tables: [], foreignKeys: [], indexes: [] }, ClubA: makeDatabase('Club A'), ClubB: makeDatabase('Club B', { extraLanguage: false, drifted: true }) };
 
 const set = (names, rows, types = []) => ({ columns: names.map((name, i) => ({ name, type: types[i] ?? '' })), rows, truncated: false });
 
@@ -251,6 +259,11 @@ export function demoSession(conn, { database } = {}) {
         script,
         async (batch, line, state) => {
           if (batch.startsWith('-- trawl:schema')) return void state.sets.push(...schemaSets(session.database));
+          if (batch.startsWith('-- trawl:diff')) {
+            const db = DATABASES[session.database];
+            state.sets.push(set(['schema', 'name', 'definition'], db.tables.filter((t) => t.definition).map((t) => [t.schema, t.name, t.definition])));
+            return void state.sets.push(set(['schema', 'object', 'name', 'is_unique', 'type_desc', 'filter_definition', 'columns', 'included'], db.indexes.map(([name, table, unique, columns]) => ['dbo', table, name, unique, 'NONCLUSTERED', null, columns, null])));
+          }
           if (batch.startsWith('-- trawl:activity')) return void state.sets.push(...activitySets(session));
           if (batch.startsWith('-- trawl:definition')) {
             const name = batch.match(/OBJECT_ID\(N'(.*)'\)\)/)[1].replace(/''/g, "'");

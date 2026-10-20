@@ -66,6 +66,12 @@ History (every statement that ran, newest first; ◆ marks what Claude ran throu
   ↵                Run it again (the same checks apply)
   e                Copy it into the console to edit
 
+Schema diff
+  /diff <connection> [database]   Compare this database's schema with another's (/diff <database>: one on this server):
+                   tables, columns, primary and foreign keys, indexes, and the definitions of views, procedures,
+                   functions. < only here · > only there · ~ different. Then it offers the script that makes this
+                   one match, in the console to read (dropping tables or columns is left commented out); nothing runs.
+
 Fan-out (one read-only query on every connection in a folder)
   /fanout <folder> [sql]   Runs it on each (and those in folders under it), four at a time; the rows come back
                    as one result set led by connection and database; a failing one says why and the rest go on.
@@ -108,7 +114,7 @@ Slash commands
   /import datagrip [folder]   /connect <name>   /add <name> <server> [database] [--user u] [--domain d] [--folder f] [--prod] [--commit auto|manual] [--trust-cert]
   /forget <name>   /folder <connection> [folder]   /password [connection]   /disconnect   /use <database>   /open <file.sql>   /console   /new   /format   /search <text>   /save <file.sql>
   /describe <table>   /script <name>   /find [text]
-  /export <file>   /filter [text]   /copy [format]   /limit [rows]   /writes   /tx [auto|manual]   /commit   /rollback   /ask <question>   /ai   /update   /settings   /stats [on|off]   /plan [sql]   /fanout <folder> [sql]   /activity   /kill <session>   /last   /refresh   /help   /quit
+  /export <file>   /filter [text]   /copy [format]   /limit [rows]   /writes   /tx [auto|manual]   /commit   /rollback   /ask <question>   /ai   /update   /settings   /stats [on|off]   /plan [sql]   /diff <connection> [database]   /fanout <folder> [sql]   /activity   /kill <session>   /last   /refresh   /help   /quit
 
 Viewer (describe, records, output, this help)
   j k  space  g G  Scroll         esc / q     Close`;

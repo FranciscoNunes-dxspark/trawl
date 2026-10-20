@@ -76,7 +76,8 @@ Safety
   A production connection (/add … --prod) is read-only: writes are refused until /writes.
   /tx manual (production's default, as DataGrip's Tx: Manual): a write starts a transaction,
   /commit keeps it, /rollback undoes it. /tx auto commits each statement as it runs.
-  UPDATE or DELETE with no WHERE, DROP and TRUNCATE always ask first.
+  UPDATE or DELETE with no WHERE, DROP and TRUNCATE always ask first. Before an UPDATE or DELETE runs,
+  a SELECT COUNT over its FROM and WHERE says how many rows it changes; over 1,000, it asks first too.
 
 Prompt
   tab              Complete        ↑ ↓         Pick a suggestion, or walk history

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { classify, classifyScript, formatValue, mask, oneLine, quoteIdent, splitBatches, splitStatements, statementAt, toCsv, toJson, withoutLeadingComments } from '../src/sql.js';
+import { classify, classifyScript, countQuery, formatValue, mask, oneLine, quoteIdent, splitBatches, splitStatements, statementAt, toCsv, toJson, withoutLeadingComments } from '../src/sql.js';
 
 const texts = (list) => list.map((s) => s.text);
 
@@ -123,4 +123,18 @@ test('IF … ELSE and TRY … CATCH stay one statement', () => {
 test('withoutLeadingComments starts at the first line of code', () => {
   assert.equal(withoutLeadingComments('-- one\n/* two\n */  SELECT 1 -- three'), 'SELECT 1 -- three');
   assert.equal(withoutLeadingComments('-- only a comment'), '');
+});
+
+test('countQuery counts what an UPDATE or DELETE would change, reading only', () => {
+  assert.equal(countQuery('DELETE FROM dbo.Players WHERE Goals = 0;'), 'SELECT COUNT_BIG(*) FROM dbo.Players WHERE Goals = 0;');
+  assert.equal(countQuery('delete dbo.Players where Goals = 0'), 'SELECT COUNT_BIG(*) FROM dbo.Players where Goals = 0;');
+  assert.equal(countQuery('DELETE p FROM dbo.Players p JOIN dbo.Clubs c ON c.Id = p.ClubId WHERE c.Active = 0'), 'SELECT COUNT_BIG(*) FROM dbo.Players p JOIN dbo.Clubs c ON c.Id = p.ClubId WHERE c.Active = 0;');
+  assert.equal(countQuery("UPDATE dbo.Clubs SET Name = 'x' WHERE Id = 1"), 'SELECT COUNT_BIG(*) FROM dbo.Clubs WHERE Id = 1;');
+  assert.equal(countQuery('UPDATE dbo.Clubs SET Active = 0'), 'SELECT COUNT_BIG(*) FROM dbo.Clubs;');
+  // A subquery's FROM and WHERE are its own.
+  assert.equal(countQuery('UPDATE p SET Goals = (SELECT MAX(Goals) FROM dbo.Players WHERE 1 = 1) FROM dbo.Players p WHERE p.Id = 3'), 'SELECT COUNT_BIG(*) FROM dbo.Players p WHERE p.Id = 3;');
+  assert.equal(countQuery('DELETE TOP (5) FROM dbo.Players'), null);
+  assert.equal(countQuery('DELETE FROM dbo.Players OUTPUT deleted.Id WHERE 1 = 1'), null);
+  assert.equal(countQuery('UPDATE a SET x = 1; UPDATE b SET y = 2'), null);
+  assert.equal(countQuery('INSERT INTO t VALUES (1)'), null);
 });

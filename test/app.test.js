@@ -81,6 +81,8 @@ test('DELETE with no WHERE asks first, and No leaves it', async () => {
   await type(app.stdin, '!DELETE FROM dbo.Players');
   app.stdin.write(KEYS.enter);
   await until(() => frame().includes('changes every row of dbo.Players'), 'the confirmation');
+  // Counted first, with a SELECT: the demo's Players has 12 rows.
+  assert.match(frame(), /On demo: that's 12 rows\./);
   app.stdin.write('2');
   await new Promise((r) => setTimeout(r, 200));
   assert.doesNotMatch(frame(), /rows affected/);

@@ -9,7 +9,10 @@ import { formatSql } from './format.js';
 import { changesText, saveScript, withSaved } from './edit.js';
 import { AI_LABELS, AI_LEVELS, aiLevel, askPrompt, canSeeSchema, consoleText, parseAnswer } from './ai.js';
 import { describeObject, findObject, objectName } from './schema.js';
-import { classifyScript, oneLine, selectTop, splitStatements, statementAt, toCsv, toJson } from './sql.js';
+import { classifyScript, countQuery, oneLine, selectTop, splitStatements, statementAt, toCsv, toJson } from './sql.js';
+
+// A WHERE that still changes more rows than this is asked about too.
+const MANY_ROWS = 1000;
 
 const YES_NO = (yes) => [
   { label: yes, value: true },
@@ -22,6 +25,34 @@ function needSession(ctx) {
   return false;
 }
 
+/**
+ * How many rows an UPDATE or DELETE would change, counted first with a SELECT built from it (so
+ * nothing is written to find out). Null when it can't be counted; 'cancelled' after esc.
+ */
+async function countChanges(ctx, text) {
+  const q = countQuery(text);
+  if (!q || classifyScript(q).write) return null;
+  let n = null;
+  const r = await ctx.task(
+    'count the rows it would change',
+    async (signal) => {
+      try {
+        const res = await ctx.session.run(q, { signal, limit: 1 });
+        n = Number(res.sets.at(-1)?.rows[0]?.[0]);
+      } catch (e) {
+        // A count that fails says nothing about the write; the write's own error will.
+        if (e.cancelled) throw e;
+      }
+      return [];
+    },
+    { label: 'Counting the rows it would change', quiet: true },
+  );
+  if (!r.ok) return r.error?.cancelled ? 'cancelled' : null;
+  return Number.isFinite(n) ? n : null;
+}
+
+const rowsText = (n) => `${n.toLocaleString('en')} row${n === 1 ? '' : 's'}`;
+
 /** Runs SQL on the current connection, after the read-only and danger checks. */
 export async function runSql(ctx, sql, { title, lineBase, stay, keep } = {}) {
   if (!needSession(ctx)) return;
@@ -32,10 +63,21 @@ export async function runSql(ctx, sql, { title, lineBase, stay, keep } = {}) {
   if (write && isReadOnly(conn) && !ctx.writesAllowed) {
     return ctx.note(`${conn.name} is read-only${conn.prod ? ' (production)' : ''}, and this changes data. /writes allows writes until you disconnect.`, 'error');
   }
+  const changes = write ? await countChanges(ctx, text) : null;
+  if (changes === 'cancelled') return;
+  const on = `On ${conn.name}${conn.prod ? ' (production)' : ''}`;
   if (danger.length) {
     const ok = await ctx.confirm({
       title: danger.length === 1 ? `${danger[0]}. Run it?` : `This script has ${danger.length} risky statements. Run it?`,
-      detail: danger.length > 1 ? danger.join(' · ') : `On ${conn.name}${conn.prod ? ' (production)' : ''}.`,
+      detail: danger.length > 1 ? danger.join(' · ') : `${on}${changes != null ? `: that's ${rowsText(changes)}` : ''}.`,
+      options: YES_NO('Yes, run it'),
+      danger: true,
+    });
+    if (!ok) return;
+  } else if (changes != null && changes > MANY_ROWS) {
+    const ok = await ctx.confirm({
+      title: `This changes ${rowsText(changes)}. Run it?`,
+      detail: `${on}. Counted with a SELECT over the same FROM and WHERE.`,
       options: YES_NO('Yes, run it'),
       danger: true,
     });

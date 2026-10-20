@@ -285,6 +285,35 @@ export function classify(statement) {
   return { write, danger };
 }
 
+/**
+ * A read-only count of the rows an UPDATE or DELETE would change: SELECT COUNT_BIG(*) over its FROM
+ * and WHERE. Null when that can't be worked out safely (TOP, OUTPUT, WHERE CURRENT OF, a CTE, or more
+ * than one statement).
+ */
+export function countQuery(sql) {
+  const src = normalise(sql).trim().replace(/;\s*$/, '');
+  if (splitStatements(src).length !== 1) return null;
+  const toks = tokens(src);
+  const first = toks[0]?.w;
+  if ((first !== 'UPDATE' && first !== 'DELETE') || toks.some((t) => ['TOP', 'OUTPUT', 'CURRENT', 'OPENQUERY'].includes(t.w))) return null;
+  const at = (word, after = 0) => toks.find((t) => t.w === word && t.depth === 0 && t.at >= after)?.at ?? -1;
+  let body;
+  if (first === 'DELETE') {
+    // DELETE [FROM] t [WHERE …], or DELETE t FROM t JOIN … WHERE … (a second FROM says what's read).
+    const from = at('FROM');
+    const second = from >= 0 ? at('FROM', from + 4) : -1;
+    body = second >= 0 ? src.slice(second + 4) : from >= 0 ? src.slice(from + 4) : src.slice(toks[0].at + 6);
+  } else {
+    // UPDATE t SET … [FROM …] [WHERE …]
+    const set = at('SET');
+    if (set < 0) return null;
+    const from = at('FROM', set);
+    const where = at('WHERE', set);
+    body = from >= 0 ? src.slice(from + 4) : `${src.slice(toks[0].at + 6, set).trim()}${where >= 0 ? ` ${src.slice(where)}` : ''}`;
+  }
+  return body.trim() ? `SELECT COUNT_BIG(*) FROM ${body.trim()};` : null;
+}
+
 /** classify() over every statement of a script, merged. */
 export function classifyScript(text) {
   const parts = splitStatements(text).map((s) => classify(s.text));

@@ -144,7 +144,10 @@ async function runStatement(session, text, line, state, { signal, limit = 500 })
   else if (/^PRINT\s+N?'/i.test(s)) state.messages.push(s.replace(/^PRINT\s+N?'(.*)'$/is, '$1'));
   else if (/^(SELECT|WITH)\b/i.test(s)) {
     const t = target(s);
-    if (t) {
+    if (t && /^SELECT\s+COUNT(_BIG)?\s*\(\s*\*\s*\)/i.test(s)) {
+      // Like its writes, the demo takes a WHERE to match one row.
+      state.sets.push(set(['(No column name)'], [[/\bWHERE\b/i.test(s) ? 1 : t.rows.length]], ['IntN']));
+    } else if (t) {
       const top = s.match(/\bTOP\s*\(?\s*(\d+)/i);
       const rows = t.rows.slice(0, top ? Number(top[1]) : undefined);
       const out = set(t.columns.map((c) => c.name), rows.slice(0, limit), t.columns.map((c) => c.type));

@@ -310,7 +310,7 @@ test('the console suggests tables and columns as you type; tab takes one, esc on
   app.stdin.write(KEYS.esc);
   await until(() => !frame().includes('int · Players'), 'the list closed');
   assert.match(frame(), /typing SQL/);
-  app.stdin.write('\x00'); // ctrl+space brings it back
+  app.stdin.write('\x0e'); // ctrl+n brings it back
   await until(() => frame().includes('int · Players'), 'the list again');
   app.stdin.write('\t');
   await until(() => frame().includes('WHERE p.Goals'), 'the column taken');
@@ -362,7 +362,7 @@ test('shift+arrows select in the console, and ctrl+r runs just the selection', a
   await until(() => frame().includes('─ SELECT 1 AS one ─'), 'only the selection run');
   assert.doesNotMatch(frame(), /one\s+│ two/);
   app.stdin.write(KEYS.esc);
-  await until(() => frame().includes('typing · ctrl+space'), 'the selection let go');
+  await until(() => frame().includes('typing · ctrl+n'), 'the selection let go');
   app.unmount();
 });
 

@@ -109,7 +109,7 @@ export function ConsoleView({ editor, editing, ctx, width, height, active }) {
       const completion = open && completeAt(editor, ctx.schema, { force: open.force });
       const items = completion?.items ?? [];
       if (items.length) {
-        // tab takes the suggestion; ↵ only once one was picked with ↑↓ (or asked for with ctrl+space),
+        // tab takes the suggestion; ↵ only once one was picked with ↑↓ (or asked for with ctrl+n),
         // so ↵ after a word still starts a new line.
         const pick = items[Math.min(open.index, items.length - 1)];
         if (key.escape) return setMenu(null);
@@ -120,8 +120,9 @@ export function ConsoleView({ editor, editing, ctx, width, height, active }) {
           return setMenu(pick.insert.endsWith('.') ? { index: 0 } : null);
         }
       }
-      // ctrl+space arrives as NUL, which Ink reports as ctrl+`.
-      if (key.ctrl && (input === '`' || input === ' ' || input === '@')) return setMenu({ index: 0, force: true });
+      // ctrl+n asks for suggestions anywhere. So does ctrl+space where the terminal sends it as NUL (Ink
+      // reports ctrl+`), but the Windows console sends a plain space for it, so ctrl+n is the one to tell.
+      if (key.ctrl && (input === 'n' || input === '`' || input === '@')) return setMenu({ index: 0, force: true });
       // Any other key closes the list; typing a name (or backspacing over one) opens it again below.
       if (open) setMenu(null);
       // esc lets go of a selection first, then stops typing.
@@ -271,7 +272,7 @@ export function ConsoleView({ editor, editing, ctx, width, height, active }) {
     : sel
       ? 'selected · ctrl+r runs just this · typing replaces it · esc let go'
       : editing
-      ? 'typing · ctrl+space suggest · ctrl+r run · ctrl+z undo · esc stop'
+      ? 'typing · ctrl+n suggest · ctrl+r run · ctrl+z undo · esc stop'
       : `${editor.lines.length} lines · ↵ type · ctrl+r run · R run all · f format · ctrl+f find`;
   return (
     <Panel title="Console" hint={hint} width={width} height={height} focused={active}>

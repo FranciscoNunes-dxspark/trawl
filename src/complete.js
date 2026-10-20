@@ -105,7 +105,7 @@ function rank(items, word) {
 /**
  * What to offer at the cursor: { from, word, items } with `from` the column where the word being
  * typed starts (the text `accept` replaces), or null inside a comment or string. Each item is
- * { label, insert, kind, detail }. `force` (ctrl+space) offers a list before anything is typed.
+ * { label, insert, kind, detail }. `force` (ctrl+n) offers a list before anything is typed.
  */
 export function completeAt(editor, schema, { force = false } = {}) {
   const { lines, row, col } = editor;

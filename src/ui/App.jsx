@@ -11,7 +11,7 @@ import { commitMode, describeConn, isReadOnly } from '../connections.js';
 import { copyToClipboard } from '../clipboard.js';
 import { osCredentials } from '../credentials.js';
 import { connect as openSession } from '../db.js';
-import { changesText, editTarget, readTarget } from '../edit.js';
+import { changesText, editTarget, hasChanges, noChanges, readTarget } from '../edit.js';
 import { HELP } from '../help.js';
 import { commandsSection, sectionFor } from '../help-layout.js';
 import { buildSchema } from '../schema.js';
@@ -54,7 +54,7 @@ const HELP_SECTIONS = [...HELP, commandsSection(COMMANDS)];
 const HINTS = {
   explorer: '↵ first rows · d describe · s query it in the console · c CREATE script · /find filter',
   query: '↵ run statement · v select several · R run file · e edit in the console · /console',
-  results: 'h/l columns · o sort · f filter · ↵ record · y/Y copy · F follow key · p pin · c compare · e edit · n NULL · d delete · s save · x export',
+  results: 'h/l columns · o sort · f filter · ↵ record · v value · y/Y copy · F follow key · p pin · c compare · e edit · n NULL · d delete · a add · s save · x export',
   history: '↵ run again · e edit in the console · ◆ ran by Claude',
   connections: '↵ connect · n new · p password · f folder · x forget',
   activity: 'R read again · ↵ full SQL · x kill · a idle sessions too',
@@ -67,7 +67,7 @@ const CHANGES_SCHEMA = /\b(create|alter|drop|sp_rename|use)\b/i;
 
 const firstLine = (s) => String(s ?? '').split('\n')[0];
 // Changes staged in Results: "row:col" → the text typed (null for NULL), and rows to delete.
-const NO_CHANGES = { cells: new Map(), deletes: new Set() };
+const NO_CHANGES = noChanges();
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 // What a mouse selection copied: "3 lines", "12 characters". A whole line cut with ctrl+x ends in
 // its newline, which doesn't count.
@@ -282,7 +282,7 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
   // New results replace the grid, and with it any edits not yet saved.
   const showResults = (next) => {
     const pending = changesRef.current;
-    if ((pending.cells.size || pending.deletes.size) && next?.id !== resultsRef.current?.id) {
+    if (hasChanges(pending) && next?.id !== resultsRef.current?.id) {
       note(`Dropped ${changesText(pending)} not saved to ${resultsRef.current?.edit?.table?.name ?? 'the table'}.`);
       setChanges(NO_CHANGES);
     }

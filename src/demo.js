@@ -79,13 +79,13 @@ function schemaSets(dbName) {
     set(['name'], Object.keys(DATABASES).map((n) => [n])),
     set(['schema', 'name', 'type', 'rows'], db.tables.map((t) => [t.schema, t.name, kinds[t.kind], t.kind === 'table' ? t.rows.length : null])),
     set(
-      ['schema', 'object', 'name', 'type', 'max_length', 'precision', 'scale', 'is_nullable', 'is_identity', 'pk'],
+      ['schema', 'object', 'name', 'type', 'max_length', 'precision', 'scale', 'is_nullable', 'is_identity', 'is_computed', 'pk'],
       db.tables.flatMap((t) =>
         t.columns.map((c) => {
           // Split "nvarchar(100)" back into the catalog's pieces so typeLabel() rebuilds it.
           const [, type, size] = c.type.match(/^(\w+)(?:\((\w+)\))?/);
           const max = size === 'max' ? -1 : type.startsWith('n') && size ? Number(size) * 2 : Number(size ?? 0);
-          return [t.schema, t.name, c.name, type, max, 0, 0, c.nullable, c.identity, c.pk ? 1 : 0];
+          return [t.schema, t.name, c.name, type, max, 0, 0, c.nullable, c.identity, Boolean(c.computed), c.pk ? 1 : 0];
         }),
       ),
     ),
@@ -275,7 +275,7 @@ export function demoSession(conn, { database } = {}) {
           const edit = batch.indexOf('-- trawl:edit');
           if (edit >= 0) {
             if (/^\s*BEGIN\s+TRAN/i.test(batch.slice(0, edit))) session.tran++;
-            for (const _ of batch.matchAll(/^\s*(UPDATE|DELETE)\b/gim)) state.messages.push('1 row affected');
+            for (const _ of batch.matchAll(/^\s*(UPDATE|DELETE|INSERT)\b/gim)) state.messages.push('1 row affected');
             return void state.messages.push('(Demo: nothing was changed.)');
           }
           for (const st of splitStatements(batch)) {

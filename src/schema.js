@@ -11,7 +11,7 @@ FROM sys.objects o JOIN sys.schemas s ON s.schema_id = o.schema_id
 WHERE o.type IN ('U', 'V', 'P', 'FN', 'IF', 'TF') AND o.is_ms_shipped = 0
 ORDER BY s.name, o.name;
 SELECT s.name AS [schema], o.name AS [object], c.name, t.name AS type, c.max_length, c.precision, c.scale,
-  c.is_nullable, c.is_identity,
+  c.is_nullable, c.is_identity, c.is_computed,
   CASE WHEN EXISTS (
     SELECT 1 FROM sys.index_columns ic JOIN sys.indexes i ON i.object_id = ic.object_id AND i.index_id = ic.index_id
     WHERE i.is_primary_key = 1 AND ic.object_id = c.object_id AND ic.column_id = c.column_id
@@ -85,6 +85,8 @@ export function buildSchema(sets) {
       type: typeLabel(c.type, c.max_length, c.precision, c.scale),
       nullable: Boolean(c.is_nullable),
       identity: Boolean(c.is_identity),
+      // Only on computed columns, which can't be given a value.
+      ...(c.is_computed ? { computed: true } : {}),
       pk: Boolean(c.pk),
     });
   }
@@ -126,7 +128,7 @@ export function describeObject(o, schema) {
   const typeW = Math.max(4, ...o.columns.map((c) => c.type.length)) + 2;
   const lines = [`${o.kind} ${objectName(o)}${o.rows != null ? `  ·  about ${o.rows.toLocaleString('en')} rows` : ''}`, ''];
   for (const c of o.columns) {
-    const flags = [c.pk ? 'primary key' : '', c.identity ? 'identity' : '', c.nullable ? 'null' : 'not null'].filter(Boolean).join(', ');
+    const flags = [c.pk ? 'primary key' : '', c.identity ? 'identity' : '', c.computed ? 'computed' : '', c.nullable ? 'null' : 'not null'].filter(Boolean).join(', ');
     lines.push(`${c.pk ? 'PK' : '  '} ${c.name.padEnd(nameW)}${c.type.padEnd(typeW)}${flags}`);
   }
   if (o.params) {

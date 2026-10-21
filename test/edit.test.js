@@ -1,6 +1,6 @@
 import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { canEdit, editTarget, editText, insertScript, saveScript, savedValue, toLiteral, tsvText } from '../src/edit.js';
+import { canEdit, changesText, editTarget, editText, emptyIsDefault, hasChanges, insertScript, nextNewRow, noChanges, saveScript, savedValue, toLiteral, tsvText } from '../src/edit.js';
 import { demoSession } from '../src/demo.js';
 import { SCHEMA_SQL, buildSchema } from '../src/schema.js';
 import { classifyScript } from '../src/sql.js';
@@ -54,6 +54,7 @@ test('typed text becomes a literal of the column’s type, or says what it takes
   assert.throws(() => toLiteral('', 'date'), /date or time/);
   assert.equal(canEdit({ type: 'int', identity: true }), false);
   assert.equal(canEdit({ type: 'rowversion' }), false);
+  assert.equal(canEdit({ type: 'int', computed: true }), false);
   assert.equal(editText(null), '');
   assert.equal(editText(Buffer.from([1, 255])), '0x01FF');
   assert.equal(savedValue('7', 'tinyint'), 7);
@@ -76,6 +77,36 @@ test('the save script: each change finds exactly its row, or nothing is saved', 
   assert.deepEqual(danger, [], 'every statement has its WHERE');
   assert.throws(() => saveScript(t, set, { cells: new Map([['0:5', 'many']]), deletes: new Set() }), /Goals \(Id = 1\): int takes a whole number/);
   assert.equal(saveScript(t, set, { cells: new Map(), deletes: new Set() }), '');
+});
+
+test('new rows: INSERTs of the columns given, each adding one row, in the same batch', () => {
+  const set = { columns: PLAYERS[0].columns, rows: [[1, 1, 'Rui Costa', 'GK', null, 0]] };
+  const t = editTarget('SELECT * FROM dbo.Players', [set], schema);
+  assert.equal(nextNewRow(set, noChanges()), 1);
+  assert.equal(nextNewRow(set, { ...noChanges(), inserts: [1, 3] }), 4, 'after the last, gaps and all');
+  // Rows 1 and 3 are new (2 was added and removed again); 3 gives no values at all.
+  const changes = { cells: new Map([['0:5', '2'], ['1:2', "Zé O'Neil"], ['1:1', '2'], ['1:4', null], ['2:2', 'gone']]), deletes: new Set(), inserts: [1, 3] };
+  assert.equal(hasChanges(changes), true);
+  assert.equal(hasChanges(noChanges()), false);
+  const kept = { ...changes, cells: new Map([...changes.cells].filter(([at]) => at !== '2:2')) };
+  assert.equal(changesText(kept), '1 edited row and 2 new rows');
+  assert.equal(changesText({ ...kept, deletes: new Set([0]) }), '1 deletion and 2 new rows');
+  assert.equal(changesText({ cells: new Map([['0:2', 'x']]), deletes: new Set([1]), inserts: [5] }), '1 edited row, 1 deletion and 1 new row');
+  const script = saveScript(t, set, changes);
+  assert.match(script, /^-- trawl:edit 3 changes to dbo\.Players\n/);
+  assert.match(script, /UPDATE \[dbo\]\.\[Players\] SET \[Goals\] = 2 WHERE \[Id\] = 1 AND \[Goals\] = 0;/);
+  assert.match(script, /INSERT INTO \[dbo\]\.\[Players\] \(\[ClubId\], \[Name\], \[Shirt\]\) VALUES \(2, N'Zé O''Neil', NULL\);\n  IF @@ROWCOUNT <> 1 THROW 50000, N'The new row 1 wasn''t added as one row\. Nothing was saved\.', 1;/);
+  assert.match(script, /INSERT INTO \[dbo\]\.\[Players\] DEFAULT VALUES;\n  IF @@ROWCOUNT <> 1 THROW 50000, N'The new row 2 /);
+  assert.doesNotMatch(script, /N'gone'/, 'a removed new row leaves nothing behind');
+  assert.ok(script.indexOf('UPDATE') < script.indexOf('INSERT'));
+  assert.match(script, /COMMIT TRANSACTION;\nEND TRY/);
+  assert.deepEqual(classifyScript(script).danger, []);
+  // A bad value says which new row it's in.
+  assert.throws(() => saveScript(t, set, { cells: new Map([['1:5', 'lots']]), deletes: new Set(), inserts: [1] }), /Goals \(new row 1\): int takes a whole number/);
+  // Nothing typed is the default, except where it is empty text.
+  assert.equal(emptyIsDefault('int'), true);
+  assert.equal(emptyIsDefault('date'), true);
+  assert.equal(emptyIsDefault('nvarchar(100)'), false);
 });
 
 test('a result set copies as tab-separated text or as INSERT statements', () => {

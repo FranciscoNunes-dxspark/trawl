@@ -43,3 +43,15 @@ test('without a table to go by, it says why', () => {
   const renamed = set(['Club'], [[1]]);
   assert.match(followTargets(readTarget('SELECT ClubId AS Club FROM dbo.Players', [renamed], schema), renamed, 0, 0, schema).reason, /isn't a column of dbo\.Players as it is/);
 });
+
+test("on Postgres and MySQL the WHERE comes before LIMIT, with the connection's own literals", async () => {
+  const { DIALECTS } = await import('../src/dialects.js');
+  const clubs = { schema: 'public', name: 'clubs', kind: 'table', columns: [{ name: 'code', type: 'text', pk: true }] };
+  const players = { schema: 'public', name: 'players', kind: 'table', columns: [{ name: 'id', type: 'integer', pk: true }, { name: 'club', type: 'text' }] };
+  const pg = { objects: [clubs, players], foreignKeys: [{ name: 'players_club_fkey', from: 'public.players', to: 'public.clubs', columns: [['club', 'code']] }] };
+  const rows = { columns: [{ name: 'id', type: 'Int' }, { name: 'club', type: 'text' }], rows: [[1, "O'Neil FC"]] };
+  const source = readTarget('SELECT * FROM players LIMIT 100', [rows], pg, { kind: 'postgres' });
+  const d = DIALECTS.postgres;
+  const r = followTargets(source, rows, 0, 1, pg, { limit: 50, quote: d.quote, selectTop: d.selectTop, kind: d.kind });
+  assert.deepEqual(r.targets.map((t) => t.sql), [`SELECT * FROM "public"."clubs" WHERE "code" = 'O''Neil FC' LIMIT 50;`]);
+});

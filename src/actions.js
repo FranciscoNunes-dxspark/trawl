@@ -9,7 +9,7 @@ import * as ed from './editor.js';
 import { findDataSources, importPlan, planText } from './datagrip.js';
 import { formatSql } from './format.js';
 import { cellText } from './cell.js';
-import { changesText, hasChanges, insertScript, saveScript, tsvText, withSaved } from './edit.js';
+import { changesText, hasChanges, insertScript, saveRecovery, saveScript, tsvText, withSaved } from './edit.js';
 import { AI_LABELS, AI_LEVELS, EXPLAIN_SYSTEM, aiLevel, askPrompt, canSeeSchema, consoleText, explainPrompt, parseAnswer } from './ai.js';
 import { followTargets } from './follow.js';
 import { moreQuery, raiseTop } from './more.js';
@@ -113,8 +113,9 @@ async function withParameters(ctx, sql) {
  * Trawl's own TOP (n) at the row limit, so m in Results can raise it. `run` takes over once the
  * checks have passed ((text, { write, wrap, title }) => …), as the actual plan does; it gets the
  * SQL with its parameters filled in, and `wrap` says manual commit wants it in a transaction.
+ * `recover` runs if it fails (see db.js runScript).
  */
-export async function runSql(ctx, sql, { title, prefix = '', lineBase, stay, keep, top, run } = {}) {
+export async function runSql(ctx, sql, { title, prefix = '', lineBase, stay, keep, top, run, recover } = {}) {
   if (!needSession(ctx)) return;
   if (!sql.trim()) return;
   const text = await withParameters(ctx, sql.trim());
@@ -149,7 +150,7 @@ export async function runSql(ctx, sql, { title, prefix = '', lineBase, stay, kee
   const wrap = write && commitMode(conn) === 'manual' && !ctx.tranCount;
   const heading = title ?? `${prefix}${oneLine(withoutLeadingComments(text))}`;
   if (run) return run(text, { write, wrap, title: heading });
-  return ctx.query(wrap ? `${dialect.begin}\n${text}` : text, { title: heading, wrapped: wrap, lineBase, stay, keep, top });
+  return ctx.query(wrap ? `${dialect.begin}\n${text}` : text, { title: heading, wrapped: wrap, lineBase, stay, keep, top, recover });
 }
 
 /**
@@ -173,7 +174,9 @@ export async function moreRows(ctx) {
 
 /**
  * Saves the edits staged in Results: shows the script, asks, then runs it through runSql (so a
- * read-only connection refuses it and production keeps it in a transaction until /commit).
+ * read-only connection refuses it and production keeps it in a transaction until /commit). On
+ * Postgres and MySQL the script depends on whether a transaction will be open when it runs (one is,
+ * or runSql starts one for manual commit): then it keeps to a savepoint, which a failure goes back to.
  */
 export async function saveEdits(ctx) {
   const res = ctx.results;
@@ -182,9 +185,10 @@ export async function saveEdits(ctx) {
   const { session } = ctx;
   if (!session || session.conn.name !== res.conn || session.database !== res.database) return ctx.note(`These rows came from ${res.conn} (${res.database}); connect there again to save them.`, 'error');
   const { table } = res.edit;
+  const transaction = Boolean(ctx.tranCount) || commitMode(session.conn) === 'manual';
   let script;
   try {
-    script = saveScript(res.edit, res.sets[0], changes);
+    script = saveScript(res.edit, res.sets[0], changes, { transaction });
   } catch (e) {
     return ctx.note(e.message, 'error');
   }
@@ -199,7 +203,7 @@ export async function saveEdits(ctx) {
   });
   ctx.closeOverlay();
   if (!ok) return;
-  const r = await runSql(ctx, script, { title: `save ${what} to ${objectName(table)}`, keep: true });
+  const r = await runSql(ctx, script, { title: `save ${what} to ${objectName(table)}`, keep: true, recover: saveRecovery(res.edit, { transaction }) });
   // On a failure, nothing was saved: the changes stay staged to fix or undo.
   if (!r?.ok || ctx.results !== res) return;
   ctx.replaceResults({ ...res, sets: [withSaved(res.sets[0], changes, res.edit)] });
@@ -233,7 +237,7 @@ export async function followKey(ctx, cell = ctx.resultCell) {
   if (!needSession(ctx)) return;
   if (res.conn !== ctx.session.conn.name || res.database !== ctx.session.database) return ctx.note(`These rows came from ${res.conn} (${res.database}); connect there again to follow their keys.`, 'error');
   const d = dialectOf(ctx.session);
-  const r = followTargets(res.source, res.sets[0], cell.row, cell.col, ctx.schema, { limit: ctx.config.limit, quote: d.quote, selectTop: d.selectTop });
+  const r = followTargets(res.source, res.sets[0], cell.row, cell.col, ctx.schema, { limit: ctx.config.limit, quote: d.quote, selectTop: d.selectTop, kind: d.kind });
   if (r.reason) return ctx.note(r.reason, 'error');
   let pick = r.targets[0];
   if (r.targets.length > 1) {
@@ -1230,7 +1234,7 @@ export async function importCsv(ctx, rest) {
   let built;
   try {
     const d = dialectOf(ctx.session);
-    built = csvInsertScript(parseCsv(await readFile(full, 'utf8')), table, d.kind === 'sqlserver' ? {} : { quote: d.quote });
+    built = csvInsertScript(parseCsv(await readFile(full, 'utf8')), table, d.kind === 'sqlserver' ? {} : { quote: d.quote, kind: d.kind });
   } catch (e) {
     return ctx.note(`${full}: ${e.code === 'ENOENT' ? 'no such file' : e.message.split('\n')[0]}`, 'error');
   }
@@ -1392,7 +1396,7 @@ export function copyResults(ctx, format) {
   const d = dialectOf(ctx.session);
   const source = res?.edit?.table ?? res?.source?.table;
   const table = source ? qualifiedFor(d, source.schema, source.name) : d.quote('TableName');
-  const text = f === 'csv' ? toCsv(set) : f === 'json' ? toJson(set) : f === 'md' ? toMarkdown(set) : f === 'insert' ? insertScript(set, table, { quote: d.quote }) : tsvText(set);
+  const text = f === 'csv' ? toCsv(set) : f === 'json' ? toJson(set) : f === 'md' ? toMarkdown(set) : f === 'insert' ? insertScript(set, table, { quote: d.quote, kind: d.kind }) : tsvText(set);
   const n = `${set.rows.length} row${set.rows.length === 1 ? '' : 's'}`;
   return ctx.copy(text, f === 'tsv' ? `${n}, tab-separated` : f === 'insert' ? `${n} as INSERT statements${source ? '' : ` (into ${table}: rename it)`}` : f === 'md' ? `${n} as a Markdown table` : `${n} as ${f.toUpperCase()}`);
 }

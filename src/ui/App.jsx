@@ -498,14 +498,15 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
   // limit for this run (m in Results), and `top` says the SQL is Trawl's own TOP (n) at that limit.
   // `again` ({ id, index }) puts the rows in place of those results, keeping the cursor, sort and
   // filter; a failed run then leaves them as they were. `runner` runs the SQL in place of
-  // session.run (an actual plan sets STATISTICS PROFILE around it).
-  const query = async (sql, { title, wrapped = false, lineBase = 1, stay = false, keep = false, limit: raised, top = null, again = null, runner = null } = {}) => {
+  // session.run (an actual plan sets STATISTICS PROFILE around it). `recover` runs if the script
+  // fails (saving edits goes back to its savepoint with it).
+  const query = async (sql, { title, wrapped = false, lineBase = 1, stay = false, keep = false, limit: raised, top = null, again = null, runner = null, recover = '' } = {}) => {
     const s = sessionRef.current;
     const limit = raised ?? configRef.current.limit;
     let res = null;
     const r = await task(title, async (signal) => {
       try {
-        res = withStatistics(await (runner ? runner(s, sql, { signal, limit }) : s.run(sql, { signal, limit })));
+        res = withStatistics(await (runner ? runner(s, sql, { signal, limit, recover }) : s.run(sql, { signal, limit, recover })));
       } catch (e) {
         if (e.partial) res = withStatistics({ ...e.partial, error: e });
         if (e.line) e.message = `Line ${Math.max(1, lineBase + e.line - 1 - (wrapped ? 1 : 0))}: ${e.message}`;
@@ -517,11 +518,10 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
       // Whether, and where, the rows can be edited and saved back (edit.js).
       const sc = schemaRef.current;
       const why = res.error ? { reason: 'the statement failed' } : sc?.database !== s.database ? { reason: 'the schema is still loading' } : null;
-      // Saving edits writes T-SQL; following keys works everywhere.
-      const native = dialectOf(s).kind === 'sqlserver';
-      const edit = why ?? (native ? editTarget(sql, res.sets, sc) : { reason: `saving edits is for SQL Server only, and this is ${dialectOf(s).label}` });
+      const { kind } = dialectOf(s);
+      const edit = why ?? editTarget(sql, res.sets, sc, { kind });
       // Which table the rows are, for following a foreign key from a cell (F).
-      const source = why ?? (edit.table ? { table: edit.table, columns: edit.columns } : readTarget(sql, res.sets, sc));
+      const source = why ?? (edit.table ? { table: edit.table, columns: edit.columns } : readTarget(sql, res.sets, sc, { kind }));
       const shown = { id: again?.id ?? nextId.current++, title, sql, ...res, error: res.error?.message ?? null, edit, source, conn: s.conn.name, database: s.database, limit, top };
       showResults(shown);
       setResultIndex(again ? Math.min(again.index, Math.max(0, res.sets.length - 1)) : 0);

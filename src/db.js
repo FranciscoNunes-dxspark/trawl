@@ -139,9 +139,11 @@ function tediousSession(conn, connection, database) {
 
 /**
  * Runs a script batch by batch (split on GO, or by `split`: the other dialects' statements) through `runOne`, collecting result sets and
- * messages. Errors carry what had already arrived. Shared with the demo driver.
+ * messages. Errors carry what had already arrived. `recover` is run when the script fails, before
+ * the error is thrown (its own errors ignored): saving edits on Postgres and MySQL goes back to its
+ * savepoint with it (edit.js saveRecovery). Shared with the demo driver.
  */
-export async function runScript(session, script, runOne, { signal, split = splitBatches } = {}) {
+export async function runScript(session, script, runOne, { signal, split = splitBatches, recover = '' } = {}) {
   const started = Date.now();
   const state = { sets: [], messages: [], stopped: false };
   session.collect?.(state.messages);
@@ -157,6 +159,7 @@ export async function runScript(session, script, runOne, { signal, split = split
   } catch (e) {
     const err = e instanceof DbError ? e : toDbError(e);
     err.partial = { sets: state.sets, messages: state.messages };
+    for (const batch of recover ? split(recover) : []) await Promise.resolve(runOne(batch.text, batch.line, { sets: [], messages: [], stopped: false })).catch(() => {});
     throw err;
   } finally {
     session.collect?.(null);

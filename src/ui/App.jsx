@@ -478,14 +478,18 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     return r.ok;
   };
 
-  // `keep` leaves the grid as it is (saving edits shows no rows of its own).
-  const query = async (sql, { title, wrapped = false, lineBase = 1, stay = false, keep = false } = {}) => {
+  // `keep` leaves the grid as it is (saving edits shows no rows of its own). `limit` raises the row
+  // limit for this run (m in Results), and `top` says the SQL is Trawl's own TOP (n) at that limit.
+  // `again` ({ id, index }) puts the rows in place of those results, keeping the cursor, sort and
+  // filter; a failed run then leaves them as they were. `runner` runs the SQL in place of
+  // session.run (an actual plan sets STATISTICS PROFILE around it).
+  const query = async (sql, { title, wrapped = false, lineBase = 1, stay = false, keep = false, limit: raised, top = null, again = null, runner = null } = {}) => {
     const s = sessionRef.current;
-    const limit = configRef.current.limit;
+    const limit = raised ?? configRef.current.limit;
     let res = null;
     const r = await task(title, async (signal) => {
       try {
-        res = withStatistics(await s.run(sql, { signal, limit }));
+        res = withStatistics(await (runner ? runner(s, sql, { signal, limit }) : s.run(sql, { signal, limit })));
       } catch (e) {
         if (e.partial) res = withStatistics({ ...e.partial, error: e });
         if (e.line) e.message = `Line ${Math.max(1, lineBase + e.line - 1 - (wrapped ? 1 : 0))}: ${e.message}`;
@@ -493,7 +497,7 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
       }
       return summarize(res, limit);
     });
-    if (res && !keep) {
+    if (res && !keep && !(again && res.error)) {
       // Whether, and where, the rows can be edited and saved back (edit.js).
       const sc = schemaRef.current;
       const why = res.error ? { reason: 'the statement failed' } : sc?.database !== s.database ? { reason: 'the schema is still loading' } : null;
@@ -502,9 +506,9 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
       const edit = why ?? (native ? editTarget(sql, res.sets, sc) : { reason: `saving edits is for SQL Server only, and this is ${dialectOf(s).label}` });
       // Which table the rows are, for following a foreign key from a cell (F).
       const source = why ?? (edit.table ? { table: edit.table, columns: edit.columns } : readTarget(sql, res.sets, sc));
-      const shown = { id: nextId.current++, title, sql, ...res, error: res.error?.message ?? null, edit, source, conn: s.conn.name, database: s.database };
+      const shown = { id: again?.id ?? nextId.current++, title, sql, ...res, error: res.error?.message ?? null, edit, source, conn: s.conn.name, database: s.database, limit, top };
       showResults(shown);
-      setResultIndex(0);
+      setResultIndex(again ? Math.min(again.index, Math.max(0, res.sets.length - 1)) : 0);
       if (res.sets.length && !stay) setView('results');
     }
     const summary = res && !res.error ? summarize(res, limit)[0] : r.error?.message;
@@ -682,6 +686,10 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
       },
       get results() {
         return resultsRef.current;
+      },
+      // Which of the results' sets is on screen.
+      get resultIndex() {
+        return resultIndexRef.current;
       },
       // The console's tabs: { names, index }.
       get consoleTabs() {

@@ -12,6 +12,8 @@ import { cellText } from './cell.js';
 import { changesText, hasChanges, insertScript, saveScript, tsvText, withSaved } from './edit.js';
 import { AI_LABELS, AI_LEVELS, EXPLAIN_SYSTEM, aiLevel, askPrompt, canSeeSchema, consoleText, explainPrompt, parseAnswer } from './ai.js';
 import { followTargets } from './follow.js';
+import { moreQuery, raiseTop } from './more.js';
+import { analyzedText, splitProfile } from './plans.js';
 import { compareSets, comparisonSet, comparisonSummary } from './compare.js';
 import { droppedPaths, findTab, freeName, tabNameFor, tabNameProblem } from './consoles.js';
 import { findSnippet, snippetNameProblem, snippetsFor, withSnippet, withoutSnippet } from './snippets.js';
@@ -106,8 +108,13 @@ async function withParameters(ctx, sql) {
   return bindVariables(text, values);
 }
 
-/** Runs SQL on the current connection, after the read-only and danger checks. */
-export async function runSql(ctx, sql, { title, prefix = '', lineBase, stay, keep } = {}) {
+/**
+ * Runs SQL on the current connection, after the read-only and danger checks. `top`: the SQL is
+ * Trawl's own TOP (n) at the row limit, so m in Results can raise it. `run` takes over once the
+ * checks have passed ((text, { write, wrap, title }) => …), as the actual plan does; it gets the
+ * SQL with its parameters filled in, and `wrap` says manual commit wants it in a transaction.
+ */
+export async function runSql(ctx, sql, { title, prefix = '', lineBase, stay, keep, top, run } = {}) {
   if (!needSession(ctx)) return;
   if (!sql.trim()) return;
   const text = await withParameters(ctx, sql.trim());
@@ -140,7 +147,28 @@ export async function runSql(ctx, sql, { title, prefix = '', lineBase, stay, kee
   }
   // With manual commit (production's default), a write starts a transaction, so nothing sticks until /commit.
   const wrap = write && commitMode(conn) === 'manual' && !ctx.tranCount;
-  return ctx.query(wrap ? `${dialect.begin}\n${text}` : text, { title: title ?? `${prefix}${oneLine(withoutLeadingComments(text))}`, wrapped: wrap, lineBase, stay, keep });
+  const heading = title ?? `${prefix}${oneLine(withoutLeadingComments(text))}`;
+  if (run) return run(text, { write, wrap, title: heading });
+  return ctx.query(wrap ? `${dialect.begin}\n${text}` : text, { title: heading, wrapped: wrap, lineBase, stay, keep, top });
+}
+
+/**
+ * m in Results and /more: the query behind the result set on screen again, when the row limit cut
+ * it off, with the limit raised by another limit's worth (500, 1000, 1500…), in place of the rows on
+ * screen so the cursor, the sort and the filter stay. Only reads run again (more.js moreQuery).
+ */
+export async function moreRows(ctx) {
+  const res = ctx.results;
+  if (!needSession(ctx)) return;
+  const index = ctx.resultIndex ?? 0;
+  const m = moreQuery(res, index, { step: ctx.config.limit, dialect: dialectOf(ctx.session).kind });
+  if (m.reason) return ctx.note(m.reason, 'error');
+  if (res.conn !== ctx.session.conn.name || res.database !== ctx.session.database) return ctx.note(`These rows came from ${res.conn} (${res.database}); connect there again to fetch more.`, 'error');
+  const { changes } = ctx;
+  if (hasChanges(changes)) return ctx.note(`Save (s) or undo (U) the ${changesText(changes)} first: the rows are read again.`, 'error');
+  // A title with Trawl's TOP in it says the new one.
+  const title = (m.top && raiseTop(res.title ?? '', res.top, m.top)) || res.title;
+  return ctx.query(m.sql, { title, limit: m.limit, top: m.top ?? null, again: { id: res.id, index } });
 }
 
 /**
@@ -212,7 +240,7 @@ export async function followKey(ctx, cell = ctx.resultCell) {
     pick = await ctx.confirm({ title: 'Follow which foreign key?', options: [...r.targets.map((t) => ({ label: `${t.label} (${t.fk})`, value: t })), { label: 'Neither', value: null }] });
     if (!pick) return;
   }
-  return runSql(ctx, pick.sql);
+  return runSql(ctx, pick.sql, { top: ctx.config.limit });
 }
 
 export async function connect(ctx, name, { database } = {}) {
@@ -386,7 +414,7 @@ export async function rollback(ctx) {
 export function browse(ctx, obj) {
   if (!needSession(ctx) || !obj) return;
   if (obj.kind !== 'table' && obj.kind !== 'view') return ctx.note(`${objectName(obj)} is a ${obj.kind}; only tables and views have rows to show.`, 'error');
-  return runSql(ctx, selectTopFor(dialectOf(ctx.session), obj.schema, obj.name, ctx.config.limit));
+  return runSql(ctx, selectTopFor(dialectOf(ctx.session), obj.schema, obj.name, ctx.config.limit), { top: ctx.config.limit });
 }
 
 export function describe(ctx, text) {
@@ -580,13 +608,93 @@ export async function showPlan(ctx, sql) {
   }
 }
 
+// The savepoint a write's EXPLAIN ANALYZE is rolled back to inside a transaction already open.
+const PLAN_SAVEPOINT = 'trawl_plan';
+
+/**
+ * P in the console and /plan actual [sql]: the actual plan, of the SQL given, the selection or the
+ * statement under the cursor. The statement runs, so it goes through runSql's checks (read-only,
+ * risky statements, manual commit) like any run, and lands in History.
+ *
+ * SQL Server: with SET STATISTICS PROFILE on (and off again whatever happens), each statement's rows
+ * go to Results as usual, followed by a set of its operators with the rows each really produced,
+ * which plans.js turns into the tree. The rows are read to the end (past the limit, dropped), so the
+ * counts are whole. Postgres and MySQL: EXPLAIN ANALYZE, which runs the statement but sends no rows.
+ * There it always runs in a transaction that is rolled back (back to a savepoint when one is open,
+ * which then stays as it was), whatever the commit mode: EXPLAIN ANALYZE is for looking at the plan,
+ * and nothing on screen would show what a write changed. Running the statement itself applies it.
+ */
+export async function showActualPlan(ctx, sql) {
+  if (!needSession(ctx)) return;
+  const pick = sql?.trim() ? { text: sql.trim() } : consolePick(ctx);
+  if (!pick?.text) return ctx.note('Nothing to run: give the SQL (/plan actual SELECT …) or put the cursor on a statement in the console.', 'error');
+  const session = ctx.session;
+  const dialect = dialectOf(session);
+  let plan = null;
+  let ran = null;
+  const run = async (text, { write, wrap, title }) => {
+    ran = text;
+    if (dialect.kind === 'sqlserver') {
+      const runner = async (s, script, opts) => {
+        await s.run('SET STATISTICS PROFILE ON;', { signal: opts.signal });
+        try {
+          const split = splitProfile(await s.run(script, { ...opts, drain: true }));
+          plan = split.plan;
+          return split.res;
+        } catch (e) {
+          if (e.partial) e.partial = splitProfile(e.partial).res;
+          throw e;
+        } finally {
+          await s.run('SET STATISTICS PROFILE OFF;').catch(() => {});
+        }
+      };
+      return ctx.query(wrap ? `${dialect.begin}\n${text}` : text, { title, wrapped: wrap, lineBase: pick.lineBase, stay: pick.lineBase != null, runner });
+    }
+    // Always rolled back (a read can call a function that writes, too); inside an open transaction,
+    // only back to the savepoint, so the transaction stays as it was.
+    const inTran = Boolean(ctx.tranCount);
+    const runner = async (s, script, opts) => {
+      await s.run(inTran ? `SAVEPOINT ${PLAN_SAVEPOINT};` : dialect.begin, { signal: opts.signal });
+      try {
+        const res = await s.run(script, { ...opts, limit: 100_000 });
+        plan = analyzedText(res.sets);
+        return { ...res, sets: [], messages: [...res.messages, ...(write ? ['Rolled back: EXPLAIN ANALYZE ran it to measure it, and nothing it changed was kept.'] : [])] };
+      } catch (e) {
+        if (dialect.kind === 'mysql' && /syntax|doesn't yet support|not supported/i.test(e.message)) e.message = `${e.message}\nEXPLAIN ANALYZE needs MySQL 8.0.18 or later, and takes SELECT, multi-table UPDATE and DELETE (MariaDB has ANALYZE instead); p shows the estimated plan.`;
+        throw e;
+      } finally {
+        await s.run(inTran ? `ROLLBACK TO SAVEPOINT ${PLAN_SAVEPOINT};` : dialect.rollback).catch(() => {});
+      }
+    };
+    return ctx.query(dialect.explainAnalyze(text), { title, lineBase: pick.lineBase, keep: true, runner });
+  };
+  const text = pick.text;
+  const title = `Actual plan: ${oneLine(withoutLeadingComments(text))}`;
+  const r = await runSql(ctx, text, { title, run });
+  if (!r?.ok) return;
+  if (!plan) return ctx.note(dialect.kind === 'sqlserver' ? 'The server sent no plan: nothing in it reads or writes a table (SET, DECLARE, PRINT), or it ran a procedure whose statements gave none.' : 'The server sent no plan.', 'error');
+  const how = dialect.kind === 'sqlserver' ? 'STATISTICS PROFILE' : 'EXPLAIN ANALYZE';
+  ctx.lastPlan = { sql: ran ?? text, plan, conn: session.conn.name, database: session.database, label: dialect.label, how, actual: true };
+  ctx.showText(title, plan, { keys: { a: () => explainPlan(ctx) }, hint: 'a Claude explains it' });
+  ctx.rememberOutput(title, plan);
+}
+
+/** The console's selection, or the statement under its cursor, with the line it starts on. */
+function consolePick(ctx) {
+  const e = ctx.console;
+  const sel = ed.selectedText(e);
+  if (sel?.text.trim()) return { text: sel.text, lineBase: sel.row + 1 };
+  const st = statementAt(splitStatements(ed.toText(e)), e.row + 1);
+  return st ? { text: st.text, lineBase: st.line } : null;
+}
+
 /**
  * a on a plan, and /explain: Claude reads the last plan with its query (never rows) and says what it
  * does, what costs the most and what might help. Refused on a connection closed to Claude.
  */
 export async function explainPlan(ctx) {
   const p = ctx.lastPlan;
-  if (!p) return ctx.note('Show a plan first: p in the console, or /plan <sql>.', 'error');
+  if (!p) return ctx.note('Show a plan first: p (or P, the actual plan) in the console, or /plan <sql>.', 'error');
   const conn = ctx.config.connections.find((c) => c.name === p.conn) ?? ctx.session?.conn;
   if (!canSeeSchema(conn)) return ctx.note(`${p.conn} is closed to Claude. /ai schema lets Claude see its queries and plans (never rows).`, 'error');
   let answer = null;

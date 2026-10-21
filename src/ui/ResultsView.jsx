@@ -1,7 +1,9 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Box, useInput } from 'ink';
 import * as a from '../actions.js';
+import { dialectOf } from '../dialects.js';
 import { canEdit, changesText, editText, emptyIsDefault, hasChanges, nextNewRow, noChanges, tsvText } from '../edit.js';
+import { cutOff, moreQuery } from '../more.js';
 import { formatValue, isNumericType, viewOrder } from '../sql.js';
 import { theme } from '../theme.js';
 import { clean, fit, stringWidth } from '../text.js';
@@ -84,6 +86,12 @@ export function ResultsView({ results, changes, setIndex, view, ctx, width, heig
   // Under the grid: unsaved changes first, then the error and the server's messages.
   const notes = (results?.messages ?? []).map((text) => ({ text, color: theme.dim }));
   if (results?.error) notes.unshift({ text: results.error, color: theme.del });
+  // Cut off at the row limit: say so, and how to fetch more when the query can run again.
+  if (cutOff(results, setIndex)) {
+    const step = ctx.config.limit;
+    const more = !moreQuery(results, setIndex, { step, dialect: dialectOf(ctx.session).kind }).reason;
+    notes.unshift({ text: `The row limit stopped it at ${set.rows.length.toLocaleString('en')} rows${more ? ` · m fetches ${step.toLocaleString('en')} more` : ''}`, color: theme.warn });
+  }
   if (editable && hasChanges(pending)) notes.unshift({ text: `${changesText(pending)} not saved · s saves · u undoes the row · U all`, color: theme.warn });
   const noteLines = Math.min(3, notes.length);
   const gridH = Math.max(1, innerH - 2 - noteLines);
@@ -220,6 +228,7 @@ export function ResultsView({ results, changes, setIndex, view, ctx, width, heig
     else if (input === '[' && setIndex > 0) (ctx.setResultIndex(setIndex - 1), setColOffset(0), setCol(0));
     else if (input === ']' && setIndex < sets.length - 1) (ctx.setResultIndex(setIndex + 1), setColOffset(0), setCol(0));
     else if (input === 'x') ctx.prefill('/export ');
+    else if (input === 'm') a.moreRows(ctx);
     else if (input === 'o' && set) ctx.sortResults(cur);
     else if (input === 'p') a.pinResult(ctx);
     else if (input === 'c') a.compareResults(ctx);

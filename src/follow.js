@@ -16,7 +16,7 @@ const parts = (dotted) => {
  * { targets } with one { label, sql } per foreign key, those the value refers to first, then the
  * tables that refer to it; or { reason } when there's nowhere to go. `limit` caps the rows read back.
  */
-export function followTargets(source, set, row, col, schema, { limit = 500, quote = quoteIdent, selectTop = (q, n) => `SELECT TOP (${n}) * FROM ${q}` } = {}) {
+export function followTargets(source, set, row, col, schema, { limit = 500, quote = quoteIdent, selectTop = (q, n, w) => `SELECT TOP (${n}) * FROM ${q}${w ? ` WHERE ${w}` : ''}` } = {}) {
   if (!source?.table) return { reason: `Trawl can't tell which table these rows are: ${source?.reason ?? 'no result'}` };
   const tc = source.columns.get(col);
   const { table } = source;
@@ -42,7 +42,7 @@ export function followTargets(source, set, row, col, schema, { limit = 500, quot
       }
       const pairs = f.columns.map(([, to], k) => [to, values[at[k]], source.columns.get(at[k]).type]);
       const [s, t] = parts(f.to);
-      targets.push({ label: `${f.to} where ${said(pairs)}`, sql: `${selectTop(`${quote(s)}.${quote(t)}`, limit)} WHERE ${where(pairs)};`, fk: f.name, refers: true });
+      targets.push({ label: `${f.to} where ${said(pairs)}`, sql: `${selectTop(`${quote(s)}.${quote(t)}`, limit, where(pairs))};`, fk: f.name, refers: true });
     }
   }
   for (const f of schema?.foreignKeys ?? []) {
@@ -51,7 +51,7 @@ export function followTargets(source, set, row, col, schema, { limit = 500, quot
       if (at.some((i) => i === undefined) || at.every((i) => values[i] == null)) continue;
       const pairs = f.columns.map(([from], k) => [from, values[at[k]], source.columns.get(at[k]).type]);
       const [s, t] = parts(f.from);
-      targets.push({ label: `${f.from} where ${said(pairs)} (rows referring to this one)`, sql: `${selectTop(`${quote(s)}.${quote(t)}`, limit)} WHERE ${where(pairs)};`, fk: f.name, refers: false });
+      targets.push({ label: `${f.from} where ${said(pairs)} (rows referring to this one)`, sql: `${selectTop(`${quote(s)}.${quote(t)}`, limit, where(pairs))};`, fk: f.name, refers: false });
     }
   }
   if (targets.length) return { targets };

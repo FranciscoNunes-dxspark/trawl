@@ -24,7 +24,7 @@ const SQLSERVER = {
   kind: 'sqlserver',
   label: 'SQL Server',
   quote: (name) => `[${String(name).replace(/]/g, ']]')}]`,
-  selectTop: (q, limit) => `SELECT TOP (${limit}) * FROM ${q}`,
+  selectTop: (q, limit, where) => `SELECT TOP (${limit}) * FROM ${q}${where ? ` WHERE ${where}` : ''}`,
   begin: 'BEGIN TRANSACTION;',
   commit: 'COMMIT TRANSACTION;',
   rollback: 'ROLLBACK TRANSACTION;',
@@ -35,7 +35,7 @@ const SQLSERVER = {
   schemaSql: SCHEMA_SQL,
   activitySql: ACTIVITY_SQL,
   kill: (id) => `KILL ${id};`,
-  // SET SHOWPLAN_TEXT, handled in actions.js showPlan.
+  // SET SHOWPLAN_TEXT and SET STATISTICS PROFILE, handled in actions.js showPlan and showActualPlan.
   explain: null,
   // /grep: the views, procedures, functions and triggers whose definition has the text in it.
   grepSql: (text) => `-- trawl:grep
@@ -73,6 +73,7 @@ WHERE t.parent_id = @id
 ORDER BY 1, 2, 3;`,
   // What /uses finds by the name in definitions, where the catalog doesn't say (none here).
   usesByName: null,
+  explainAnalyze: null,
   defaultPort: 1433,
 };
 
@@ -82,7 +83,7 @@ const POSTGRES = {
   kind: 'postgres',
   label: 'PostgreSQL',
   quote: (name) => `"${String(name).replace(/"/g, '""')}"`,
-  selectTop: (q, limit) => `SELECT * FROM ${q} LIMIT ${limit}`,
+  selectTop: (q, limit, where) => `SELECT * FROM ${q}${where ? ` WHERE ${where}` : ''} LIMIT ${limit}`,
   begin: 'BEGIN;',
   commit: 'COMMIT;',
   rollback: 'ROLLBACK;',
@@ -190,6 +191,8 @@ ORDER BY 1, 2, 3;`;
   },
   // The kinds whose definitions /uses reads for names: what refers to the object, and what it refers to.
   usesByName: { usedBy: ['procedure', 'function', 'trigger'], uses: ['procedure', 'function'], what: 'routines and triggers' },
+  // The actual plan: this one runs the statement (actions.js showActualPlan rolls a write back).
+  explainAnalyze: (sql) => `EXPLAIN (ANALYZE, BUFFERS) ${sql.replace(/;\s*$/, '')}`,
   defaultPort: 5432,
 };
 
@@ -197,7 +200,7 @@ const MYSQL = {
   kind: 'mysql',
   label: 'MySQL',
   quote: (name) => `\`${String(name).replace(/`/g, '``')}\``,
-  selectTop: (q, limit) => `SELECT * FROM ${q} LIMIT ${limit}`,
+  selectTop: (q, limit, where) => `SELECT * FROM ${q}${where ? ` WHERE ${where}` : ''} LIMIT ${limit}`,
   begin: 'START TRANSACTION;',
   commit: 'COMMIT;',
   rollback: 'ROLLBACK;',
@@ -258,6 +261,8 @@ FROM information_schema.triggers
 WHERE event_object_schema = ${hexstr(o.schema)} AND event_object_table = ${hexstr(o.name)}
 ORDER BY trigger_name;`,
   usesByName: { usedBy: ['view', 'procedure', 'function', 'trigger'], uses: ['view', 'procedure', 'function'], what: 'views, routines and triggers' },
+  // MySQL 8.0.18 and later; MariaDB has ANALYZE instead.
+  explainAnalyze: (sql) => `EXPLAIN ANALYZE ${sql.replace(/;\s*$/, '')}`,
   defaultPort: 3306,
 };
 

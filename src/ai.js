@@ -54,16 +54,17 @@ export function askPrompt({ question, schema, database }) {
 }
 
 export const EXPLAIN_SYSTEM = `You explain database execution plans (Microsoft SQL Server's, or PostgreSQL's or MySQL's EXPLAIN) to the developer who ran the query.
-You get the query and its estimated plan as text (no rows of data); the first line says which database it is.
+You get the query and its plan as text (no rows of data); the first line says which database it is.
+The plan is either estimated, or actual: the statement ran, and each operator shows the rows it really produced beside the optimizer's estimate (▲ and ▼ mark those 10 times off or more).
 In plain text with no Markdown headings, at most about 25 short lines:
 1. What the plan does, step by step, from the operators that read data up to the result.
-2. What is likely to cost the most, and why (scans of big tables, key lookups, sorts, hash joins, implicit conversions, missing index warnings).
+2. What is likely to cost the most, and why (scans of big tables, key lookups, sorts, hash joins, implicit conversions, missing index warnings); on an actual plan, where the estimates were far off and what that suggests (stale statistics, parameter sniffing, a predicate the optimizer can't estimate).
 3. Concrete changes worth trying: an index (with its CREATE INDEX), a rewrite of a predicate, or "nothing to change" when it is already fine.
 Only talk about the tables, columns and operators in the plan; don't invent statistics or row counts that aren't there.`;
 
-/** The prompt for explaining a plan: the query and its plan, never any rows. */
-export function explainPrompt({ sql, plan, database, label = 'SQL Server', how = 'SHOWPLAN_TEXT' }) {
-  return `Database: ${database} (${label})\n\nQuery:\n${sql}\n\nEstimated plan (${how}):\n${plan}`;
+/** The prompt for explaining a plan, estimated or actual: the query and its plan, never any rows. */
+export function explainPrompt({ sql, plan, database, label = 'SQL Server', how = 'SHOWPLAN_TEXT', actual = false }) {
+  return `Database: ${database} (${label})\n\nQuery:\n${sql}\n\n${actual ? 'Actual' : 'Estimated'} plan (${how}):\n${plan}`;
 }
 
 /** Splits Claude's answer into the SQL and the note around it. */

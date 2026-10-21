@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { demoSession } from '../src/demo.js';
+import { dialectOf } from '../src/dialects.js';
 import { readTarget } from '../src/edit.js';
 import { followTargets } from '../src/follow.js';
 import { SCHEMA_SQL, buildSchema } from '../src/schema.js';
@@ -15,6 +16,14 @@ test('a foreign key column leads to the row it refers to', () => {
   assert.deepEqual(r.targets.map((t) => [t.label, t.sql]), [['dbo.Clubs where Id = 2', 'SELECT TOP (50) * FROM [dbo].[Clubs] WHERE [Id] = 2;']]);
   assert.match(followTargets(source, players, 1, 1, schema).reason, /NULL here/);
   assert.match(followTargets(source, players, 0, 2, schema).reason, /Name isn't part of a foreign key/);
+});
+
+test('on Postgres and MySQL the WHERE comes before the LIMIT', () => {
+  const players = set(['Id', 'ClubId', 'Name'], [[1, 2, 'Rui']]);
+  const source = readTarget('SELECT Id, ClubId, Name FROM dbo.Players', [players], schema);
+  const pg = dialectOf({ kind: 'postgres' });
+  const r = followTargets(source, players, 0, 1, schema, { limit: 50, quote: pg.quote, selectTop: pg.selectTop });
+  assert.deepEqual(r.targets.map((t) => t.sql), ['SELECT * FROM "dbo"."Clubs" WHERE "Id" = 2 LIMIT 50;']);
 });
 
 test('a key other tables refer to leads to their rows, one way each', () => {

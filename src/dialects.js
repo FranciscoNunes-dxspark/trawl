@@ -7,6 +7,19 @@ import { ACTIVITY_SQL } from './activity.js';
 
 const sq = (s) => `'${String(s).replace(/'/g, "''")}'`;
 
+// Text put into a query safely, each kind's own way: SQL Server's N'…', Postgres's E'…' (whose
+// backslashes mean the same whatever standard_conforming_strings says), and MySQL's as hex, which no
+// sql_mode (NO_BACKSLASH_ESCAPES, ANSI_QUOTES) reads differently.
+const nstr = (s) => `N'${String(s).replace(/'/g, "''")}'`;
+const estr = (s) => `E'${String(s).replace(/\\/g, '\\\\').replace(/'/g, "''")}'`;
+const hexstr = (s) => `CONVERT(X'${Buffer.from(String(s), 'utf8').toString('hex')}' USING utf8mb4)`;
+
+/**
+ * `text` for LIKE '%…%' with ESCAPE '!': its own %, _ and ! (and, for SQL Server, [) matched as
+ * themselves, lower-cased for a search that ignores case.
+ */
+export const likePattern = (text, { brackets = false } = {}) => `%${String(text).toLowerCase().replace(brackets ? /[!%_[]/g : /[!%_]/g, '!$&')}%`;
+
 const SQLSERVER = {
   kind: 'sqlserver',
   label: 'SQL Server',
@@ -24,6 +37,42 @@ const SQLSERVER = {
   kill: (id) => `KILL ${id};`,
   // SET SHOWPLAN_TEXT, handled in actions.js showPlan.
   explain: null,
+  // /grep: the views, procedures, functions and triggers whose definition has the text in it.
+  grepSql: (text) => `-- trawl:grep
+SELECT s.name AS [schema], o.name, RTRIM(o.type) AS type, OBJECT_NAME(o.parent_object_id) AS parent, m.definition
+FROM sys.sql_modules m
+JOIN sys.objects o ON o.object_id = m.object_id
+JOIN sys.schemas s ON s.schema_id = o.schema_id
+WHERE o.type IN ('V', 'P', 'FN', 'IF', 'TF', 'TR') AND o.is_ms_shipped = 0
+  AND LOWER(m.definition) LIKE LOWER(${nstr(likePattern(text, { brackets: true }))}) ESCAPE N'!'
+ORDER BY s.name, o.name;`,
+  // /uses: what refers to an object (rel 'used_by'), what it refers to ('uses'), and the triggers on
+  // it ('trigger'), from the dependencies SQL Server records. A reference it couldn't bind to an id
+  // (a procedure's, made before the table) is matched by its name.
+  usesSql: (o) => `-- trawl:uses
+DECLARE @schema sysname = ${nstr(o.schema)}, @name sysname = ${nstr(o.name)};
+DECLARE @id int = OBJECT_ID(QUOTENAME(@schema) + N'.' + QUOTENAME(@name));
+SELECT 'used_by' AS rel, s.name AS [schema], o.name, RTRIM(o.type) AS type, OBJECT_NAME(o.parent_object_id) AS parent, CAST(NULL AS sysname) AS [database]
+FROM sys.sql_expression_dependencies d
+JOIN sys.objects o ON o.object_id = d.referencing_id
+JOIN sys.schemas s ON s.schema_id = o.schema_id
+WHERE d.referencing_id <> @id AND (d.referenced_id = @id
+  OR (d.referenced_id IS NULL AND d.referenced_database_name IS NULL AND d.referenced_entity_name = @name AND ISNULL(d.referenced_schema_name, @schema) = @schema))
+UNION
+SELECT 'uses', COALESCE(rs.name, d.referenced_schema_name), COALESCE(ro.name, d.referenced_entity_name), RTRIM(ro.type), NULL, d.referenced_database_name
+FROM sys.sql_expression_dependencies d
+LEFT JOIN sys.objects ro ON ro.object_id = d.referenced_id
+LEFT JOIN sys.schemas rs ON rs.schema_id = ro.schema_id
+WHERE d.referencing_id = @id AND d.referenced_class = 1 AND ISNULL(d.referenced_id, 0) <> @id
+UNION
+SELECT 'trigger', s.name, t.name, 'TR', OBJECT_NAME(t.parent_id), NULL
+FROM sys.triggers t
+JOIN sys.objects o ON o.object_id = t.object_id
+JOIN sys.schemas s ON s.schema_id = o.schema_id
+WHERE t.parent_id = @id
+ORDER BY 1, 2, 3;`,
+  // What /uses finds by the name in definitions, where the catalog doesn't say (none here).
+  usesByName: null,
   defaultPort: 1433,
 };
 
@@ -92,6 +141,55 @@ WHERE backend_type = 'client backend'
 ORDER BY pid;`,
   kill: (id) => `SELECT pg_terminate_backend(${id});`,
   explain: (sql) => `EXPLAIN ${sql.replace(/;\s*$/, '')}`,
+  // A trigger has no schema of its own: it's listed in its table's. Extensions' functions are left out.
+  grepSql: (text) => `-- trawl:grep
+SELECT * FROM (
+SELECT n.nspname AS "schema", c.relname AS name, 'V' AS type, NULL::text AS parent,
+  CASE c.relkind WHEN 'm' THEN 'CREATE MATERIALIZED VIEW ' ELSE 'CREATE OR REPLACE VIEW ' END || quote_ident(n.nspname) || '.' || quote_ident(c.relname) || E' AS\\n' || pg_get_viewdef(c.oid, true) AS definition
+FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind IN ('v', 'm') AND n.nspname NOT IN ${PG_SKIP} AND n.nspname NOT LIKE 'pg\\_%'
+UNION ALL
+SELECT n.nspname, p.proname, CASE p.prokind WHEN 'p' THEN 'P' ELSE 'FN' END, NULL, pg_get_functiondef(p.oid)
+FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+WHERE p.prokind IN ('f', 'p') AND n.nspname NOT IN ${PG_SKIP} AND n.nspname NOT LIKE 'pg\\_%'
+  AND NOT EXISTS (SELECT 1 FROM pg_depend x WHERE x.classid = 'pg_proc'::regclass AND x.objid = p.oid AND x.deptype = 'e')
+UNION ALL
+SELECT n.nspname, t.tgname, 'TR', c.relname, pg_get_triggerdef(t.oid, true)
+FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE NOT t.tgisinternal AND n.nspname NOT IN ${PG_SKIP} AND n.nspname NOT LIKE 'pg\\_%'
+) d
+WHERE d.definition ILIKE ${estr(likePattern(text))} ESCAPE '!'
+ORDER BY 1, 2;`,
+  // pg_depend knows what a view reads (its rewrite rule's dependencies) and the triggers on a table;
+  // what a function's body uses it doesn't, so /uses finds those by name (usesByName).
+  usesSql: (o) => {
+    const rel = `to_regclass(${estr(`${POSTGRES.quote(o.schema)}.${POSTGRES.quote(o.name)}`)})`;
+    const procs = `SELECT p.oid FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = ${estr(o.schema)} AND p.proname = ${estr(o.name)}`;
+    return `-- trawl:uses
+SELECT * FROM (
+SELECT 'used_by' AS rel, vn.nspname AS "schema", v.relname AS name, 'V' AS type, NULL::text AS parent, NULL::text AS "database"
+FROM pg_depend d JOIN pg_rewrite r ON r.oid = d.objid JOIN pg_class v ON v.oid = r.ev_class JOIN pg_namespace vn ON vn.oid = v.relnamespace
+WHERE d.classid = 'pg_rewrite'::regclass AND v.relkind IN ('v', 'm') AND v.oid IS DISTINCT FROM ${rel}
+  AND ((d.refclassid = 'pg_class'::regclass AND d.refobjid = ${rel}) OR (d.refclassid = 'pg_proc'::regclass AND d.refobjid IN (${procs})))
+UNION
+SELECT 'uses', rn.nspname, rc.relname, CASE WHEN rc.relkind IN ('v', 'm') THEN 'V' ELSE 'U' END, NULL, NULL
+FROM pg_rewrite r JOIN pg_depend d ON d.classid = 'pg_rewrite'::regclass AND d.objid = r.oid AND d.refclassid = 'pg_class'::regclass
+JOIN pg_class rc ON rc.oid = d.refobjid JOIN pg_namespace rn ON rn.oid = rc.relnamespace
+WHERE r.ev_class = ${rel} AND rc.oid <> r.ev_class
+UNION
+SELECT 'uses', pn.nspname, p.proname, CASE p.prokind WHEN 'p' THEN 'P' ELSE 'FN' END, NULL, NULL
+FROM pg_rewrite r JOIN pg_depend d ON d.classid = 'pg_rewrite'::regclass AND d.objid = r.oid AND d.refclassid = 'pg_proc'::regclass
+JOIN pg_proc p ON p.oid = d.refobjid JOIN pg_namespace pn ON pn.oid = p.pronamespace
+WHERE r.ev_class = ${rel} AND pn.nspname NOT IN ${PG_SKIP}
+UNION
+SELECT 'trigger', n.nspname, t.tgname, 'TR', c.relname, NULL
+FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE t.tgrelid = ${rel} AND NOT t.tgisinternal
+) u
+ORDER BY 1, 2, 3;`;
+  },
+  // The kinds whose definitions /uses reads for names: what refers to the object, and what it refers to.
+  usesByName: { usedBy: ['procedure', 'function', 'trigger'], uses: ['procedure', 'function'], what: 'routines and triggers' },
   defaultPort: 5432,
 };
 
@@ -141,6 +239,25 @@ FROM information_schema.processlist
 ORDER BY id;`,
   kill: (id) => `KILL ${id};`,
   explain: (sql) => `EXPLAIN ${sql.replace(/;\s*$/, '')}`,
+  // information_schema has the bodies only (no CREATE line): a view's SELECT, a routine's BEGIN … END.
+  grepSql: (text) => `-- trawl:grep
+SELECT * FROM (
+SELECT routine_schema AS \`schema\`, routine_name AS name, CASE routine_type WHEN 'PROCEDURE' THEN 'P' ELSE 'FN' END AS type, NULL AS parent, routine_definition AS definition
+FROM information_schema.routines WHERE routine_schema = DATABASE()
+UNION ALL
+SELECT table_schema, table_name, 'V', NULL, view_definition FROM information_schema.views WHERE table_schema = DATABASE()
+UNION ALL
+SELECT trigger_schema, trigger_name, 'TR', event_object_table, action_statement FROM information_schema.triggers WHERE trigger_schema = DATABASE()
+) d
+WHERE LOWER(d.definition) LIKE LOWER(${hexstr(likePattern(text))}) ESCAPE '!'
+ORDER BY 1, 2;`,
+  // Only the triggers on a table come from the catalog; the rest /uses finds by name.
+  usesSql: (o) => `-- trawl:uses
+SELECT 'trigger' AS rel, trigger_schema AS \`schema\`, trigger_name AS name, 'TR' AS type, event_object_table AS parent, NULL AS \`database\`
+FROM information_schema.triggers
+WHERE event_object_schema = ${hexstr(o.schema)} AND event_object_table = ${hexstr(o.name)}
+ORDER BY trigger_name;`,
+  usesByName: { usedBy: ['view', 'procedure', 'function', 'trigger'], uses: ['view', 'procedure', 'function'], what: 'views, routines and triggers' },
   defaultPort: 3306,
 };
 
@@ -169,9 +286,10 @@ export function definitionSqlFor(dialect, o) {
   if (dialect.kind === 'postgres') {
     const q = sq(`${dialect.quote(o.schema)}.${dialect.quote(o.name)}`);
     if (o.kind === 'view') return `SELECT 'CREATE OR REPLACE VIEW ' || ${sq(qualifiedFor(dialect, o.schema, o.name))} || E' AS\\n' || pg_get_viewdef(${q}::regclass, true) AS definition;`;
+    if (o.kind === 'trigger') return `SELECT pg_get_triggerdef(t.oid, true) AS definition FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = ${sq(o.schema)} AND t.tgname = ${sq(o.name)} AND NOT t.tgisinternal LIMIT 1;`;
     return `SELECT pg_get_functiondef(p.oid) AS definition FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = ${sq(o.schema)} AND p.proname = ${sq(o.name)} LIMIT 1;`;
   }
-  const what = o.kind === 'view' ? 'VIEW' : o.kind === 'procedure' ? 'PROCEDURE' : 'FUNCTION';
+  const what = { view: 'VIEW', procedure: 'PROCEDURE', trigger: 'TRIGGER' }[o.kind] ?? 'FUNCTION';
   return `SHOW CREATE ${what} ${qualifiedFor(dialect, o.schema, o.name)};`;
 }
 

@@ -1,10 +1,11 @@
 // An in-memory stand-in for SQL Server, for `trawl --demo` and the tests. It has no SQL engine:
-// it knows the catalog query, SELECT [TOP (n)] … FROM a table, simple SELECT lists, USE,
+// it knows the catalog queries (/grep's and /uses's too), SELECT [TOP (n)] … FROM a table, simple SELECT lists, USE,
 // transactions, WAITFOR DELAY (to try cancelling), RAISERROR/THROW, a few other sessions for the
 // Activity view (and KILL for them), and counts what writes would
 // touch without changing anything.
 import { DbError, runScript } from './db.js';
 import { findObject } from './schema.js';
+import { mentions } from './references.js';
 import { splitStatements, withoutLeadingComments } from './sql.js';
 
 const col = (name, type, extra = {}) => ({ name, type, nullable: false, identity: false, pk: false, ...extra });
@@ -48,11 +49,21 @@ function makeDatabase(club, { extraLanguage = true, drifted = false } = {}) {
         columns: [],
         rows: [],
         params: [col('@Season', 'int'), col('@DryRun', 'bit')],
-        definition: 'CREATE PROCEDURE dbo.usp_RecalculateTable @Season int, @DryRun bit = 0 AS\nBEGIN\n  SET NOCOUNT ON;\n  -- The demo has no body to run.\n  SELECT @Season AS Season, @DryRun AS DryRun;\nEND',
+        definition: 'CREATE PROCEDURE dbo.usp_RecalculateTable @Season int, @DryRun bit = 0 AS\nBEGIN\n  SET NOCOUNT ON;\n  -- The demo has no engine to run this.\n  SELECT c.Name, COUNT(*) AS Played\n  FROM dbo.Matches m\n  JOIN dbo.Clubs c ON c.Id IN (m.HomeId, m.AwayId)\n  WHERE YEAR(m.PlayedOn) = @Season\n  GROUP BY c.Name;\nEND',
       },
       ...(drifted
         ? [{ schema: 'dbo', name: 'Stadiums', kind: 'table', columns: [col('Id', 'int', { pk: true, identity: true }), col('ClubId', 'int'), col('Name', 'nvarchar(100)'), col('Capacity', 'int', { nullable: true })], rows: [[1, 1, 'Estádio Norte', 30000]] }]
         : []),
+    ],
+    // Triggers aren't in the Explorer; /grep and /uses find them.
+    triggers: [
+      {
+        schema: 'dbo',
+        name: 'trg_Players_Goals',
+        kind: 'trigger',
+        parent: 'Players',
+        definition: "CREATE TRIGGER dbo.trg_Players_Goals ON dbo.Players AFTER UPDATE AS\nBEGIN\n  SET NOCOUNT ON;\n  IF UPDATE(Goals) PRINT 'Goals changed: the top scorers are different now.';\nEND",
+      },
     ],
     // [name, table, column, referenced table, its column]
     foreignKeys: [
@@ -67,7 +78,7 @@ function makeDatabase(club, { extraLanguage = true, drifted = false } = {}) {
 }
 
 // ClubB is one language short, so comparing the two shows a difference.
-const DATABASES = { master: { tables: [], foreignKeys: [], indexes: [] }, ClubA: makeDatabase('Club A'), ClubB: makeDatabase('Club B', { extraLanguage: false, drifted: true }) };
+const DATABASES = { master: { tables: [], triggers: [], foreignKeys: [], indexes: [] }, ClubA: makeDatabase('Club A'), ClubB: makeDatabase('Club B', { extraLanguage: false, drifted: true }) };
 
 const set = (names, rows, types = []) => ({ columns: names.map((name, i) => ({ name, type: types[i] ?? '' })), rows, truncated: false });
 
@@ -98,6 +109,35 @@ function schemaSets(dbName) {
       db.tables.flatMap((t) => (t.params ?? []).map((p) => [t.schema, t.name, p.name, p.type, 0, 0, 0, false])),
     ),
   ];
+}
+
+const TYPES = { table: 'U', view: 'V', procedure: 'P', function: 'FN', trigger: 'TR' };
+const modulesOf = (db) => [...db.tables.filter((t) => t.definition), ...db.triggers];
+const literal = (sql, re) => sql.match(re)?.[1].replace(/''/g, "'") ?? '';
+
+// /grep (dialects.js grepSql): the definitions with the text in them, ignoring case, as LIKE would.
+function grepSet(dbName, sql) {
+  const text = literal(sql, /LIKE LOWER\(N'%((?:[^']|'')*)%'\)/).replace(/!(.)/g, '$1');
+  const rows = modulesOf(DATABASES[dbName])
+    .filter((m) => m.definition.toLowerCase().includes(text))
+    .map((m) => [m.schema, m.name, TYPES[m.kind], m.parent ?? null, m.definition]);
+  return set(['schema', 'name', 'type', 'parent', 'definition'], rows);
+}
+
+// /uses (dialects.js usesSql): what SQL Server's sys.sql_expression_dependencies would say, worked out
+// from the names in the demo's definitions, and the triggers on the object.
+function usesSet(dbName, sql) {
+  const db = DATABASES[dbName];
+  const [schema, name] = [literal(sql, /@schema sysname = N'((?:[^']|'')*)'/), literal(sql, /@name sysname = N'((?:[^']|'')*)'/)];
+  const all = [...db.tables, ...db.triggers];
+  const self = all.find((o) => o.schema === schema && o.name.toLowerCase() === name.toLowerCase());
+  const rows = [];
+  if (self) {
+    for (const m of modulesOf(db)) if (m !== self && mentions(m.definition, self.name)) rows.push(['used_by', m.schema, m.name, TYPES[m.kind], m.parent ?? null, null]);
+    for (const o of all) if (o !== self && self.definition && mentions(self.definition, o.name)) rows.push(['uses', o.schema, o.name, TYPES[o.kind], null, null]);
+    for (const t of db.triggers) if (t.parent === self.name) rows.push(['trigger', t.schema, t.name, 'TR', t.parent, null]);
+  }
+  return set(['rel', 'schema', 'name', 'type', 'parent', 'database'], rows);
 }
 
 // Other sessions on the demo's "server", for the Activity view: a blocking chain (an idle session
@@ -265,9 +305,12 @@ export function demoSession(conn, { database } = {}) {
             return void state.sets.push(set(['schema', 'object', 'name', 'is_unique', 'type_desc', 'filter_definition', 'columns', 'included'], db.indexes.map(([name, table, unique, columns]) => ['dbo', table, name, unique, 'NONCLUSTERED', null, columns, null])));
           }
           if (batch.startsWith('-- trawl:activity')) return void state.sets.push(...activitySets(session));
+          if (batch.startsWith('-- trawl:grep')) return void state.sets.push(grepSet(session.database, batch));
+          if (batch.startsWith('-- trawl:uses')) return void state.sets.push(usesSet(session.database, batch));
           if (batch.startsWith('-- trawl:definition')) {
             const name = batch.match(/OBJECT_ID\(N'(.*)'\)\)/)[1].replace(/''/g, "'");
-            const t = findObject({ objects: DATABASES[session.database].tables }, name);
+            const db = DATABASES[session.database];
+            const t = findObject({ objects: [...db.tables, ...db.triggers] }, name);
             return void state.sets.push(set(['definition'], [[t?.definition ?? null]]));
           }
           // Saved edits (edit.js) come as one TRY/CATCH batch, which the demo has no engine for: it

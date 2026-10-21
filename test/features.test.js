@@ -338,3 +338,39 @@ test('? opens on the section for the view on screen; j k pick another, / searche
   await until(() => !frame().includes('Keyboard shortcuts'), 'closed');
   app.unmount();
 });
+
+test('/grep lists the definitions with the text in them; ↵ puts one in the console with the match selected', async () => {
+  mkdirSync(process.env.TRAWL_HOME, { recursive: true });
+  writeFileSync(join(process.env.TRAWL_HOME, 'console.sql'), '');
+  const app = start();
+  await until(() => frame().includes('Clubs'), 'the explorer');
+  await command(app, '/grep dbo.players');
+  await until(() => frame().includes('"dbo.players" in ClubA\'s definitions') && frame().includes('dbo.trg_Players_Goals'), 'the list');
+  assert.match(frame(), /❯ dbo\.vTopScorers\s+1 match · 3: FROM/);
+  assert.match(frame(), /A view: 1 match on this line\.[\s\S]*3  FROM dbo\.Players/);
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('CREATE VIEW dbo.vTopScorers AS') && frame().includes('↵/i type'), 'the view in the console, not typing');
+  assert.match(frame(), /─ Console ─+ selected ·/);
+  assert.match(frame(), /▌3 FROM dbo\.Players/, 'the cursor on the line with the match');
+  await command(app, '/grep nothing like this');
+  await until(() => frame().includes('No view, procedure, function or trigger has "nothing like this" in it.'), 'nothing found');
+  app.unmount();
+});
+
+test('u in the Explorer, or /uses, shows what refers to an object and what it refers to', async () => {
+  const app = start();
+  await until(() => frame().includes('Clubs'), 'the explorer');
+  app.stdin.write('u');
+  await until(() => frame().includes('Uses: dbo.Clubs') && frame().includes('dbo.usp_RecalculateTable'), 'the report on Clubs');
+  assert.match(frame(), /Tables, through their foreign keys/);
+  assert.match(frame(), /dbo\.Matches \(AwayId\) → Id  FK_Matches_Away/);
+  app.stdin.write(KEYS.esc);
+  await until(() => !frame().includes('Uses: dbo.Clubs'), 'closed');
+  await type(app.stdin, '/uses vTop');
+  await until(() => frame().includes('dbo.vTopScorers'), 'completion offers the object');
+  app.stdin.write('\t');
+  await until(() => frame().includes('/uses dbo.vTopScorers'), 'completed');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('Uses: dbo.vTopScorers') && /Uses\s+│\s*│\s+Tables\s+│\s*│\s+dbo\.Players/.test(frame()), 'the report on the view');
+  app.unmount();
+});

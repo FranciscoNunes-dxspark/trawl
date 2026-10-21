@@ -73,6 +73,7 @@ export function ExplorerView({ schema, ctx, width, height, active, filter }) {
     else if (input === 'd') a.describe(ctx, obj);
     else if (input === 's') ctx.startQuery(obj);
     else if (input === 'c') a.scriptObject(ctx, obj);
+    else if (input === 'u') a.showUses(ctx, obj);
   };
   useInput(keys, { isActive: active });
   useMouse(ctx, (e) => {

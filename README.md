@@ -50,7 +50,7 @@ Releases are automatic: every push to main (a merged pull request, say) publishe
 trawl --demo
 ```
 
-This adds two in-memory connections for the session: `demo`, and `demo-prod`, which behaves like a production connection. Each has the databases `ClubA` and `ClubB`. The demo has no SQL engine. It answers the catalog, `SELECT [TOP (n)] * FROM` a table, simple `SELECT` lists, `USE`, transactions, `WAITFOR DELAY` (to try cancelling) and `RAISERROR`/`THROW`. Writes only report how many rows they would touch.
+This adds two in-memory connections for the session: `demo`, and `demo-prod`, which behaves like a production connection. Each has the databases `ClubA` and `ClubB`. The demo has no SQL engine. It answers the catalog (and `/grep` and `/uses`, with a trigger on `Players` for them to find), `SELECT [TOP (n)] * FROM` a table, simple `SELECT` lists, `USE`, transactions, `WAITFOR DELAY` (to try cancelling) and `RAISERROR`/`THROW`. Writes only report how many rows they would touch.
 
 ## Connect
 
@@ -84,12 +84,13 @@ When a query (or anything else with the spinner) takes longer than 10 seconds, T
 
 Besides SQL Server, a connection can be to PostgreSQL or MySQL (MariaDB too): `/add … --kind postgres` or `--kind mysql`, with the server as `host` or `host:port` (5432 and 3306 by default) and a login (`--user`), whose password is asked for and kept as for a SQL login. TLS is off unless you add `--ssl`, or `--trust-cert` to use it without checking the server's certificate. Trawl talks to them through the `pg` and `mysql2` drivers, plain JavaScript in the same executable.
 
-Most of Trawl works the same there: the Explorer, the console and its suggestions, scripts, Results with sorting, filters, copying, comparing and following foreign keys, History, the read-only and production rules, manual commit (`BEGIN`/`START TRANSACTION`, then `/commit` or `/rollback`), the questions before risky statements and the row count before an `UPDATE` or `DELETE`, parameters and snippets, `/fanout` (a folder can mix kinds), CSV import, Activity and `/kill` (`pg_terminate_backend` on Postgres), `p` for the plan (`EXPLAIN`, which doesn't run anything) and Claude's explanation of it, `c` for a view's or routine's definition, and `trawl mcp`. The differences:
+Most of Trawl works the same there: the Explorer, the console and its suggestions, scripts, Results with sorting, filters, copying, comparing and following foreign keys, History, the read-only and production rules, manual commit (`BEGIN`/`START TRANSACTION`, then `/commit` or `/rollback`), the questions before risky statements and the row count before an `UPDATE` or `DELETE`, parameters and snippets, `/fanout` (a folder can mix kinds), CSV import, Activity and `/kill` (`pg_terminate_backend` on Postgres), `p` for the plan (`EXPLAIN`, which doesn't run anything) and Claude's explanation of it, `c` for a view's or routine's definition, `/grep` and `/uses`, and `trawl mcp`. The differences:
 
 - A script runs a statement at a time, split at `;` (Postgres's `$$` bodies and MySQL's backslash escapes are understood); there is no `GO`, and MySQL's `DELIMITER` isn't supported.
 - Rows past the row limit are dropped once they arrive, rather than the query being stopped there, so a huge `SELECT` still crosses the network: add a `LIMIT`.
 - Editing results in place is SQL Server only (the save script is T-SQL); `e` says so. So are `/stats` and the sync script of `/diff`, which compares tables, columns and keys only (not indexes or definitions) when either side isn't SQL Server.
 - Activity on MySQL doesn't show who blocks whom.
+- `/uses` takes what views use from Postgres's catalog (`pg_depend`), and the triggers on a table from both, but neither records what a routine's or trigger's body refers to (nor, on MySQL, a view's), so those are found by the object's name in their definitions, and the report marks them "by name".
 - `/ask` writes T-SQL, and the suggestions and `/format` know T-SQL's keywords and functions, not every other one.
 - `/import datagrip` still leaves Postgres and MySQL data sources out.
 
@@ -128,7 +129,7 @@ Press `?` inside for every shortcut: the sections down the left, opening on the 
 | --- | --- |
 | Anywhere | `1`–`6` or `tab` switch views · `/` commands · `!` SQL · `r` reload the schema · `,` settings · `esc` cancel the running query · `q` quit |
 | Lists | `j`/`k` or arrows · `g`/`G` top/bottom · `ctrl+d`/`ctrl+u` page |
-| Explorer | `↵` first rows (on a database: switch to it) · `d` describe · `s` start a query on it in the console · `c` its CREATE script, into the console · `/find <text>` filter |
+| Explorer | `↵` first rows (on a database: switch to it) · `d` describe · `s` start a query on it in the console · `c` its CREATE script, into the console · `u` what uses it, and what it uses · `/find <text>` filter · `/grep <text>` search inside the definitions |
 | Query, the console | `↵` or `i` start typing · `esc` stop · `ctrl+r` run the selection, or the statement under the cursor · `R` run it all · `f` format (`alt+shift+f` while typing) · `p` plan (then `a`: Claude explains it) · `S` save as a snippet · `[`/`]` previous/next tab · `+` new tab · `ctrl+f` find, then `n`/`N` · `ctrl+z`/`ctrl+y` undo/redo · while typing, `tab` takes a suggestion and `ctrl+n` asks for them |
 | Query, a file | `↵` run the statement under the cursor · `v` select several · `R` run the whole file · `e` edit in the console |
 | Results | `h`/`l` columns · `[`/`]` result sets · `o` sort by the column · `f` filter · `y`/`Y` copy the cell/row · `↵` the row as a record · `F` follow the foreign key · `p` pin · `c` compare with the pinned · `e` edit · `n` NULL · `d` delete · `u` undo · `s` save · `x` export |
@@ -174,6 +175,12 @@ sqlcmd variables work too, as in SSMS's SQLCMD mode: `:setvar Env "prod"` gives 
 `/open <file.sql>` lists the file's statements in Query. Edit the file in your own editor: Trawl reloads it each time you save. A statement ends at `;`, at a `GO` line or at a blank line, except inside parentheses or a `BEGIN … END` block (`IF … ELSE` and `TRY … CATCH` stay together). A procedure, function, trigger or view runs on to the next `GO`, as SQL Server requires. `R` runs the whole file batch by batch, and `GO 3` runs a batch three times.
 
 Errors say which line of the file they're on.
+
+### Searching definitions, and what uses what
+
+`/grep <text>` searches inside every view, procedure, function and trigger in the database you're in, as Redgate's SQL Search does: the ones whose definition has the text, ignoring case, each with how many times and the first line it's on (with its number). The search runs on the server, so only the definitions that match cross the network, and `%`, `_` and `[` in the text are only themselves. On the right are all the lines it's on. `↵` puts the object's CREATE script in the console, as `c` in the Explorer does, with the first match selected; `n` and `N` go on to the others.
+
+`u` on a table, view or routine in the Explorer, or `/uses <object>`, says what uses it and what it uses, grouped by kind, with schema-qualified names: the views, procedures, functions and triggers that refer to it (from `sys.sql_expression_dependencies`), the triggers on it, and the tables whose foreign keys refer to it; then what it refers to, and its own foreign keys. A reference to an object that isn't in the database (in another database, or not made yet) is listed apart. SQL built as a string and run with `EXEC` isn't in SQL Server's record, so it isn't in the report either. `/last` shows it again.
 
 ### Results
 
@@ -225,9 +232,9 @@ The list is read when the tab opens, and again on `R`. `↵` shows a session's d
 
 ### Slash commands
 
-Type `/` and the menu narrows as you type. `tab` completes, `↑`/`↓` picks, `↵` runs. `/connect` completes connection names, `/use` database names and `/describe` tables and views.
+Type `/` and the menu narrows as you type. `tab` completes, `↑`/`↓` picks, `↵` runs. `/connect` completes connection names, `/use` database names, `/describe` tables and views, and `/script` and `/uses` everything in the database.
 
-`/import datagrip [folder]` `/import-csv <file.csv> <table> [--run]` `/connect <name>` `/add …` `/forget <name>` `/folder <connection> [folder]` `/password [connection]` `/disconnect` `/use <database>` `/open <file.sql>` `/snippet [name]` `/snippets` `/console` `/tab …` `/new` `/format` `/search <text>` `/save <file.sql>` `/describe <table>` `/script <name>` `/find [text]` `/export <file>` `/filter [text]` `/follow` `/pin` `/compare` `/copy [tsv|csv|json|insert]` `/limit [rows]` `/writes` `/tx [auto|manual]` `/commit` `/rollback` `/ask <question>` `/explain` `/ai [connection] [level]` `/update` `/settings` `/stats [on|off]` `/plan [sql]` `/diff <connection> [database]` `/fanout <folder> [sql]` `/activity` `/kill <session>` `/last` `/refresh` `/help` `/quit`
+`/import datagrip [folder]` `/import-csv <file.csv> <table> [--run]` `/connect <name>` `/add …` `/forget <name>` `/folder <connection> [folder]` `/password [connection]` `/disconnect` `/use <database>` `/open <file.sql>` `/snippet [name]` `/snippets` `/console` `/tab …` `/new` `/format` `/search <text>` `/save <file.sql>` `/describe <table>` `/script <name>` `/grep <text>` `/uses <object>` `/find [text]` `/export <file>` `/filter [text]` `/follow` `/pin` `/compare` `/copy [tsv|csv|json|insert]` `/limit [rows]` `/writes` `/tx [auto|manual]` `/commit` `/rollback` `/ask <question>` `/explain` `/ai [connection] [level]` `/update` `/settings` `/stats [on|off]` `/plan [sql]` `/diff <connection> [database]` `/fanout <folder> [sql]` `/activity` `/kill <session>` `/last` `/refresh` `/help` `/quit`
 
 ## Claude
 

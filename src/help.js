@@ -35,7 +35,9 @@ export const HELP = [
       ['d', 'Describe: columns, types, keys'],
       ['s', 'Start a query on it in the console'],
       ['c', 'Its CREATE script, into the console (a table\'s from the catalog; others\' from the server)'],
+      ['u', 'What uses it and what it uses (/uses): views, routines, triggers, foreign keys, by kind'],
       ['/find <text>', 'Filter by name'],
+      ['/grep <text>', 'Search inside every view, procedure, function and trigger; ↵ its CREATE script, at the match'],
     ],
   },
   {

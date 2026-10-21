@@ -18,7 +18,8 @@ import { folderNames, inFolder, inParallel, mergeResults, readOnlyScript } from 
 import { DIFF_SQL, buildExtras, diffText, schemaDiff, syncScript } from './diff.js';
 import { buildActivity, killSql } from './activity.js';
 import { dialectOf, definitionSqlFor, qualifiedFor, selectTopFor } from './dialects.js';
-import { buildSchema, createTableScript, definitionSql, describeObject, findObject, objectName } from './schema.js';
+import { buildSchema, createTableScript, definitionSql, describeObject, findObject, objectName, rowsOf } from './schema.js';
+import { grepHits, usesReport, usesSummary, usesText } from './references.js';
 import { applySqlcmd, bindVariables, classifyScript, countQuery, oneLine, scriptVariables, splitStatements, sqlcmdVariables, statementAt, toCsv, toJson, withoutLeadingComments } from './sql.js';
 
 // A WHERE that still changes more rows than this is asked about too.
@@ -376,11 +377,23 @@ export function describe(ctx, text) {
   ctx.showText(objectName(obj), describeObject(obj, ctx.schema));
 }
 
+// A view's, procedure's, function's or trigger's own CREATE text, from the server, or null.
+async function readDefinition(session, obj, signal) {
+  const dialect = dialectOf(session);
+  const set = (await session.run(dialect.kind === 'sqlserver' ? definitionSql(obj) : definitionSqlFor(dialect, obj), { signal, limit: 1 })).sets[0];
+  // MySQL's SHOW CREATE answers with the name first and the text in a "Create …" column (a
+  // trigger's in "SQL Original Statement").
+  const at = Math.max(0, set?.columns.findIndex((c) => /^(create |sql original statement)/i.test(c.name)) ?? 0);
+  const definition = set?.rows[0]?.[at] ?? null;
+  return definition == null ? null : String(definition).replace(/\r\n?/g, '\n').trim();
+}
+
 /**
  * /script <name> and c in the Explorer: the object's CREATE script, into the console to edit. A table's
- * is written from the catalog; a view's, procedure's or function's is the server's own text.
+ * is written from the catalog; a view's, procedure's, function's or trigger's is the server's own text.
+ * `find` (from /grep) selects the first place it has that text, rather than starting to type.
  */
-export async function scriptObject(ctx, text) {
+export async function scriptObject(ctx, text, { find } = {}) {
   if (!needSession(ctx)) return;
   if (!text) return ctx.prefill('/script ');
   const obj = typeof text === 'string' ? findObject(ctx.schema, text) : text;
@@ -391,15 +404,96 @@ export async function scriptObject(ctx, text) {
   const r = await ctx.task(
     `script ${objectName(obj)}`,
     async (signal) => {
-      const set = (await ctx.session.run(dialect.kind === 'sqlserver' ? definitionSql(obj) : definitionSqlFor(dialect, obj), { signal, limit: 1 })).sets[0];
-      // MySQL's SHOW CREATE answers with the name first and the text in a "Create …" column.
-      const at = Math.max(0, set?.columns.findIndex((c) => /^create /i.test(c.name)) ?? 0);
-      definition = set?.rows[0]?.[at] ?? null;
+      definition = await readDefinition(ctx.session, obj, signal);
       return [definition ? 'In the console.' : "The server gave no definition: it may be encrypted, or the login can't VIEW DEFINITION."];
     },
     { label: 'Reading the definition' },
   );
-  if (r.ok && definition) ctx.editInConsole(String(definition).replace(/\r\n?/g, '\n').trim());
+  if (r.ok && definition) ctx.editInConsole(definition, { find });
+}
+
+/**
+ * /grep <text>: every view, procedure, function and trigger in the database whose definition has the
+ * text in it (ignoring case), as Redgate's SQL Search does, filtered on the server. A list to pick from:
+ * ↵ puts the object's CREATE script in the console with the first match selected (n, N: the others).
+ */
+export async function grepDefinitions(ctx, text) {
+  if (!needSession(ctx)) return;
+  const query = String(text ?? '').trim();
+  if (!query) return ctx.prefill('/grep ');
+  const session = ctx.session;
+  let hits = null;
+  const r = await ctx.task(
+    `grep ${query}`,
+    async (signal) => {
+      hits = grepHits((await session.run(dialectOf(session).grepSql(query), { signal, limit: 100_000 })).sets, query);
+      return [hits.length ? `${hits.length} object${hits.length === 1 ? '' : 's'} with "${query}" in ${hits.length === 1 ? 'its definition' : 'their definitions'}.` : `No view, procedure, function or trigger has "${query}" in it.`];
+    },
+    { label: `Searching the definitions for "${query}"` },
+  );
+  if (!r.ok || !hits) return;
+  showGrep(ctx, query, hits, session.database);
+}
+
+const matches = (n) => `${n} match${n === 1 ? '' : 'es'}`;
+
+function showGrep(ctx, query, hits, database) {
+  const items = hits.map((h) => {
+    const first = h.lines[0];
+    const w = String(h.lines.at(-1).line).length;
+    return {
+      label: `${h.schema}.${h.name}`,
+      // The line first, as it's what a narrow list has room for; the kind is on the right.
+      detail: `${matches(h.count)} · ${first.line}: ${first.text}`,
+      text: [`A ${h.kind}${h.parent ? ` on ${h.parent}` : ''}: ${matches(h.count)} on ${h.lines.length === 1 ? 'this line' : `these ${h.lines.length} lines`}.`, '', ...h.lines.map((l) => `${String(l.line).padStart(w)}  ${l.text}`)].join('\n'),
+      hit: h,
+    };
+  });
+  ctx.showPicker({
+    title: `"${query}" in ${database}'s definitions`,
+    hint: '↵ its CREATE script, at the match',
+    items,
+    empty: `No view, procedure, function or trigger in ${database} has "${query}" in it.`,
+    keys: {
+      return: (it) => scriptObject(ctx, { schema: it.hit.schema, name: it.hit.name, kind: it.hit.kind }, { find: query }),
+    },
+  });
+}
+
+/**
+ * /uses <object> and u in the Explorer: what refers to it (views, routines, triggers, and tables by
+ * their foreign keys) and what it refers to, grouped by kind, in the viewer. SQL Server's come from
+ * its dependency catalog; Postgres and MySQL record less, and the rest is found by name.
+ */
+export async function showUses(ctx, text) {
+  if (!needSession(ctx)) return;
+  if (!text) return ctx.prefill('/uses ');
+  const obj = typeof text === 'string' ? findObject(ctx.schema, text) : text;
+  if (!obj) return ctx.note(`Nothing called ${text} in ${ctx.session.database}.`, 'error');
+  const session = ctx.session;
+  const dialect = dialectOf(session);
+  const byName = dialect.usesByName;
+  let report = null;
+  const r = await ctx.task(
+    `what uses ${objectName(obj)}`,
+    async (signal) => {
+      const rows = (await session.run(dialect.usesSql(obj), { signal, limit: 100_000 })).sets.flatMap(rowsOf);
+      let named = [];
+      let own = null;
+      if (byName) {
+        named = (await session.run(dialect.grepSql(obj.name), { signal, limit: 100_000 })).sets.flatMap(rowsOf);
+        if (byName.uses.includes(obj.kind)) own = await readDefinition(session, obj, signal).catch((e) => (e.cancelled ? Promise.reject(e) : null));
+      }
+      report = usesReport(obj, ctx.schema, { rows, named, own, byName });
+      return [usesSummary(report)];
+    },
+    { label: `Finding what uses ${objectName(obj)}` },
+  );
+  if (!r.ok || !report) return;
+  const title = `Uses: ${objectName(obj)}`;
+  const body = usesText(obj, report, { database: session.database, label: dialect.label, byName });
+  ctx.rememberOutput(title, body);
+  ctx.showText(title, body);
 }
 
 /**

@@ -814,14 +814,17 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
       setQueryMode('console');
       setView('query');
     },
-    // Puts SQL into the console to edit, after what's there, and starts typing.
-    editInConsole: (sql, { atEnd = false } = {}) => {
+    // Puts SQL into the console to edit, after what's there, and starts typing. With `find`, it selects
+    // the first place the new SQL has that text instead (n and N then go on searching for it).
+    editInConsole: (sql, { atEnd = false, find = null } = {}) => {
       let next = ed.append(editorRef.current, sql);
       if (atEnd) next = ed.lineEnd({ ...next, row: next.lines.length - 1 });
-      setConsole(next);
+      const found = find ? ed.find(next, find) : null;
+      setConsole(found ?? next);
       setQueryMode('console');
       setView('query');
-      setFocus('editor');
+      if (found) ctx.lastSearch = find;
+      else setFocus('editor');
     },
     startQuery: (obj) => {
       const d = dialectOf(sessionRef.current);

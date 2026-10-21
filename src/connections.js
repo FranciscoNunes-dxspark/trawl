@@ -12,7 +12,7 @@ export function splitArgs(s) {
   return out;
 }
 
-export const ADD_USAGE = '/add <name> <server> [database] [--kind sqlserver|postgres|mysql] [--user <login> [--password-env <VAR>]] [--domain <domain>] [--folder <folder>] [--prod] [--commit auto|manual] [--trust-cert] [--ssl] [--ai off|schema|results]';
+export const ADD_USAGE = '/add <name> <server> [database] [--kind sqlserver|postgres|mysql] [--user <login> [--password-env <VAR>]] [--domain <domain>] [--folder <folder>] [--prod] [--commit auto|manual] [--trust-cert] [--ssl] [--ssh [user@]host[:port] [--ssh-key <file>]] [--ai off|schema|results]';
 
 /**
  * Reads `/add` arguments into a connection. Without --user it signs in through the Azure CLI.
@@ -31,6 +31,13 @@ export function parseAddArgs(rest) {
     };
     if (a === '--user') conn.user = value();
     else if (a === '--password-env') conn.passwordEnv = value();
+    else if (a === '--ssh') {
+      try {
+        conn.ssh = { ...conn.ssh, ...parseSsh(value()) };
+      } catch (e) {
+        throw new Error(`${e.message} ${ADD_USAGE}`);
+      }
+    } else if (a === '--ssh-key') conn.ssh = { ...conn.ssh, key: value() };
     else if (a === '--domain') conn.domain = value();
     else if (a === '--folder') {
       const folder = cleanFolder(value());
@@ -61,8 +68,25 @@ export function parseAddArgs(rest) {
   if (conn.passwordEnv && !conn.user) throw new Error('--password-env goes with --user.');
   if (conn.kind && !conn.user) throw new Error(`A ${conn.kind === 'postgres' ? 'Postgres' : 'MySQL'} connection signs in with a login: add --user <login>.`);
   if (conn.kind && conn.domain) throw new Error('--domain (Windows sign-in) is for SQL Server only.');
+  if (conn.ssh && !conn.ssh.host) throw new Error('--ssh-key goes with --ssh user@host.');
+  // A named instance is found through SQL Browser on UDP, which an SSH tunnel doesn't carry.
+  if (conn.ssh && !conn.kind && parseServer(server).instanceName) throw new Error(`Through --ssh, give SQL Server's port rather than an instance name: ${server.replace(/\\.*$/, '')},1433`);
   return { name, server, ...(database ? { database } : {}), auth: conn.user ? (conn.domain ? 'ntlm' : 'sql') : 'azure-cli', ...conn };
 }
+
+/** /add --ssh: "user@bastion:2222" → { user, host, port }; the user and port are optional (ssh's own config can say them). Throws when it isn't one. */
+export function parseSsh(spec) {
+  const m = String(spec ?? '')
+    .trim()
+    .match(/^(?:([^@\s/\\-][^@\s/\\]*)@)?(\[[0-9a-fA-F:.]+\]|[A-Za-z0-9_][A-Za-z0-9_.-]*)(?::(\d{1,5}))?$/);
+  if (!m) throw new Error(`--ssh is [user@]host[:port], as ssh takes it: "${spec}" isn't one.`);
+  const port = m[3] ? Number(m[3]) : null;
+  if (port != null && (port < 1 || port > 65535)) throw new Error(`--ssh's port is 1 to 65535, not ${port}.`);
+  return { ...(m[1] ? { user: m[1] } : {}), host: m[2].replace(/^\[|\]$/g, ''), ...(port ? { port } : {}) };
+}
+
+/** "user@bastion:2222", as it was typed. */
+export const sshText = (ssh) => `${ssh.user ? `${ssh.user}@` : ''}${ssh.host.includes(':') ? `[${ssh.host}]` : ssh.host}${ssh.port ? `:${ssh.port}` : ''}`;
 
 /** "PROD / Clubs " → "PROD/Clubs": a folder, with "/" between nested ones as DataGrip writes them. */
 export const cleanFolder = (s) =>
@@ -99,8 +123,9 @@ export const isReadOnly = (conn) => conn.readOnly ?? Boolean(conn.prod);
  */
 export const commitMode = (conn) => conn.commit ?? (conn.prod ? 'manual' : 'auto');
 
-/** "server/database", for the header and the Connections list. */
-export const describeConn = (conn) => (conn.demo ? `demo/${conn.database}` : `${conn.kind ? `${conn.kind}://` : ''}${conn.server}/${conn.database ?? '(default)'}`);
+/** "server/database" (and the SSH host it goes through), for the header and the Connections list. */
+export const describeConn = (conn) =>
+  conn.demo ? `demo/${conn.database}` : `${conn.kind ? `${conn.kind}://` : ''}${conn.server}/${conn.database ?? '(default)'}${conn.ssh?.host ? ` via ssh ${sshText(conn.ssh)}` : ''}`;
 
 /** "host:5432" or "host,5432" (Postgres, MySQL): { host, port }, `port` the default when not given. */
 export function hostPort(server, port) {
@@ -120,8 +145,10 @@ export function parseServer(server) {
 /**
  * tedious options for `conn`. `token` is an Entra access token (azure-cli auth), `password`
  * the SQL or Windows password (found by the caller: typed, environment or credential store).
+ * `connector` opens the sockets instead of tedious (db.js's, for an SSH tunnel); the server keeps
+ * its own name, which the login and the certificate check go by.
  */
-export function tediousConfig(conn, { token, password, database = conn.database } = {}) {
+export function tediousConfig(conn, { token, password, database = conn.database, connector } = {}) {
   const { host, port, instanceName } = parseServer(conn.server);
   const authentication =
     conn.auth === 'azure-cli'
@@ -136,6 +163,8 @@ export function tediousConfig(conn, { token, password, database = conn.database 
       ...(database ? { database } : {}),
       ...(port ? { port } : {}),
       ...(instanceName ? { instanceName } : {}),
+      // Through a tunnel the port must be known: there's no SQL Browser to ask.
+      ...(connector ? { connector, port: port ?? 1433 } : {}),
       encrypt: conn.encrypt ?? true,
       trustServerCertificate: Boolean(conn.trustCert),
       connectTimeout: 20000,

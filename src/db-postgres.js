@@ -3,7 +3,7 @@
 // splitScript), each result set cut at the row limit; pg reads a result whole, so the rows past the
 // limit still cross the network before they're dropped. esc cancels with pg_cancel_backend.
 import pg from 'pg';
-import { DbError, runScript } from './db.js';
+import { DbError, connectionLost, ended, runScript } from './db.js';
 import { DIALECTS, splitScript } from './dialects.js';
 import { hostPort } from './connections.js';
 
@@ -21,16 +21,22 @@ const types = {
   },
 };
 
-/** The pg options for a connection: host:port from `server`, TLS when asked for (--ssl, or --trust-cert without checking it). */
-export function pgConfig(conn, { database = conn.database, password } = {}) {
+/**
+ * The pg options for a connection: host:port from `server`, TLS when asked for (--ssl, or
+ * --trust-cert without checking it). Through an SSH `tunnel` it connects to the tunnel's end on
+ * this machine, and the certificate is still checked against the server's own name.
+ */
+export function pgConfig(conn, { database = conn.database, password, tunnel } = {}) {
   const { host, port } = hostPort(conn.server, dialect.defaultPort);
-  const ssl = conn.trustCert ? { rejectUnauthorized: false } : conn.ssl || conn.encrypt ? true : false;
-  return { host, port, user: conn.user, password, database: database ?? 'postgres', ssl, application_name: 'Trawl', connectionTimeoutMillis: 20000, types };
+  let ssl = conn.trustCert ? { rejectUnauthorized: false } : conn.ssl || conn.encrypt ? true : false;
+  if (tunnel && ssl) ssl = { ...(ssl === true ? {} : ssl), servername: host };
+  const at = tunnel ? { host: '127.0.0.1', port: tunnel.port } : { host, port };
+  return { ...at, user: conn.user, password, database: database ?? 'postgres', ssl, application_name: 'Trawl', connectionTimeoutMillis: 20000, types };
 }
 
 /** Opens a session (see db.js connect). Throws a DbError; `badLogin` when the password was turned down. */
-export async function open(conn, { database, password, signal } = {}) {
-  const config = pgConfig(conn, { database, password });
+export async function open(conn, { database, password, signal, tunnel } = {}) {
+  const config = pgConfig(conn, { database, password, tunnel });
   const client = new pg.Client(config);
   const onAbort = () => client.end().catch(() => {});
   signal?.addEventListener('abort', onAbort, { once: true });
@@ -101,7 +107,7 @@ export function postgresSession(conn, client, { database = null, cancel = async 
             collectResult(await client.query({ text, rowMode: 'array' }), state, limit);
           } catch (e) {
             if (e.code === '57014' || signal?.aborted) throw new DbError('Cancelled', { cancelled: true });
-            throw new DbError(e.message, { number: e.code ?? null, line: errorLine(e, text, line) });
+            throw new DbError(e.message, { number: e.code ?? null, line: errorLine(e, text, line), lost: connectionLost(e) });
           } finally {
             signal?.removeEventListener('abort', onAbort);
           }
@@ -121,10 +127,8 @@ export function postgresSession(conn, client, { database = null, cancel = async 
     },
   };
   client.on('notice', (n) => messages?.push(n.message));
-  client.on('end', () => {
-    session.closed = true;
-    session.onEnd?.();
-  });
-  client.on('error', () => {});
+  client.on('end', () => ended(session));
+  // An idle client whose connection drops says so here (and then ends).
+  client.on('error', (e) => connectionLost(e) && ended(session));
   return session;
 }

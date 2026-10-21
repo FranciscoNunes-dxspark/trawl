@@ -136,8 +136,9 @@ export function createServer({ demo = false, log = logQuery, open = connect } = 
       const key = `${conn.name}|${database ?? ''}`;
       const hit = schemas.get(key);
       if (hit && Date.now() - hit.at < 60_000) return hit;
-      const s = await session(conn, database);
-      const fresh = { at: Date.now(), schema: buildSchema((await s.run(dialectOf(conn).schemaSql, { limit: 1_000_000 })).sets) };
+      const read = async () => buildSchema((await (await session(conn, database)).run(dialectOf(conn).schemaSql, { limit: 1_000_000 })).sets);
+      // A connection that dropped since the last call (the server closes idle ones) is opened again.
+      const fresh = { at: Date.now(), schema: await read().catch((e) => (e.lost ? read() : Promise.reject(e))) };
       schemas.set(key, fresh);
       return fresh;
     });
@@ -177,7 +178,9 @@ export function createServer({ demo = false, log = logQuery, open = connect } = 
     },
   };
 
-  async function runRead(conn, database, text, limit) {
+  // A read whose connection drops part-way runs once more on a new one: it only reads, and inside
+  // a transaction that is rolled back, so running it again changes nothing.
+  async function runRead(conn, database, text, limit, retried = false) {
     const s = await session(conn, database);
     const entry = { sql: text, conn: conn.name, database: s.database, at: Date.now(), via: 'claude' };
     try {
@@ -188,6 +191,7 @@ export function createServer({ demo = false, log = logQuery, open = connect } = 
       log({ ...entry, ok: true, summary: `${res.sets.map((x) => `${x.rows.length} rows`).join(' · ') || 'no rows'} · ${res.ms} ms` });
       return [...parts, ...notes].join('\n\n') || 'The query ran and returned no result set.';
     } catch (e) {
+      if (e.lost && !retried) return runRead(conn, database, text, limit, true);
       // The two lines Trawl adds in front don't count.
       const message = e.line ? `Line ${Math.max(1, e.line - dialectOf(conn).readOnlyPrefix.split('\n').length)}: ${e.message}` : e.message;
       log({ ...entry, ok: false, summary: message.split('\n')[0] });

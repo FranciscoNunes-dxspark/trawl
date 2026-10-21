@@ -116,6 +116,8 @@ function Header({ session, tranCount, writesAllowed, file, width, connecting, mo
     if (commitMode(conn) === 'manual') segs.push({ text: '  manual commit', color: theme.dim });
     if (tranCount) segs.push({ text: '  ' }, { text: ` TRANSACTION OPEN `, bg: theme.warn, color: theme.ink, bold: true });
     if (session.stats) segs.push({ text: '  stats on', color: theme.dim });
+    // The server closed it (an idle Azure SQL connection, a laptop asleep): the next run opens another.
+    if (session.closed) segs.push({ text: '  ' }, { text: ' DISCONNECTED ', bg: theme.warn, color: theme.ink, bold: true }, { text: '  reconnects on the next run', color: theme.dim });
   } else {
     segs.push({ text: connecting ? '  connecting…' : '  not connected', color: theme.dim });
   }
@@ -253,6 +255,8 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
   const saveTimer = useRef(null);
   // Passwords typed this session, by connection, so /use and reconnecting don't ask again.
   const typed = useRef(new Map());
+  // A connection that dropped while something else ran: said once that has finished.
+  const quietDrop = useRef(null);
 
   const setConfig = (update) => {
     const next = update(configRef.current);
@@ -402,7 +406,63 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     } finally {
       busyRef.current = null;
       setBusy(null);
+      const dropped = quietDrop.current;
+      quietDrop.current = null;
+      if (dropped && dropped.s === sessionRef.current && dropped.s.closed) note(droppedText(dropped.s.conn.name, dropped.hadTran), 'error');
     }
+  };
+
+  const droppedText = (name, hadTran) => `The connection to ${name} dropped${hadTran ? ', and its open transaction with it: the server rolled that back' : ''}. Trawl reconnects on the next run.`;
+
+  // A session's end that nobody asked for (the server or the network closed it) is said in the log,
+  // and the header says so too until the next run reconnects. During a query, the query says it.
+  const watchEnd = (s) => {
+    s.onEnd = () => {
+      if (sessionRef.current !== s) return;
+      const hadTran = tranRef.current > 0;
+      setTranCount(0);
+      if (busyRef.current) quietDrop.current = { s, hadTran };
+      else note(droppedText(s.conn.name, hadTran), 'error');
+    };
+  };
+
+  /**
+   * Opens `old`'s connection again after it dropped: the same database, with /stats as it was.
+   * Temp tables and SET options of your own don't come back; they were the old connection's.
+   */
+  const reopen = async (old, signal) => {
+    old.onEnd = null;
+    old.close();
+    let s;
+    try {
+      s = await open(old.conn, { database: old.database ?? old.conn.database, signal, password: typed.current.get(old.conn.name), credentials });
+    } catch (e) {
+      if (!e.cancelled) e.message = `Couldn't reconnect to ${old.conn.name}: ${e.message}`;
+      throw e;
+    }
+    watchEnd(s);
+    setSession(s);
+    if (old.stats) {
+      await s.run('SET STATISTICS IO ON;\nSET STATISTICS TIME ON;', { signal });
+      s.stats = true;
+    }
+    return s;
+  };
+
+  // The lazy reconnect before a run (actions.js liveSession): true once there's a live session.
+  const reconnect = async () => {
+    const old = sessionRef.current;
+    if (!old?.closed) return Boolean(old);
+    const r = await task(
+      `reconnect ${old.conn.name}`,
+      async (signal) => {
+        const s = await reopen(old, signal);
+        if (schemaRef.current?.database !== s.database) await loadSchema(s, signal);
+        return [`${describeConn({ ...s.conn, database: s.database })}: a new connection, so temp tables and SET options from the old one are gone${s.stats ? ' (/stats is on again)' : ''}.`];
+      },
+      { label: `Reconnecting to ${old.conn.name}` },
+    );
+    return r.ok;
   };
 
   const loadSchema = async (s, signal) => {
@@ -442,13 +502,7 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
           if (e.needsPassword && password == null && !/login failed/i.test(e.message)) e.message = `${conn.name} needs the password for ${conn.user}.`;
           throw e;
         }
-        s.onEnd = () => {
-          if (sessionRef.current !== s) return;
-          note(`The connection to ${conn.name} closed.`, 'error');
-          setSession(null);
-          setSchemaBoth(null);
-          setTranCount(0);
-        };
+        watchEnd(s);
         setSession(s);
         const sc = await loadSchema(s, signal);
         return [`${describeConn({ ...conn, database: s.database })} · ${plural(sc.objects.length, 'object')}${isReadOnly(conn) ? ' · read-only' : ''}`];
@@ -500,19 +554,52 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
   // filter; a failed run then leaves them as they were. `runner` runs the SQL in place of
   // session.run (an actual plan sets STATISTICS PROFILE around it). `recover` runs if the script
   // fails (saving edits goes back to its savepoint with it).
+  // A connection that dropped is opened again: before the run when it went while idle, and after
+  // it when it went part-way, running it again only when that's safe (actions.js afterLostConnection).
   const query = async (sql, { title, wrapped = false, lineBase = 1, stay = false, keep = false, limit: raised, top = null, again = null, runner = null, recover = '' } = {}) => {
-    const s = sessionRef.current;
+    let s = sessionRef.current;
     const limit = raised ?? configRef.current.limit;
+    const hadTran = tranRef.current > 0;
     let res = null;
     const r = await task(title, async (signal) => {
-      try {
-        res = withStatistics(await (runner ? runner(s, sql, { signal, limit, recover }) : s.run(sql, { signal, limit, recover })));
-      } catch (e) {
-        if (e.partial) res = withStatistics({ ...e.partial, error: e });
-        if (e.line) e.message = `Line ${Math.max(1, lineBase + e.line - 1 - (wrapped ? 1 : 0))}: ${e.message}`;
-        throw e;
+      const said = [];
+      if (s.closed) {
+        s = await reopen(s, signal);
+        said.push(`Reconnected to ${s.conn.name} first: the connection had dropped.`);
       }
-      return summarize(res, limit);
+      const run = async () => {
+        try {
+          res = withStatistics(await (runner ? runner(s, sql, { signal, limit, recover }) : s.run(sql, { signal, limit, recover })));
+        } catch (e) {
+          if (e.partial) res = withStatistics({ ...e.partial, error: e });
+          if (e.line) e.message = `Line ${Math.max(1, lineBase + e.line - 1 - (wrapped ? 1 : 0))}: ${e.message}`;
+          throw e;
+        }
+      };
+      try {
+        await run();
+      } catch (e) {
+        if (!e.lost || e.cancelled || signal.aborted) throw e;
+        // Found closed before anything was sent: it can run on the new connection whatever it is.
+        const next = e.notRun && !hadTran ? { rerun: true, message: `Reconnected to ${s.conn.name} first: the connection had dropped.` } : a.afterLostConnection(sql, { dialect: dialectOf(s).kind, hadTran, wrapped });
+        // This says it all; the session's end needn't be told again.
+        quietDrop.current = null;
+        setTranCount(0);
+        try {
+          s = await reopen(s, signal);
+        } catch (again) {
+          e.message = `${firstLine(e.message)}\n${next.message}\n${again.cancelled ? 'Cancelled reconnecting' : firstLine(again.message)}; Trawl tries again on the next run.`;
+          throw e;
+        }
+        if (!next.rerun) {
+          e.message = `${firstLine(e.message)}\n${next.message}\nReconnected to ${s.conn.name}.`;
+          throw e;
+        }
+        said.push(next.message);
+        res = null;
+        await run();
+      }
+      return [...said, ...summarize(res, limit)];
     });
     if (res && !keep && !(again && res.error)) {
       // Whether, and where, the rows can be edited and saved back (edit.js).
@@ -734,6 +821,7 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     task,
     query,
     connect,
+    reconnect,
     disconnect: () => {
       const name = sessionRef.current?.conn.name;
       dropSession();

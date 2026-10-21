@@ -2,6 +2,7 @@
 // SSMS: SET options, temp tables and open transactions carry over from one run to the next.
 // SQL Server goes through tedious here; Postgres and MySQL through the adapters in db-postgres.js and
 // db-mysql.js, and the demo driver (demo.js), all with the same session interface.
+import net from 'node:net';
 import { Connection, Request } from 'tedious';
 import { azureSqlToken } from './azure.js';
 import { tediousConfig } from './connections.js';
@@ -9,13 +10,17 @@ import { STORE_NAME, osCredentials } from './credentials.js';
 import { demoSession } from './demo.js';
 import { dialectOf } from './dialects.js';
 import { splitBatches } from './sql.js';
+import { openTunnel } from './ssh.js';
 
 export class DbError extends Error {
-  constructor(message, { number = null, line = null, cancelled = false, partial = null, needsPassword = false, untrustedCert = false } = {}) {
+  constructor(message, { number = null, line = null, cancelled = false, partial = null, needsPassword = false, untrustedCert = false, lost = false } = {}) {
     super(message);
     this.number = number;
     this.line = line;
     this.cancelled = cancelled;
+    // The connection itself went (the server closed it, the network dropped, the laptop slept): the
+    // session is closed, and the app opens another.
+    this.lost = lost;
     // No password to sign in with, or the saved one was turned down: the app asks for one.
     this.needsPassword = needsPassword;
     // The server's certificate couldn't be verified (self-signed, as a local SQL Server's is): the app
@@ -36,11 +41,46 @@ export function untrustedCert(err) {
   return false;
 }
 
+// What each driver says when the connection under it has gone. tedious: a socket error
+// (ESOCKET, "Connection lost - read ECONNRESET"), a connection closed mid-request (ECLOSE), or a
+// request on a connection already in its Final state. pg: "Connection terminated", a client no
+// longer queryable, or the server's class 08 and shutdown codes. mysql2: PROTOCOL_CONNECTION_LOST,
+// a fatal error, "Can't add new command when connection is in closed state", or the server's
+// inactivity timeout. And the socket codes underneath them all.
+const LOST_CODES = new Set(['ESOCKET', 'ECLOSE', 'ECONNRESET', 'ECONNABORTED', 'EPIPE', 'ETIMEDOUT', 'ETIMEOUT', 'ENOTCONN', 'ENETDOWN', 'ENETUNREACH', 'EHOSTUNREACH', 'EHOSTDOWN', 'ERR_STREAM_DESTROYED', 'PROTOCOL_CONNECTION_LOST', 'ER_CLIENT_INTERACTION_TIMEOUT', 'ER_SERVER_SHUTDOWN', 'CR_SERVER_GONE_ERROR', 'CR_SERVER_LOST']);
+const LOST_MESSAGE = /connection lost|connection terminated|socket hang up|not queryable|connection is in closed state|server has gone away|lost connection to (mysql )?server|not the final state|connection closed before request completed|disconnected by the server because of inactivity/i;
+
+/** Whether an error from a driver means the connection is gone (rather than the statement failing). */
+export function connectionLost(err) {
+  for (let e = err, n = 0; e && n < 5; e = e.cause, n++) {
+    if (e.lost) return true;
+    const code = typeof e.code === 'string' ? e.code : '';
+    if (LOST_CODES.has(code) || LOST_MESSAGE.test(e.message ?? '')) return true;
+    // Postgres: class 08 (connection exception), 57P01-03 (the server shutting down or starting).
+    if (/^(08[0-9A-Z]{3}|57P0[1-3])$/.test(code)) return true;
+    // mysql2 marks the errors that leave the connection unusable.
+    if (e.fatal === true) return true;
+  }
+  return false;
+}
+
+/**
+ * Marks a session as gone, once: closed, its tunnel (if any) stopped, and `onEnd` told. Every
+ * driver calls it when its connection ends, whoever ended it.
+ */
+export function ended(session) {
+  if (session.ended) return;
+  session.ended = true;
+  session.closed = true;
+  for (const f of session.cleanup ?? []) f();
+  session.onEnd?.();
+}
+
 function toDbError(err, lineOffset = 0) {
   const inner = err.errors?.length ? err.errors : [err];
   const message = inner.map((e) => e.message).filter(Boolean).join('\n') || String(err);
   const line = err.lineNumber ? err.lineNumber + lineOffset : null;
-  return new DbError(message, { number: err.number ?? null, line });
+  return new DbError(message, { number: err.number ?? null, line, lost: connectionLost(err) });
 }
 
 /**
@@ -49,15 +89,42 @@ function toDbError(err, lineOffset = 0) {
  * A login's password is `password` when given, else its environment variable, else the one
  * saved in the OS credential store (`credentials`).
  */
-export async function connect(conn, { database = conn.database, signal, password, credentials = osCredentials } = {}) {
+export async function connect(conn, { database = conn.database, signal, password, credentials = osCredentials, ssh } = {}) {
   if (conn.demo) return demoSession(conn, { database });
+  if (!conn.ssh) return openDirect(conn, { database, signal, password, credentials });
+  // Through an SSH tunnel (ssh.js): the driver talks to a port on this machine that ssh forwards.
+  const tunnel = await openTunnel(conn, { signal, ...ssh });
+  let s;
+  try {
+    s = await openDirect(conn, { database, signal, password, credentials, tunnel });
+  } catch (e) {
+    // ssh says why a forward it set up couldn't reach the server ("open failed: connect failed"),
+    // sometimes a moment after the driver has given up.
+    if (!e.cancelled) await new Promise((r) => setTimeout(r, 150));
+    tunnel.close();
+    const said = tunnel.stderr();
+    if (said && !e.cancelled) e.message = `${e.message}\nssh: ${said}`;
+    throw e;
+  }
+  s.tunnel = tunnel;
+  (s.cleanup ??= []).push(() => tunnel.close());
+  const close = s.close;
+  s.close = () => {
+    close();
+    tunnel.close();
+  };
+  return s;
+}
+
+/** connect without the tunnel; `tunnel` ({ port, host, targetPort }) is one already open. */
+async function openDirect(conn, { database, signal, password, credentials, tunnel }) {
   const dialect = dialectOf(conn);
   // Postgres and MySQL go through their own adapters (db-postgres.js, db-mysql.js), loaded when first used.
   if (dialect.kind !== 'sqlserver') {
     const found = await findPassword(conn, { password, credentials, signal });
     const adapter = dialect.kind === 'postgres' ? await import('./db-postgres.js') : await import('./db-mysql.js');
     try {
-      return await adapter.open(conn, { database, password: found.password, signal });
+      return await adapter.open(conn, { database, password: found.password, signal, tunnel });
     } catch (e) {
       // A wrong password from the environment is yours to fix there; a saved or typed one is asked again.
       if (e.badLogin && found.from !== 'env') e.needsPassword = true;
@@ -72,7 +139,7 @@ export async function connect(conn, { database = conn.database, signal, password
     from = found.from;
     secrets.password = found.password;
   }
-  const connection = new Connection(tediousConfig(conn, { ...secrets, database }));
+  const connection = new Connection(tediousConfig(conn, { ...secrets, database, connector: tunnel && tunnelConnector(tunnel) }));
   await new Promise((resolve, reject) => {
     const onAbort = () => connection.close();
     signal?.addEventListener('abort', onAbort, { once: true });
@@ -105,6 +172,26 @@ async function findPassword(conn, { password, credentials, signal }) {
   throw new DbError(`No password saved for ${conn.user} on ${conn.name}${storeError}. Connect in Trawl once to enter it (it keeps it in ${STORE_NAME})${env}.`, { needsPassword: true });
 }
 
+/**
+ * For tedious: every socket goes to the tunnel's end on this machine, while the server's own name
+ * stays in the login and the TLS checks. A server that sends the client on elsewhere (Azure SQL's
+ * Redirect connection policy) can't be followed through it.
+ */
+const tunnelConnector = (tunnel) => async ({ host, port }) => {
+  if (host !== tunnel.host || Number(port) !== tunnel.targetPort) {
+    throw new Error(`The server sent Trawl on to ${host}:${port}, which the SSH tunnel doesn't reach (Azure SQL's Redirect connection policy does this; its Proxy policy stays on port 1433)`);
+  }
+  return localSocket(tunnel.port);
+};
+
+/** A socket to the tunnel's end on this machine, once it's connected. */
+export const localSocket = (port) =>
+  new Promise((resolve, reject) => {
+    const socket = net.connect(port, '127.0.0.1');
+    socket.once('connect', () => (socket.removeListener('error', reject), resolve(socket)));
+    socket.once('error', reject);
+  });
+
 function tediousSession(conn, connection, database) {
   let messages = null;
   const session = {
@@ -128,12 +215,9 @@ function tediousSession(conn, connection, database) {
   };
   connection.on('infoMessage', (info) => messages?.push(info.message));
   connection.on('databaseChange', (name) => (session.database = name));
-  connection.on('end', () => {
-    session.closed = true;
-    session.onEnd?.();
-  });
+  connection.on('end', () => ended(session));
   // Socket errors also end the connection; 'end' reports it. Without a listener Node would throw.
-  connection.on('error', () => {});
+  connection.on('error', (e) => connectionLost(e) && ended(session));
   return session;
 }
 
@@ -146,6 +230,9 @@ function tediousSession(conn, connection, database) {
 export async function runScript(session, script, runOne, { signal, split = splitBatches, recover = '' } = {}) {
   const started = Date.now();
   const state = { sets: [], messages: [], stopped: false };
+  // A connection that went while nothing ran (Azure SQL closes idle ones) is found out here.
+  // `notRun`: nothing of the script reached the server.
+  if (session.closed) throw Object.assign(new DbError(`The connection to ${session.conn?.name ?? 'the server'} has closed.`, { lost: true, partial: { sets: [], messages: [] } }), { notRun: true });
   session.collect?.(state.messages);
   try {
     for (const batch of split(script)) {
@@ -159,7 +246,14 @@ export async function runScript(session, script, runOne, { signal, split = split
   } catch (e) {
     const err = e instanceof DbError ? e : toDbError(e);
     err.partial = { sets: state.sets, messages: state.messages };
-    for (const batch of recover ? split(recover) : []) await Promise.resolve(runOne(batch.text, batch.line, { sets: [], messages: [], stopped: false })).catch(() => {});
+    if (err.lost && !err.cancelled) {
+      // The driver may not have noticed yet; the session is no use now either way, and there's
+      // nothing left to recover on (the server rolled back what it had).
+      if (!session.closed) {
+        session.close();
+        ended(session);
+      }
+    } else for (const batch of recover ? split(recover) : []) await Promise.resolve(runOne(batch.text, batch.line, { sets: [], messages: [], stopped: false })).catch(() => {});
     throw err;
   } finally {
     session.collect?.(null);

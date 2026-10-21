@@ -3,7 +3,7 @@
 import { readFileSync, statSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import { basename, extname, resolve } from 'node:path';
-import { ADD_USAGE, cleanFolder, commitMode, describeConn, isReadOnly, parseAddArgs, splitArgs } from './connections.js';
+import { ADD_USAGE, cleanFolder, commitMode, describeConn, isReadOnly, parseAddArgs, splitArgs, sshText } from './connections.js';
 import { csvInsertScript, parseCsv } from './csv.js';
 import * as ed from './editor.js';
 import { findDataSources, importPlan, planText } from './datagrip.js';
@@ -250,7 +250,8 @@ export function addConnection(ctx, rest) {
   const replaced = ctx.config.connections.some((c) => c.name.toLowerCase() === conn.name.toLowerCase());
   ctx.setConfig((c) => ({ ...c, connections: [...c.connections.filter((x) => x.name.toLowerCase() !== conn.name.toLowerCase()), conn] }));
   const signIn = conn.auth === 'azure-cli' ? 'Signs in with your az login.' : conn.passwordEnv ? `Password from $${conn.passwordEnv}.` : `Asks for the password when you connect, and keeps it in ${ctx.credentials.name}.`;
-  ctx.note(`${replaced ? 'Updated' : 'Added'} ${conn.name}${conn.folder ? ` in ${conn.folder}/` : ''}${conn.prod ? ' (production, read-only)' : ''}. ${signIn} /connect ${conn.name}`, 'ok');
+  const tunnel = conn.ssh ? ` Through ssh ${sshText(conn.ssh)}, which signs in with a key or your ssh agent (no password prompt).` : '';
+  ctx.note(`${replaced ? 'Updated' : 'Added'} ${conn.name}${conn.folder ? ` in ${conn.folder}/` : ''}${conn.prod ? ' (production, read-only)' : ''}. ${signIn}${tunnel} /connect ${conn.name}`, 'ok');
 }
 
 export async function forgetConnection(ctx, name) {

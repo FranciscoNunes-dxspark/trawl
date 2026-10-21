@@ -21,16 +21,22 @@ const types = {
   },
 };
 
-/** The pg options for a connection: host:port from `server`, TLS when asked for (--ssl, or --trust-cert without checking it). */
-export function pgConfig(conn, { database = conn.database, password } = {}) {
+/**
+ * The pg options for a connection: host:port from `server`, TLS when asked for (--ssl, or
+ * --trust-cert without checking it). Through an SSH `tunnel` it connects to the tunnel's end on
+ * this machine, and the certificate is still checked against the server's own name.
+ */
+export function pgConfig(conn, { database = conn.database, password, tunnel } = {}) {
   const { host, port } = hostPort(conn.server, dialect.defaultPort);
-  const ssl = conn.trustCert ? { rejectUnauthorized: false } : conn.ssl || conn.encrypt ? true : false;
-  return { host, port, user: conn.user, password, database: database ?? 'postgres', ssl, application_name: 'Trawl', connectionTimeoutMillis: 20000, types };
+  let ssl = conn.trustCert ? { rejectUnauthorized: false } : conn.ssl || conn.encrypt ? true : false;
+  if (tunnel && ssl) ssl = { ...(ssl === true ? {} : ssl), servername: host };
+  const at = tunnel ? { host: '127.0.0.1', port: tunnel.port } : { host, port };
+  return { ...at, user: conn.user, password, database: database ?? 'postgres', ssl, application_name: 'Trawl', connectionTimeoutMillis: 20000, types };
 }
 
 /** Opens a session (see db.js connect). Throws a DbError; `badLogin` when the password was turned down. */
-export async function open(conn, { database, password, signal } = {}) {
-  const config = pgConfig(conn, { database, password });
+export async function open(conn, { database, password, signal, tunnel } = {}) {
+  const config = pgConfig(conn, { database, password, tunnel });
   const client = new pg.Client(config);
   const onAbort = () => client.end().catch(() => {});
   signal?.addEventListener('abort', onAbort, { once: true });

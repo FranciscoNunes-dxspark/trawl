@@ -2,7 +2,7 @@ import React from 'react';
 import { Box, useInput } from 'ink';
 import * as a from '../actions.js';
 import { AI_LABELS, aiLevel } from '../ai.js';
-import { commitMode, connectionRows, describeConn, isReadOnly } from '../connections.js';
+import { commitMode, connectionRows, describeConn, isReadOnly, sshText } from '../connections.js';
 import { dialectOf } from '../dialects.js';
 import { theme } from '../theme.js';
 import { fit } from '../text.js';
@@ -48,6 +48,8 @@ export function ConnectionsView({ connections, current, ctx, width, height, acti
         ...(c.kind ? [[{ text: 'Kind      ', color: theme.dim }, { text: dialectOf(c).label }]] : []),
         [{ text: 'Server    ', color: theme.dim }, { text: c.server }],
         [{ text: 'Database  ', color: theme.dim }, { text: c.database ?? '(the login’s default)' }],
+        ...(c.ssh?.host ? [[{ text: 'SSH       ', color: theme.dim }, { text: sshText(c.ssh) }, { text: '  (a tunnel)', color: theme.dim }]] : []),
+        ...(c.ssh?.host ? [[{ text: 'SSH key   ', color: theme.dim }, c.ssh.key ? { text: c.ssh.key } : { text: 'from your ssh config or agent', color: theme.dim }]] : []),
         [{ text: 'Sign-in   ', color: theme.dim }, { text: c.demo ? 'none (demo)' : AUTH[c.auth] ?? c.auth }],
         ...(c.user ? [[{ text: 'Login     ', color: theme.dim }, { text: `${c.domain ? `${c.domain}\\` : ''}${c.user}` }]] : []),
         ...(c.user && !c.demo ? [[{ text: 'Password  ', color: theme.dim }, { text: c.passwordEnv ? `$${c.passwordEnv}, else ${store}` : `${store} (asked when you connect; p changes it)` }]] : []),

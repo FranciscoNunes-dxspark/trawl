@@ -3,7 +3,7 @@
 // understood), each result set cut at the row limit after it has arrived. esc cancels with KILL QUERY
 // from a second connection.
 import mysql from 'mysql2/promise';
-import { DbError, connectionLost, ended, runScript } from './db.js';
+import { DbError, connectionLost, ended, localSocket, runScript } from './db.js';
 import { DIALECTS, splitScript } from './dialects.js';
 import { hostPort } from './connections.js';
 
@@ -12,17 +12,23 @@ const dialect = DIALECTS.mysql;
 // mysql2's column type codes for the numbers (right-aligned in the grid) and a few others.
 const TYPES = { 0: 'Decimal', 1: 'TinyInt', 2: 'SmallInt', 3: 'Int', 4: 'Real', 5: 'Float', 8: 'BigInt', 9: 'Int', 10: 'date', 12: 'datetime', 13: 'Int', 246: 'Decimal', 252: 'text', 253: 'varchar', 254: 'char', 245: 'json' };
 
-/** The mysql2 options for a connection: host:port from `server`, TLS when asked for. */
+/**
+ * The mysql2 options for a connection: host:port from `server`, TLS when asked for. Through an SSH
+ * tunnel, open (below) adds the socket as `stream`, and `host` stays the server's own name, which
+ * TLS goes by.
+ */
 export function mysqlConfig(conn, { database = conn.database, password } = {}) {
   const { host, port } = hostPort(conn.server, dialect.defaultPort);
   const ssl = conn.trustCert ? { rejectUnauthorized: false } : conn.ssl || conn.encrypt ? {} : undefined;
   return { host, port, user: conn.user, password, database, ssl, timezone: 'Z', dateStrings: ['DATE'], supportBigNumbers: true, bigNumberStrings: true, connectTimeout: 20000, multipleStatements: false };
 }
 
-export async function open(conn, { database, password, signal } = {}) {
+export async function open(conn, { database, password, signal, tunnel } = {}) {
   const config = mysqlConfig(conn, { database, password });
   let c;
   try {
+    // mysql2 takes the socket as it is, so it's connected to the tunnel's end first.
+    if (tunnel) config.stream = await localSocket(tunnel.port);
     c = await mysql.createConnection(config);
   } catch (e) {
     if (signal?.aborted) throw new DbError('Cancelled', { cancelled: true });
@@ -35,11 +41,11 @@ export async function open(conn, { database, password, signal } = {}) {
     c.destroy();
     throw new DbError('Cancelled', { cancelled: true });
   }
-  return mysqlSession(conn, c, { database: database ?? null, cancel: () => killQuery(config, c.threadId) });
+  return mysqlSession(conn, c, { database: database ?? null, cancel: () => killQuery(config, c.threadId, tunnel) });
 }
 
-async function killQuery(config, id) {
-  const other = await mysql.createConnection({ ...config, connectTimeout: 5000 });
+async function killQuery(config, id, tunnel) {
+  const other = await mysql.createConnection({ ...config, connectTimeout: 5000, ...(tunnel ? { stream: await localSocket(tunnel.port) } : {}) });
   try {
     await other.query(`KILL QUERY ${Number(id)}`);
   } finally {

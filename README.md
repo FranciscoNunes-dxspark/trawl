@@ -71,6 +71,7 @@ Save connections with `/add`:
 | In a folder | `/add club-b srv.database.windows.net ClubB --folder Clubs/PROD` |
 | PostgreSQL | `/add shop db.local:5432 shop --kind postgres --user app` |
 | MySQL or MariaDB | `/add blog db.local:3306 blog --kind mysql --user app --ssl` |
+| Through an SSH host | `/add vault db.internal,1433 Ops --user ops --ssh me@bastion.example.com` |
 
 `--trust-cert` trusts the server's certificate without checking it, as SSMS's "Trust server certificate" does. A local SQL Server signs its own, which Trawl can't verify otherwise. If you leave it off and connecting fails on the certificate, Trawl asks whether to trust it, and keeps that on the connection.
 
@@ -79,6 +80,14 @@ Azure SQL gets a fresh token from the Azure CLI each time it connects, so there'
 Connections live in `~/.trawl/config.json` (or `TRAWL_HOME`), along with the prompt history, the run history and what Settings (`,`) changes: the row limit, the accent colour, the mouse, updates and notifications.
 
 When a query (or anything else with the spinner) takes longer than 10 seconds, Trawl rings the terminal's bell and asks it for a desktop notification saying what finished and how (OSC 9, which Windows Terminal, iTerm2, WezTerm and kitty show, or OSC 777 in GNOME Terminal and other VTE terminals), for when you've switched to another window. **Notify when done** in Settings turns it off, and `"notifyAfter": 30` in `config.json` changes the seconds. A run you cancel says nothing.
+
+### Through an SSH tunnel
+
+`--ssh [user@]host[:port]` reaches the server through an SSH host (a bastion or jump box), for a database that only that host can see. Trawl starts your system's own `ssh` (OpenSSH, which Windows 10 and later include) to forward a free port on `127.0.0.1` to the server, and connects through it; the tunnel closes with the connection and when Trawl exits. The server is named as the SSH host sees it, so `db.internal` or a private address works, and `/fanout`, `/diff` and `trawl mcp` go through the same tunnel. The Connections tab shows the SSH host beside the server.
+
+ssh runs without a terminal, so it can't ask anything: it signs in with a key or your ssh agent only (`ssh-agent`, or one such as 1Password's), never a password or a passphrase typed there, and the SSH host must already be in your `known_hosts`. Connect with `ssh me@bastion.example.com` once yourself to check both. `--ssh-key <file>` names the key to use; otherwise it's whatever your ssh config (`~/.ssh/config`, where a `Host` alias with its user and port also works as the `--ssh` host) and agent offer. If ssh can't sign in or set up the forward, its own message is the error.
+
+The tunnel carries TCP to one port, so a SQL Server named instance (`host\INSTANCE`, found through SQL Browser on UDP) needs its port instead (`host,1433`). The certificate is still checked against the server's own name, as without a tunnel. Azure SQL through a tunnel needs the server's **Proxy** connection policy: with **Redirect**, the server sends the client on to another address, which the tunnel doesn't reach, and Trawl says so.
 
 ### When the connection drops
 

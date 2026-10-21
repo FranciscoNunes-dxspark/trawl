@@ -2,6 +2,7 @@
 // SSMS: SET options, temp tables and open transactions carry over from one run to the next.
 // SQL Server goes through tedious here; Postgres and MySQL through the adapters in db-postgres.js and
 // db-mysql.js, and the demo driver (demo.js), all with the same session interface.
+import net from 'node:net';
 import { Connection, Request } from 'tedious';
 import { azureSqlToken } from './azure.js';
 import { tediousConfig } from './connections.js';
@@ -9,6 +10,7 @@ import { STORE_NAME, osCredentials } from './credentials.js';
 import { demoSession } from './demo.js';
 import { dialectOf } from './dialects.js';
 import { splitBatches } from './sql.js';
+import { openTunnel } from './ssh.js';
 
 export class DbError extends Error {
   constructor(message, { number = null, line = null, cancelled = false, partial = null, needsPassword = false, untrustedCert = false, lost = false } = {}) {
@@ -87,15 +89,42 @@ function toDbError(err, lineOffset = 0) {
  * A login's password is `password` when given, else its environment variable, else the one
  * saved in the OS credential store (`credentials`).
  */
-export async function connect(conn, { database = conn.database, signal, password, credentials = osCredentials } = {}) {
+export async function connect(conn, { database = conn.database, signal, password, credentials = osCredentials, ssh } = {}) {
   if (conn.demo) return demoSession(conn, { database });
+  if (!conn.ssh) return openDirect(conn, { database, signal, password, credentials });
+  // Through an SSH tunnel (ssh.js): the driver talks to a port on this machine that ssh forwards.
+  const tunnel = await openTunnel(conn, { signal, ...ssh });
+  let s;
+  try {
+    s = await openDirect(conn, { database, signal, password, credentials, tunnel });
+  } catch (e) {
+    // ssh says why a forward it set up couldn't reach the server ("open failed: connect failed"),
+    // sometimes a moment after the driver has given up.
+    if (!e.cancelled) await new Promise((r) => setTimeout(r, 150));
+    tunnel.close();
+    const said = tunnel.stderr();
+    if (said && !e.cancelled) e.message = `${e.message}\nssh: ${said}`;
+    throw e;
+  }
+  s.tunnel = tunnel;
+  (s.cleanup ??= []).push(() => tunnel.close());
+  const close = s.close;
+  s.close = () => {
+    close();
+    tunnel.close();
+  };
+  return s;
+}
+
+/** connect without the tunnel; `tunnel` ({ port, host, targetPort }) is one already open. */
+async function openDirect(conn, { database, signal, password, credentials, tunnel }) {
   const dialect = dialectOf(conn);
   // Postgres and MySQL go through their own adapters (db-postgres.js, db-mysql.js), loaded when first used.
   if (dialect.kind !== 'sqlserver') {
     const found = await findPassword(conn, { password, credentials, signal });
     const adapter = dialect.kind === 'postgres' ? await import('./db-postgres.js') : await import('./db-mysql.js');
     try {
-      return await adapter.open(conn, { database, password: found.password, signal });
+      return await adapter.open(conn, { database, password: found.password, signal, tunnel });
     } catch (e) {
       // A wrong password from the environment is yours to fix there; a saved or typed one is asked again.
       if (e.badLogin && found.from !== 'env') e.needsPassword = true;
@@ -110,7 +139,7 @@ export async function connect(conn, { database = conn.database, signal, password
     from = found.from;
     secrets.password = found.password;
   }
-  const connection = new Connection(tediousConfig(conn, { ...secrets, database }));
+  const connection = new Connection(tediousConfig(conn, { ...secrets, database, connector: tunnel && tunnelConnector(tunnel) }));
   await new Promise((resolve, reject) => {
     const onAbort = () => connection.close();
     signal?.addEventListener('abort', onAbort, { once: true });
@@ -142,6 +171,26 @@ async function findPassword(conn, { password, credentials, signal }) {
   const env = conn.passwordEnv ? `, or set $${conn.passwordEnv}` : '';
   throw new DbError(`No password saved for ${conn.user} on ${conn.name}${storeError}. Connect in Trawl once to enter it (it keeps it in ${STORE_NAME})${env}.`, { needsPassword: true });
 }
+
+/**
+ * For tedious: every socket goes to the tunnel's end on this machine, while the server's own name
+ * stays in the login and the TLS checks. A server that sends the client on elsewhere (Azure SQL's
+ * Redirect connection policy) can't be followed through it.
+ */
+const tunnelConnector = (tunnel) => async ({ host, port }) => {
+  if (host !== tunnel.host || Number(port) !== tunnel.targetPort) {
+    throw new Error(`The server sent Trawl on to ${host}:${port}, which the SSH tunnel doesn't reach (Azure SQL's Redirect connection policy does this; its Proxy policy stays on port 1433)`);
+  }
+  return localSocket(tunnel.port);
+};
+
+/** A socket to the tunnel's end on this machine, once it's connected. */
+export const localSocket = (port) =>
+  new Promise((resolve, reject) => {
+    const socket = net.connect(port, '127.0.0.1');
+    socket.once('connect', () => (socket.removeListener('error', reject), resolve(socket)));
+    socket.once('error', reject);
+  });
 
 function tediousSession(conn, connection, database) {
   let messages = null;

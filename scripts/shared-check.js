@@ -10,7 +10,7 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 // The files copied between the apps (CLAUDE.md lists them), as paths from each checkout's root.
-export const SHARED = ['src/text.js', 'src/ui/parts.jsx', 'src/ui/hooks.js', 'src/mouse.js', 'src/selection.js', 'src/clipboard.js', 'src/jsx-hooks.js', 'src/register.js', 'src/version.js', 'scripts/build.js', 'scripts/shared-check.js'];
+export const SHARED = ['src/text.js', 'src/ui/parts.jsx', 'src/ui/hooks.js', 'src/mouse.js', 'src/selection.js', 'src/clipboard.js', 'src/jsx-hooks.js', 'src/register.js', 'src/version.js', 'src/help-layout.js', 'src/ui/HelpView.jsx', 'scripts/build.js', 'scripts/shared-check.js'];
 
 /**
  * The lines of `a` and `b` as a diff: [' ', line] kept, ['-', line] only in a, ['+', line] only in b.

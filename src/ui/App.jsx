@@ -3,7 +3,7 @@ import { Box, Text, useApp, useInput } from 'ink';
 import { readFileSync, statSync, unwatchFile, watchFile } from 'node:fs';
 import { basename, resolve } from 'node:path';
 import * as a from '../actions.js';
-import { findCommand, suggestionsFor } from '../commands.js';
+import { COMMANDS, findCommand, suggestionsFor } from '../commands.js';
 import { loadClaudeHistory, loadConsole, removeConsole, saveConfig, saveConsole, withRan } from '../config.js';
 import { freeFile, tabsOf } from '../consoles.js';
 import * as ed from '../editor.js';
@@ -13,6 +13,7 @@ import { osCredentials } from '../credentials.js';
 import { connect as openSession } from '../db.js';
 import { changesText, editTarget, readTarget } from '../edit.js';
 import { HELP } from '../help.js';
+import { commandsSection, sectionFor } from '../help-layout.js';
 import { buildSchema } from '../schema.js';
 import { dialectOf, qualifiedFor } from '../dialects.js';
 import { qualified, splitStatements, statisticsSummary } from '../sql.js';
@@ -28,6 +29,7 @@ import { ExplorerView } from './ExplorerView.jsx';
 import { HistoryView } from './HistoryView.jsx';
 import { QueryView } from './QueryView.jsx';
 import { ResultsView } from './ResultsView.jsx';
+import { HelpView } from './HelpView.jsx';
 import { TextViewer } from './TextViewer.jsx';
 import { Picker } from './Picker.jsx';
 import { WELCOME_HEIGHT, Welcome } from './Glim.jsx';
@@ -45,6 +47,9 @@ const VIEWS = [
   { id: 'connections', label: 'Connections' },
   { id: 'activity', label: 'Activity' },
 ];
+
+// What ? shows: help.js's sections, then the slash commands.
+const HELP_SECTIONS = [...HELP, commandsSection(COMMANDS)];
 
 const HINTS = {
   explorer: '↵ first rows · d describe · s query it in the console · c CREATE script · /find filter',
@@ -829,7 +834,8 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     showPicker: (picker) => setOverlay({ picker }),
     closeOverlay: () => setOverlay(null),
     rememberOutput: (title, text) => (lastOutput.current = { title, text }),
-    showHelp: () => setOverlay({ title: 'Keyboard shortcuts', text: HELP }),
+    // On the section for the view on screen (the Query tab's console or file).
+    showHelp: () => setOverlay({ help: true, start: sectionFor(HELP_SECTIONS, view === 'query' ? queryMode : view) }),
     showSettings: () => setOverlay({ settings: true }),
     showLast: () => (lastOutput.current ? setOverlay({ ...lastOutput.current }) : note('Nothing has run yet.')),
   });
@@ -1087,6 +1093,8 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     // Over whichever view is open; ↵ on the row limit hands over to the prompt, and the overlay stays.
     const settingsActive = focus === 'view' && !confirmReq;
     main = <SettingsView config={config} ctx={ctx} updates={{ check: Boolean(checkLatest), install: Boolean(installUpdate) }} update={update} width={W} height={mainH} active={settingsActive} onClose={closeOnKey} />;
+  } else if (overlay?.help) {
+    main = <HelpView sections={HELP_SECTIONS} start={overlay.start} ctx={ctx} width={W} height={mainH} active={focus === 'view' && !confirmReq} onClose={closeOnKey} />;
   } else if (overlay?.picker) {
     main = <Picker {...overlay.picker} ctx={ctx} width={W} height={mainH} active={focus === 'view' && !confirmReq} onClose={closeOnKey} />;
   } else if (overlay) {
@@ -1137,6 +1145,8 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
           ? 'editing the cell · ↵ keep it (s saves) · tab next column · esc leave it as it was · ctrl+u clear'
           : overlay?.settings
           ? 'j/k move · ↵ or space change it · esc close'
+          : overlay?.help
+          ? 'j/k section · space scroll · / search · esc close'
           : overlay?.picker
           ? `j/k move · ${overlay.picker.hint} · esc close`
           : overlay

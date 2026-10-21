@@ -122,7 +122,7 @@ The Explorer shows the server as a tree, as SSMS's Object Explorer does: every d
 
 ## Use
 
-Press `?` inside for every shortcut. The essentials:
+Press `?` inside for every shortcut: the sections down the left, opening on the one for the view you're in, `j`/`k` to pick another, and `/` to search them all (the slash commands too). The essentials:
 
 | Where | Keys |
 | --- | --- |

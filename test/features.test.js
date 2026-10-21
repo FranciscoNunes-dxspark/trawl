@@ -318,3 +318,23 @@ test('a on a plan asks Claude to explain it (the query and plan, no rows), and n
   await until(() => frame().includes('Claude may now see schema and results of demo'), 'open again');
   app.unmount();
 });
+
+test('? opens on the section for the view on screen; j k pick another, / searches them all, esc clears and then closes', async () => {
+  const app = start();
+  await until(() => frame().includes('Clubs'), 'the explorer');
+  app.stdin.write('3');
+  await until(() => frame().includes('╭─ Results'), 'Results');
+  app.stdin.write('?');
+  await until(() => frame().includes('❯ Results') && frame().includes('The row as a record'), 'the Results section');
+  app.stdin.write('j');
+  await until(() => frame().includes('❯ History') && frame().includes('Run it again'), 'History');
+  app.stdin.write('/');
+  await type(app.stdin, 'kill');
+  await until(() => frame().includes('Matches for “kill”') && frame().includes('Kill the session'), 'the matches');
+  assert.doesNotMatch(frame(), /Run it again/);
+  app.stdin.write(KEYS.esc);
+  await until(() => frame().includes('❯ Activity') && !frame().includes('Matches for'), 'the search cleared, on the section it found');
+  app.stdin.write(KEYS.esc);
+  await until(() => !frame().includes('Keyboard shortcuts'), 'closed');
+  app.unmount();
+});

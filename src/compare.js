@@ -10,8 +10,9 @@ const cell = (v) => (v == null ? '\u0000NULL' : formatValue(v));
  * What changed from `before` to `after` (result sets with the same column names, in any order).
  * `keys` names the columns that tell rows apart (a table's primary key); without them, or when they
  * don't single rows out, whole rows are compared, so a changed row shows as removed and added.
- * Returns { columns, added, removed, changed: [{ before, after, cols }], same, keyed }, rows in
- * `before`'s column order. Throws when the columns differ.
+ * Returns { columns, added, removed, changed: [{ before, after, cols, index }], same, keyed, addedAt },
+ * rows in `before`'s column order; `index` and `addedAt` are the rows' indexes in `after`. Throws when
+ * the columns differ.
  */
 export function compareSets(before, after, { keys = [] } = {}) {
   const names = before.columns.map((c) => lower(c.name));
@@ -25,20 +26,21 @@ export function compareSets(before, after, { keys = [] } = {}) {
   const keyOf = (row) => keyAt.map((i) => cell(row[i])).join('\u0001');
   const unique = (rows) => new Set(rows.map(keyOf)).size === rows.length;
   const keyed = keyAt.length > 0 && !keyAt.includes(-1) && unique(before.rows) && unique(afterRows);
-  const out = { columns: before.columns, added: [], removed: [], changed: [], same: 0, keyed };
+  const out = { columns: before.columns, added: [], removed: [], changed: [], same: 0, keyed, addedAt: [] };
   if (keyed) {
     const was = new Map(before.rows.map((r) => [keyOf(r), r]));
     const seen = new Set();
-    for (const row of afterRows) {
+    for (const [index, row] of afterRows.entries()) {
       const k = keyOf(row);
       const old = was.get(k);
       if (!old) {
         out.added.push(row);
+        out.addedAt.push(index);
         continue;
       }
       seen.add(k);
       const cols = row.map((v, i) => i).filter((i) => cell(row[i]) !== cell(old[i]));
-      if (cols.length) out.changed.push({ before: old, after: row, cols });
+      if (cols.length) out.changed.push({ before: old, after: row, cols, index });
       else out.same++;
     }
     out.removed = before.rows.filter((r) => !seen.has(keyOf(r)));
@@ -48,12 +50,15 @@ export function compareSets(before, after, { keys = [] } = {}) {
   const whole = (row) => row.map(cell).join('\u0001');
   const left = new Map();
   for (const r of before.rows) left.set(whole(r), [...(left.get(whole(r)) ?? []), r]);
-  for (const row of afterRows) {
+  for (const [index, row] of afterRows.entries()) {
     const list = left.get(whole(row));
     if (list?.length) {
       list.pop();
       out.same++;
-    } else out.added.push(row);
+    } else {
+      out.added.push(row);
+      out.addedAt.push(index);
+    }
   }
   out.removed = [...left.values()].flat();
   return out;

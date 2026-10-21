@@ -94,6 +94,19 @@ WHERE t.parent_id = @id
 ORDER BY 1, 2, 3;`,
   // What /uses finds by the name in definitions, where the catalog doesn't say (none here).
   usesByName: null,
+  // What this session's open transaction holds (transactions.js locksText): its locks in this
+  // database, by object, kind of resource and mode, without the shared lock every session has on it.
+  locksSql: `-- trawl:locks
+SELECT object_name, resource_type, request_mode, COUNT(*) AS locks FROM (
+  SELECT COALESCE(OBJECT_SCHEMA_NAME(CASE WHEN l.resource_type = 'OBJECT' THEN l.resource_associated_entity_id ELSE p.object_id END) + N'.'
+      + OBJECT_NAME(CASE WHEN l.resource_type = 'OBJECT' THEN l.resource_associated_entity_id ELSE p.object_id END), l.resource_type) AS object_name,
+    l.resource_type, l.request_mode
+  FROM sys.dm_tran_locks l
+  LEFT JOIN sys.partitions p ON p.hobt_id = l.resource_associated_entity_id AND l.resource_type IN ('KEY', 'PAGE', 'RID', 'HOBT')
+  WHERE l.request_session_id = @@SPID AND l.resource_database_id = DB_ID() AND l.resource_type <> 'DATABASE'
+) x
+GROUP BY object_name, resource_type, request_mode
+ORDER BY object_name, resource_type, request_mode;`,
   explainAnalyze: null,
   // /health's reads, /sizes' query and what it means, and where /deadlocks reads them (the probe
   // says which kind of SQL Server; the plan, from its row, which sources to try).
@@ -243,6 +256,16 @@ ORDER BY 1, 2, 3;`;
   },
   // The kinds whose definitions /uses reads for names: what refers to the object, and what it refers to.
   usesByName: { usedBy: ['procedure', 'function', 'trigger'], uses: ['procedure', 'function'], what: 'routines and triggers' },
+  // This backend's locks, but not its own transaction id's or those this query takes on the catalog.
+  locksSql: `-- trawl:locks
+SELECT COALESCE(n.nspname || '.' || c.relname, l.locktype) AS object_name, l.locktype AS resource_type, l.mode AS request_mode, COUNT(*) AS locks
+FROM pg_locks l
+LEFT JOIN pg_class c ON c.oid = l.relation
+LEFT JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE l.pid = pg_backend_pid() AND l.granted AND l.locktype NOT IN ('virtualxid', 'transactionid')
+  AND COALESCE(n.nspname, '') NOT IN ('pg_catalog', 'information_schema')
+GROUP BY 1, 2, 3
+ORDER BY 1, 2, 3;`,
   // The actual plan: this one runs the statement (actions.js showActualPlan rolls a write back).
   explainAnalyze: (sql) => `EXPLAIN (ANALYZE, BUFFERS) ${sql.replace(/;\s*$/, '')}`,
   health: healthReads('postgres'),
@@ -340,6 +363,15 @@ FROM information_schema.triggers
 WHERE event_object_schema = ${hexstr(o.schema)} AND event_object_table = ${hexstr(o.name)}
 ORDER BY trigger_name;`,
   usesByName: { usedBy: ['view', 'procedure', 'function', 'trigger'], uses: ['view', 'procedure', 'function'], what: 'views, routines and triggers' },
+  // InnoDB's locks for this connection, from performance_schema.data_locks (MySQL 8.0 and later).
+  locksSql: `-- trawl:locks
+SELECT CONCAT(l.OBJECT_SCHEMA, '.', l.OBJECT_NAME) AS object_name, l.LOCK_TYPE AS resource_type, l.LOCK_MODE AS request_mode, COUNT(*) AS locks
+FROM performance_schema.data_locks l
+JOIN performance_schema.threads t ON t.THREAD_ID = l.THREAD_ID
+WHERE t.PROCESSLIST_ID = CONNECTION_ID()
+GROUP BY 1, 2, 3
+ORDER BY 1, 2, 3;`,
+  locksUnavailable: 'MySQL keeps them in performance_schema.data_locks from 8.0 on; this server or login has no such table, so they can’t be listed.',
   // MySQL 8.0.18 and later; MariaDB has ANALYZE instead.
   explainAnalyze: (sql) => `EXPLAIN ANALYZE ${sql.replace(/;\s*$/, '')}`,
   health: healthReads('mysql'),

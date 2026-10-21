@@ -65,7 +65,7 @@ const TYPES = {
 };
 const typesOf = (kind) => TYPES[kind] ?? TYPES.sqlserver;
 const readOnlyType = (type, kind) => typesOf(kind).readOnly.has(base(type, kind)) || (kind === 'postgres' && /\[\]$/.test(base(type, kind)));
-const exactType = (type, kind) => typesOf(kind).exact.has(base(type, kind));
+export const exactType = (type, kind) => typesOf(kind).exact.has(base(type, kind));
 
 const fail = (message) => {
   throw new Error(message);
@@ -102,8 +102,8 @@ function topLevel(masked, re) {
 }
 
 // A name as SQL Server ([x]), Postgres ("x") or MySQL (`x`) quotes it, or bare.
-const NAME = String.raw`(?:\[(?:[^\]]|\]\])+\]|"(?:[^"]|"")+"|\`(?:[^\`]|\`\`)+\`|[A-Za-z_@#][\w@#$]*)`;
-const unquote = (s) => {
+export const NAME = String.raw`(?:\[(?:[^\]]|\]\])+\]|"(?:[^"]|"")+"|\`(?:[^\`]|\`\`)+\`|[A-Za-z_@#][\w@#$]*)`;
+export const unquote = (s) => {
   const q = s.match(/^([[`"])(.*)[\]`"]$/s);
   if (!q) return s;
   const close = q[1] === '[' ? ']' : q[1];
@@ -111,6 +111,20 @@ const unquote = (s) => {
 };
 // The schema a bare table name means, where there's a usual one.
 const DEFAULT_SCHEMA = { sqlserver: 'dbo', postgres: 'public' };
+
+/**
+ * The table a name in the SQL means ([dbo].[Players], public.t, Players): { table, name } (`name` the
+ * table's name as written, unquoted) or { reason }. A name with its database in it doesn't count.
+ */
+export function findTable(text, schema, { kind = 'sqlserver' } = {}) {
+  const parts = text.split(/\s*\.\s*(?=[[\w"`@#])/).map(unquote);
+  if (parts.length > 2) return { reason: 'it names the table with its database; edit it from a connection to that database' };
+  const [name, owner] = [parts.at(-1), parts.at(-2)];
+  const hits = (schema?.objects ?? []).filter((o) => o.kind === 'table' && o.name.toLowerCase() === name.toLowerCase() && (!owner || o.schema.toLowerCase() === owner.toLowerCase()));
+  const table = hits.find((o) => o.schema === DEFAULT_SCHEMA[kind]) ?? (hits.length === 1 ? hits[0] : null);
+  if (!table) return { reason: `${text.trim()} isn’t a table Trawl knows (a view, or another database)` };
+  return { table, name };
+}
 
 /**
  * Which table a result's rows are, and which of its columns are that table's as they are:
@@ -137,12 +151,9 @@ export function readTarget(sql, sets, schema, { kind = 'sqlserver' } = {}) {
   const m = after.match(new RegExp(String.raw`^\s*(${NAME}(?:\s*\.\s*${NAME}){0,3})(?:\s+(?!WITH\b)(?:AS\s+)?(${NAME}))?(?:\s+WITH\s*\([^)]*\))?\s*(?:$|(?=WHERE\b|ORDER\b|OPTION\b|OFFSET\b|LIMIT\b|FETCH\b))`, 'is'));
   if (!m) return { reason: 'it doesn’t read from a single table' };
   const alias = m[2] && !/^(WHERE|ORDER|OPTION|OFFSET|LIMIT|FETCH)$/i.test(m[2]) ? unquote(m[2]).toLowerCase() : null;
-  const parts = m[1].split(/\s*\.\s*(?=[[\w"`@#])/).map(unquote);
-  if (parts.length > 2) return { reason: 'it names the table with its database; edit it from a connection to that database' };
-  const [name, owner] = [parts.at(-1), parts.at(-2)];
-  const hits = schema.objects.filter((o) => o.kind === 'table' && o.name.toLowerCase() === name.toLowerCase() && (!owner || o.schema.toLowerCase() === owner.toLowerCase()));
-  const table = hits.find((o) => o.schema === DEFAULT_SCHEMA[kind]) ?? (hits.length === 1 ? hits[0] : null);
-  if (!table) return { reason: `${m[1].trim()} isn’t a table Trawl knows (a view, or another database)` };
+  const found = findTable(m[1], schema, { kind });
+  if (found.reason) return found;
+  const { table, name } = found;
 
   // The select list: which result columns are a table column as it is, not an expression.
   let listStart = select[0].length;

@@ -1,6 +1,7 @@
 // An in-memory stand-in for SQL Server, for `trawl --demo` and the tests. It has no SQL engine:
 // it knows the catalog queries (/grep's, /uses's and /script-all's too), a Flyway history for
 // /migrations, SELECT [TOP (n)] … FROM a table, simple SELECT lists, USE,
+// the copies of rows kept for undo and the locks an open transaction holds,
 // transactions, WAITFOR DELAY (to try cancelling), RAISERROR/THROW, SHOWPLAN_TEXT and STATISTICS
 // PROFILE (made-up plans of a table scan), a few other sessions for the
 // Activity view (and KILL for them), SQL Agent jobs (and sp_start_job), the top queries, /health's
@@ -531,6 +532,34 @@ function deadlockSets(session, batch) {
   return [set(['event_xml'], events.map((x) => [x]))];
 }
 
+// The copy of the rows a write is about to change (undo.js): the table's rows its WHERE picks, when
+// it's only `column = value` or `column IN (…)` joined by AND; any other WHERE picks the first row,
+// as the demo's counts take any WHERE to match one.
+function snapshotSet(db, batch) {
+  const m = batch.match(/SELECT\s+(?:TOP\s*\((\d+)\)\s*)?\*\s+FROM\s+((?:\[[^\]]+\]|[\w#]+)(?:\.(?:\[[^\]]+\]|\w+))?)(?:\s+(?:AS\s+)?(?!WHERE\b|LIMIT\b)\w+)?([\s\S]*?)(?:\s+LIMIT\s+(\d+))?;?\s*$/i);
+  const t = m && findObject({ objects: db.tables }, m[2]);
+  if (!t) throw new DbError(`Invalid object name '${m?.[2] ?? '?'}'.`, { number: 208 });
+  const where = m[3].trim().replace(/^WHERE\s+/i, '');
+  const value = (v) => (/^N?'/.test(v) ? v.replace(/^N?'(.*)'$/s, '$1').replace(/''/g, "'") : Number(v));
+  const conds = where
+    ? where.split(/\s+AND\s+/i).map((c) => {
+        const x = c.trim().match(/^(?:\w+\.)?\[?(\w+)\]?\s*(?:=\s*(N?'(?:[^']|'')*'|-?\d+)|IN\s*\(([^)]*)\))$/i);
+        const at = x ? t.columns.findIndex((col) => col.name.toLowerCase() === x[1].toLowerCase()) : -1;
+        return at < 0 ? null : { at, values: x[2] ? [value(x[2])] : x[3].split(',').map((v) => value(v.trim())) };
+      })
+    : [];
+  const rows = conds.includes(null) ? t.rows.slice(0, 1) : t.rows.filter((r) => conds.every((c) => c.values.some((v) => v === r[c.at] || String(v) === String(r[c.at]))));
+  return set(t.columns.map((c) => c.name), rows.slice(0, Number(m[1] ?? m[4] ?? rows.length)), t.columns.map((c) => c.type));
+}
+
+// What the demo session's open transaction holds (sys.dm_tran_locks, grouped): the locks a write
+// to the table it last wrote would take, and nothing with no transaction open.
+function lockSet(session) {
+  const t = session.wrote;
+  const rows = session.tran && t ? [[`${t.schema}.${t.name}`, 'KEY', 'X', 3], [`${t.schema}.${t.name}`, 'OBJECT', 'IX', 1], [`${t.schema}.${t.name}`, 'PAGE', 'IX', 1]] : [];
+  return set(['object_name', 'resource_type', 'request_mode', 'locks'], rows);
+}
+
 const sleep = (ms, signal) =>
   new Promise((resolve, reject) => {
     const t = setTimeout(resolve, ms);
@@ -657,6 +686,7 @@ async function runStatement(session, text, line, state, { signal, limit = 500, d
     const t = target(s);
     const all = m[1].toUpperCase() === 'TRUNCATE' || (/^(UPDATE|DELETE)$/i.test(m[1]) && !/\bWHERE\b/i.test(s));
     const n = all ? (t?.rows.length ?? 0) : m[1].toUpperCase() === 'INSERT' ? Math.max(1, (s.match(/\)\s*,\s*\(/g) ?? []).length + 1) : 1;
+    if (t) session.wrote = t;
     if (m[1].toUpperCase() !== 'TRUNCATE') state.messages.push(`${n} row${n === 1 ? '' : 's'} affected`);
     const verb = { INSERT: 'Insert', UPDATE: 'Update', DELETE: 'Delete', MERGE: 'Merge' }[m[1].toUpperCase()];
     if (session.profile && verb && t) state.sets.push(profileSet([{ text: s, rows: n, est: n, type: m[1].toUpperCase() }, { text: `  |--Clustered Index ${verb}(OBJECT:(${index(t)}))`, rows: n, est: n }]));
@@ -714,6 +744,8 @@ export function demoSession(conn, { database } = {}) {
           if (batch.startsWith('-- trawl:health ')) return void state.sets.push(...healthSets(session, batch.match(/^-- trawl:health (\w+)/)[1]));
           if (batch.startsWith('-- trawl:sizes')) return void state.sets.push(...sizeSets(session));
           if (batch.startsWith('-- trawl:deadlocks')) return void state.sets.push(...deadlockSets(session, batch));
+          if (batch.startsWith('-- trawl:snapshot')) return void state.sets.push(snapshotSet(DATABASES[session.database], batch));
+          if (batch.startsWith('-- trawl:locks')) return void state.sets.push(lockSet(session));
           if (batch.startsWith('-- trawl:definition')) {
             const name = batch.match(/OBJECT_ID\(N'(.*)'\)\)/)[1].replace(/''/g, "'");
             const db = DATABASES[session.database];

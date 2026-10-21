@@ -1,5 +1,6 @@
 // An in-memory stand-in for SQL Server, for `trawl --demo` and the tests. It has no SQL engine:
-// it knows the catalog queries (/grep's and /uses's too), SELECT [TOP (n)] … FROM a table, simple SELECT lists, USE,
+// it knows the catalog queries (/grep's, /uses's and /script-all's too), a Flyway history for
+// /migrations, SELECT [TOP (n)] … FROM a table, simple SELECT lists, USE,
 // transactions, WAITFOR DELAY (to try cancelling), RAISERROR/THROW, SHOWPLAN_TEXT and STATISTICS
 // PROFILE (made-up plans of a table scan), a few other sessions for the
 // Activity view (and KILL for them), SQL Agent jobs (and sp_start_job), the top queries, and counts
@@ -8,6 +9,7 @@ import { DbError, runScript } from './db.js';
 import { findObject } from './schema.js';
 import { mentions } from './references.js';
 import { splitStatements, withoutLeadingComments } from './sql.js';
+import { flywayChecksum } from './migrations.js';
 
 const col = (name, type, extra = {}) => ({ name, type, nullable: false, identity: false, pk: false, ...extra });
 const d = (s) => new Date(`${s}T00:00:00Z`);
@@ -75,11 +77,14 @@ function makeDatabase(club, { extraLanguage = true, drifted = false } = {}) {
     ],
     // [name, table, unique, columns], the indexes besides the primary keys.
     indexes: [['IX_Players_ClubId', 'Players', false, '[ClubId]'], ...(drifted ? [['IX_Matches_PlayedOn', 'Matches', false, '[PlayedOn] DESC']] : [])],
+    // [table, column, constraint, definition] and [table, constraint, definition], for /script-all.
+    defaults: [['Clubs', 'Active', 'DF_Clubs_Active', '((1))'], ['Players', 'Goals', 'DF_Players_Goals', '((0))']],
+    checks: [['Players', 'CK_Players_Goals', '([Goals]>=(0))']],
   };
 }
 
 // ClubB is one language short, so comparing the two shows a difference.
-const DATABASES = { master: { tables: [], triggers: [], foreignKeys: [], indexes: [] }, ClubA: makeDatabase('Club A'), ClubB: makeDatabase('Club B', { extraLanguage: false, drifted: true }) };
+const DATABASES = { master: { tables: [], triggers: [], foreignKeys: [], indexes: [], defaults: [], checks: [] }, ClubA: makeDatabase('Club A'), ClubB: makeDatabase('Club B', { extraLanguage: false, drifted: true }) };
 
 const set = (names, rows, types = []) => ({ columns: names.map((name, i) => ({ name, type: types[i] ?? '' })), rows, truncated: false });
 
@@ -110,6 +115,77 @@ function schemaSets(dbName) {
       db.tables.flatMap((t) => (t.params ?? []).map((p) => [t.schema, t.name, p.name, p.type, 0, 0, 0, false])),
     ),
   ];
+}
+
+// What /script-all reads besides the catalog (scriptall.js EXTRAS_SQL): defaults, checks, the
+// indexes with each table's primary key, identity seeds and computed columns (none).
+function scriptExtrasSets(dbName) {
+  const db = DATABASES[dbName];
+  const quoted = (cols) => cols.map((c) => `[${c}]`).join(', ');
+  const tables = db.tables.filter((t) => t.kind === 'table');
+  const keys = tables.filter((t) => t.columns.some((c) => c.pk)).map((t) => [t.schema, t.name, `PK_${t.name}`, true, false, true, 'CLUSTERED', null, quoted(t.columns.filter((c) => c.pk).map((c) => c.name)), null, null]);
+  const indexes = db.indexes.map(([name, table, unique, columns]) => ['dbo', table, name, unique, false, false, 'NONCLUSTERED', null, columns, null, null]);
+  return [
+    set(['schema', 'object', 'column', 'name', 'definition'], db.defaults.map(([table, column, name, def]) => ['dbo', table, column, name, def])),
+    set(['schema', 'object', 'name', 'definition'], db.checks.map(([table, name, def]) => ['dbo', table, name, def])),
+    set(['schema', 'object', 'name', 'is_unique', 'is_unique_constraint', 'is_primary_key', 'type_desc', 'filter_definition', 'columns', 'included', 'definition'], [...keys, ...indexes].sort((x, y) => `${x[0]}.${x[1]}.${x[2]}`.localeCompare(`${y[0]}.${y[1]}.${y[2]}`))),
+    set(['schema', 'object', 'column', 'seed', 'increment'], tables.flatMap((t) => t.columns.filter((c) => c.identity).map((c) => [t.schema, t.name, c.name, '1', '1']))),
+    set(['schema', 'object', 'column', 'definition', 'is_persisted'], []),
+  ];
+}
+
+// ClubA's migrations, as Flyway ran them: /migrations compares a folder with this history. A test
+// (or you) writes these files, changes one, adds a V3, and sees which is which.
+export const DEMO_MIGRATIONS = [
+  { script: 'V1__Create_clubs.sql', version: '1', description: 'Create clubs', text: 'CREATE TABLE dbo.Clubs (\n  Id int IDENTITY(1,1) PRIMARY KEY,\n  Name nvarchar(100) NOT NULL\n);\n' },
+  { script: 'V2__Add_players.sql', version: '2', description: 'Add players', text: 'CREATE TABLE dbo.Players (\n  Id int IDENTITY(1,1) PRIMARY KEY,\n  ClubId int NOT NULL REFERENCES dbo.Clubs (Id),\n  Name nvarchar(100) NOT NULL\n);\n' },
+];
+const FLYWAY_COLUMNS = ['installed_rank', 'version', 'description', 'type', 'script', 'checksum', 'installed_by', 'installed_on', 'execution_time', 'success'];
+
+// Each session's own history tables, so what a test records stays in its session.
+function demoHistory() {
+  const rows = DEMO_MIGRATIONS.map((m, i) => [i + 1, m.version, m.description, 'SQL', m.script, flywayChecksum(m.text), 'demo', d(`2026-01-1${i}`), 30 + i, true]);
+  return { ClubA: [{ schema: 'dbo', table: 'flyway_schema_history', columns: FLYWAY_COLUMNS, rows }], ClubB: [] };
+}
+
+// One value of an INSERT's VALUES list: a literal, NULL, or a function the demo makes up.
+function insertValue(text) {
+  const v = text.trim();
+  if (/^NULL$/i.test(v)) return null;
+  if (/^-?\d+(\.\d+)?$/.test(v)) return Number(v);
+  if (/^N?'(.*)'$/s.test(v)) return v.replace(/^N?'(.*)'$/s, '$1').replace(/''/g, "'");
+  if (/^(TRUE|FALSE)$/i.test(v)) return /^TRUE$/i.test(v);
+  if (/^(GETDATE|SYSDATETIME|NOW)\(\)$/i.test(v)) return new Date();
+  return 'demo';
+}
+
+// /migrations (migrations.js): the probe, reading a history, making Trawl's own, and recording a run.
+function migrationBatch(session, batch, state) {
+  const tables = (session.history[session.database] ??= []);
+  const find = (name) => tables.find((t) => `[${t.schema}].[${t.table}]`.toLowerCase() === name.toLowerCase());
+  if (batch.includes('-- trawl:migrations-probe')) return void state.sets.push(set(['schema', 'name'], tables.map((t) => [t.schema, t.table])));
+  if (batch.includes('-- trawl:migrations-history')) {
+    const name = batch.match(/FROM\s+(\[[^\]]+\]\.\[[^\]]+\])/i)?.[1] ?? '';
+    const t = find(name);
+    if (!t) throw new DbError(`Invalid object name '${name.replace(/[[\]]/g, '')}'.`, { number: 208 });
+    return void state.sets.push(set(t.columns, t.rows.map((r) => [...r])));
+  }
+  if (/^\s*BEGIN\s+TRAN/i.test(batch)) session.tran++;
+  if (batch.includes('-- trawl:migrations-create')) {
+    const [, schema, table] = batch.match(/CREATE TABLE \[([^\]]+)\]\.\[([^\]]+)\]/i);
+    if (!tables.some((t) => t.table === table)) tables.push({ schema, table, columns: ['script', 'checksum', 'applied_by', 'applied_on', 'execution_ms'], rows: [] });
+    return void state.messages.push('Commands completed successfully.');
+  }
+  const m = batch.match(/INSERT INTO\s+(\S+)\s*\(([^)]*)\)\s*VALUES\s*\(([\s\S]*)\);?\s*$/i);
+  const t = m && find(m[1]);
+  if (!t) throw new DbError(`Invalid object name '${(m?.[1] ?? '').replace(/[[\]]/g, '')}'.`, { number: 208 });
+  const cols = m[2].split(',').map((c) => c.trim().replace(/^\[|\]$/g, '').toLowerCase());
+  const values = splitList(m[3]).map(insertValue);
+  t.rows.push(t.columns.map((c) => {
+    const i = cols.indexOf(c.toLowerCase());
+    return i >= 0 ? values[i] : /^(installed_on|applied_on|applied)$/i.test(c) ? new Date() : c === 'installed_by' || c === 'applied_by' ? 'demo' : null;
+  }));
+  state.messages.push('1 row affected');
 }
 
 const TYPES = { table: 'U', view: 'V', procedure: 'P', function: 'FN', trigger: 'TR' };
@@ -434,6 +510,7 @@ export function demoSession(conn, { database } = {}) {
     spid: 52,
     others: fakeActivity(),
     jobs: fakeJobs(),
+    history: demoHistory(),
     run: (script, opts = {}) =>
       runScript(
         session,
@@ -446,6 +523,8 @@ export function demoSession(conn, { database } = {}) {
             return void state.sets.push(set(['schema', 'object', 'name', 'is_unique', 'type_desc', 'filter_definition', 'columns', 'included'], db.indexes.map(([name, table, unique, columns]) => ['dbo', table, name, unique, 'NONCLUSTERED', null, columns, null])));
           }
           if (batch.startsWith('-- trawl:activity')) return void state.sets.push(...activitySets(session));
+          if (batch.startsWith('-- trawl:script-extras')) return void state.sets.push(...scriptExtrasSets(session.database));
+          if (/-- trawl:migration/.test(batch)) return migrationBatch(session, batch, state);
           if (batch.startsWith('-- trawl:grep')) return void state.sets.push(grepSet(session.database, batch));
           if (batch.startsWith('-- trawl:uses')) return void state.sets.push(usesSet(session.database, batch));
           if (batch.startsWith('-- trawl:jobs-probe')) return void state.sets.push(set(['engine_edition', 'server_now'], [[session.conn.engineEdition ?? 3, new Date()]]));

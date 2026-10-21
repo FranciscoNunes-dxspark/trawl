@@ -152,13 +152,26 @@ const fullName = (o) => `${bracket(o.schema)}.${bracket(o.name)}`;
 /**
  * CREATE TABLE for a table, from what the catalog query read: columns, the primary key and the
  * foreign keys. Defaults, checks, indexes and an identity's seed aren't read, and the script says so.
- * `quote` and `identity` write it for another dialect (dialects.js).
+ * `quote` and `identity` write it for another dialect (dialects.js). `extras` (scriptall.js, which
+ * reads them) adds what the catalog query leaves out, and the comment goes: { defaults, computed,
+ * identity } (Maps by lower-case column name: { name, definition }, the text after the column's
+ * name, an IDENTITY(…) clause), `primaryKey` ({ name, columns, type }), `constraints` (lines of
+ * UNIQUE and CHECK) and `after` (statements after the foreign keys: the indexes).
  */
-export function createTableScript(o, schema, { quote = bracket, identity = 'IDENTITY(1,1)' } = {}) {
+export function createTableScript(o, schema, { quote = bracket, identity = 'IDENTITY(1,1)', extras = null } = {}) {
   const fullName = (x) => `${quote(x.schema)}.${quote(x.name)}`;
-  const cols = o.columns.map((c) => `  ${quote(c.name)} ${c.type}${c.identity ? ` ${identity}` : ''} ${c.nullable ? 'NULL' : 'NOT NULL'}`);
-  const pk = o.columns.filter((c) => c.pk).map((c) => quote(c.name));
-  if (pk.length) cols.push(`  PRIMARY KEY (${pk.join(', ')})`);
+  const cols = o.columns.map((c) => {
+    const k = c.name.toLowerCase();
+    const computed = extras?.computed?.get(k);
+    if (computed) return `  ${quote(c.name)} ${computed}`;
+    const d = extras?.defaults?.get(k);
+    const def = d ? ` ${d.name ? `CONSTRAINT ${quote(d.name)} ` : ''}DEFAULT ${d.definition}` : '';
+    return `  ${quote(c.name)} ${c.type}${c.identity ? ` ${extras?.identity?.get(k) ?? identity}` : ''} ${c.nullable ? 'NULL' : 'NOT NULL'}${def}`;
+  });
+  const key = extras?.primaryKey;
+  const pk = key?.columns ?? o.columns.filter((c) => c.pk).map((c) => quote(c.name)).join(', ');
+  if (pk) cols.push(`  ${key?.name ? `CONSTRAINT ${quote(key.name)} ` : ''}PRIMARY KEY ${key?.type ? `${key.type} ` : ''}(${pk})`);
+  cols.push(...(extras?.constraints ?? []).map((line) => `  ${line}`));
   const name = objectName(o);
   const fks = (schema?.foreignKeys ?? [])
     .filter((f) => f.from === name)
@@ -168,11 +181,12 @@ export function createTableScript(o, schema, { quote = bracket, identity = 'IDEN
       return `ALTER TABLE ${fullName(o)} ADD CONSTRAINT ${quote(f.name)}\n  FOREIGN KEY (${list(0)}) REFERENCES ${quote(toSchema)}.${quote(toName.join('.'))} (${list(1)});`;
     });
   return [
-    `-- ${name}: columns, primary key and foreign keys as Trawl read them (not defaults, checks or indexes).`,
+    ...(extras ? [] : [`-- ${name}: columns, primary key and foreign keys as Trawl read them (not defaults, checks or indexes).`]),
     `CREATE TABLE ${fullName(o)} (`,
     cols.join(',\n'),
     ');',
     ...fks,
+    ...(extras?.after ?? []),
   ].join('\n');
 }
 

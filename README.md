@@ -50,7 +50,7 @@ Releases are automatic: every push to main (a merged pull request, say) publishe
 trawl --demo
 ```
 
-This adds two in-memory connections for the session: `demo`, and `demo-prod`, which behaves like a production connection. Each has the databases `ClubA` and `ClubB`. The demo has no SQL engine. It answers the catalog (and `/grep` and `/uses`, with a trigger on `Players` for them to find), `SELECT [TOP (n)] * FROM` a table, simple `SELECT` lists, `USE`, transactions, made-up plans (estimated and actual), `WAITFOR DELAY` (to try cancelling) and `RAISERROR`/`THROW`. Writes only report how many rows they would touch.
+This adds two in-memory connections for the session: `demo`, and `demo-prod`, which behaves like a production connection. Each has the databases `ClubA` and `ClubB`. The demo has no SQL engine. It answers the catalog (and `/grep`, `/uses` and `/script-all`, with a trigger on `Players` for them to find), `SELECT [TOP (n)] * FROM` a table, simple `SELECT` lists, `USE`, transactions, made-up plans (estimated and actual), `WAITFOR DELAY` (to try cancelling) and `RAISERROR`/`THROW`. Writes only report how many rows they would touch. `ClubA` has a Flyway history for `/migrations` to compare with (`V1__Create_clubs.sql` and `V2__Add_players.sql`), and what a run records there stays until you disconnect.
 
 ## Connect
 
@@ -94,6 +94,7 @@ Most of Trawl works the same there: the Explorer, the console and its suggestion
 - `P` runs the statement through `EXPLAIN ANALYZE`, which sends back the plan but not the rows, so Results stays as it was. It always runs inside a transaction that is rolled back afterwards (or back to a savepoint, when you have one open, which then stays as it was), whatever the commit mode: an actual plan is for looking at, and it would be easy to forget that it changed data. To apply a write, run it (`ctrl+r`). A table that can't roll back (MySQL's MyISAM) keeps the change. MariaDB has `ANALYZE` instead, which Trawl doesn't use.
 - `/ask` writes T-SQL, and the suggestions and `/format` know T-SQL's keywords and functions, not every other one.
 - `/import datagrip` still leaves Postgres and MySQL data sources out.
+- `/script-all` writes MySQL's objects as `SHOW CREATE` gives them (tables included, without the `AUTO_INCREMENT=` counter), and Postgres's tables from the catalog, with the defaults, checks and indexes as the server words them.
 
 ### Folders
 
@@ -139,6 +140,7 @@ Press `?` inside for every shortcut: the sections down the left, opening on the 
 | Activity | `R` read again · `↵` the session in full · `x` kill · `a` idle sessions too · `J` SQL Agent jobs · `Q` top queries (the same key again, or `esc`, back to the sessions) |
 | Activity, jobs | `↵` recent runs · `s` start the job · `R` read again |
 | Activity, top queries | `o` sort by total duration, CPU, reads or executions · `↵` the query in full · `e` edit in the console · `R` read again |
+| Migrations (`/migrations <folder>`) | `R` run the pending ones (`/migrations run`) |
 | Settings (`,`) | `↵` or space changes the row limit, the accent colour, the mouse, whether Trawl checks for and installs updates, and whether it notifies when a long run ends · `esc` closes |
 
 One-liners can also go straight in the prompt: SQL there runs with `!`, or without it when it starts with a SQL keyword (`select …`, `exec …`).
@@ -213,6 +215,33 @@ When the rows on screen are one table's (as for editing, below, though the prima
 
 The script opens in a console tab of its own (`import`), to read through and then run with `R`. `/import-csv <file.csv> <table> --run` runs it straight away instead. Either way it goes through the usual checks: a read-only connection refuses it, and with manual commit it waits for `/commit`.
 
+### The schema in files
+
+`/script-all <folder>` writes every object of the database you're in to a file of its own, so the schema can live in git next to the code: `<folder>/<schema>/Tables/<name>.sql`, and `Views/`, `Procedures/`, `Functions/` and `Triggers/` beside it. A table's file is its `CREATE TABLE` with the primary key, unique constraints, defaults, checks, identity seeds and computed columns, then its foreign keys and indexes; the others are their definitions as the server keeps them. The files come out the same every time (the same order, LF line ends, a newline at the end, no dates in them), so scripting again rewrites only the files of objects that changed, and `git diff` shows what changed in the database. A file that differs only in its line ends (git's `autocrlf`) counts as the same.
+
+Files in that layout whose objects are gone (dropped, renamed) are listed, and removed only if you say so; anything else in the folder is left alone. An object whose definition the server won't give (encrypted, or no `VIEW DEFINITION`) is listed too, and its file kept as it was. Then the viewer says what was written (`+` new, `~` changed), what stayed the same and what was removed; `/last` shows it again. Columnstore and other special indexes are noted in the file, not written out.
+
+### Migrations
+
+`/migrations <folder>` compares a folder of migration scripts with the history table a migration tool keeps in the database, and lists each migration as applied, pending, changed (applied, but the file is different now) or missing (applied, with no file). It recognises the tool by its table:
+
+| Tool | History table | Scripts |
+| --- | --- | --- |
+| Flyway | `flyway_schema_history` | `V<version>__<description>.sql` in the folder or under it, in version order (`V1_2` is 1.2); `R__` repeatables run again when they change. Changed files are found by Flyway's own checksum (a CRC-32 of the lines), so line ends don't count. A failed migration and those at or below a baseline are shown as such; undo (`U`) scripts aren't run. |
+| EF Core | `__EFMigrationsHistory` | Listed only: EF Core's migrations are C# (`20240101120000_Initial.cs`), so Trawl shows which are applied by their ids (from the `.cs` files and from idempotent scripts) and runs none. `dotnet ef database update` applies them, or `dotnet ef migrations script --idempotent` writes a script to `/open` and run. |
+| DbUp | `SchemaVersions` | Any `.sql`, in name order, matched by name (an embedded script's resource name ends with the file's). DbUp keeps no checksums, so a changed script can't be told. |
+| Trawl's own | `trawl_migrations` | When the database has none of the others: any `.sql`, in name order, with Flyway's checksum. Trawl makes the table the first time you run them, after asking. |
+
+`R` on the list, or `/migrations run [folder]` (the last folder shown, without one), runs the pending ones in order. Each goes through the usual checks, as if you'd run it yourself: a read-only connection refuses it, risky statements ask first, and with manual commit they wait for `/commit`. After each, Trawl records it the way its tool would: Flyway's row (`installed_rank`, `version`, `description`, type `SQL`, `script`, `checksum`, `installed_by`, `execution_time`, `success`), DbUp's script name and time, or Trawl's own row. The first one that fails, or that you answer No to, stops the rest. When applied ones are changed or missing (which Flyway would refuse to go on with), the question says so first.
+
+### Test data
+
+`/generate <table> [rows] [--seed n]` writes made-up rows for a table (10 unless you say) as `INSERT` statements in a console tab of its own (`generate`), to read through and run with `R`; nothing runs by itself. Each value fits its column's type, length and nullability (a nullable column is sometimes `NULL`), and identity, computed and `rowversion` columns are left out. Names, emails, phone numbers, cities, countries (a `char(2)` gets a country code), dates, amounts, quantities and descriptions are guessed from the column's name. A foreign key takes key values the table it refers to already has (the first thousand, read in key order), and primary-key and unique columns get a different value in each row (unique among these rows: what the table already holds isn't checked). The same seed gives the same rows, so a test can rely on them; `--seed` picks another set.
+
+### Classes from tables
+
+`/scaffold <table> [csharp|ef|ts|python]` writes a table's or view's columns as code, shows it, and copies it to the clipboard: a C# class (the default) with nullable reference types, an EF Core entity (`[Table]`, `[Key]` or `[PrimaryKey]` for a key of several columns, `[Column]` with the column's type, `[MaxLength]`, identity and `[Timestamp]`, `[Keyless]` for a view), a TypeScript interface, or a Python dataclass (snake_case fields in the columns' order, `Optional` where they allow `NULL`). Types are mapped from what the server calls them, Postgres's and MySQL's included; the TypeScript types are what that server's Node driver hands back (a `bigint` comes as a string from SQL Server and Postgres, a `decimal` as a string from Postgres and MySQL).
+
 ### Editing results
 
 When the rows on screen are the rows of one table, with its primary key among the columns (`↵` on a table in the Explorer, or a `SELECT … FROM` one table with no join or grouping), you can change them in place, as in DataGrip:
@@ -247,9 +276,9 @@ The tab has two more lists, and its title says which one is on screen. The same 
 
 ### Slash commands
 
-Type `/` and the menu narrows as you type. `tab` completes, `↑`/`↓` picks, `↵` runs. `/connect` completes connection names, `/use` database names, `/describe` tables and views, and `/script` and `/uses` everything in the database.
+Type `/` and the menu narrows as you type. `tab` completes, `↑`/`↓` picks, `↵` runs. `/connect` completes connection names, `/use` database names, `/describe`, `/generate` and `/scaffold` tables and views, and `/script` and `/uses` everything in the database.
 
-`/import datagrip [folder]` `/import-csv <file.csv> <table> [--run]` `/connect <name>` `/add …` `/forget <name>` `/folder <connection> [folder]` `/password [connection]` `/disconnect` `/use <database>` `/open <file.sql>` `/snippet [name]` `/snippets` `/console` `/tab …` `/new` `/format` `/search <text>` `/save <file.sql>` `/describe <table>` `/script <name>` `/grep <text>` `/uses <object>` `/find [text]` `/export <file>` `/filter [text]` `/cell` `/follow` `/pin` `/compare` `/copy [tsv|csv|json|md|insert]` `/limit [rows]` `/writes` `/tx [auto|manual]` `/commit` `/rollback` `/ask <question>` `/explain` `/ai [connection] [level]` `/update` `/settings` `/stats [on|off]` `/plan [actual] [sql]` `/more` `/diff <connection> [database]` `/fanout <folder> [sql]` `/activity` `/jobs` `/top-queries` `/kill <session>` `/last` `/refresh` `/help` `/quit`
+`/import datagrip [folder]` `/import-csv <file.csv> <table> [--run]` `/connect <name>` `/add …` `/forget <name>` `/folder <connection> [folder]` `/password [connection]` `/disconnect` `/use <database>` `/open <file.sql>` `/snippet [name]` `/snippets` `/console` `/tab …` `/new` `/format` `/search <text>` `/save <file.sql>` `/describe <table>` `/script <name>` `/script-all <folder>` `/migrations [run] <folder>` `/generate <table> [rows] [--seed n]` `/scaffold <table> [csharp|ef|ts|python]` `/grep <text>` `/uses <object>` `/find [text]` `/export <file>` `/filter [text]` `/cell` `/follow` `/pin` `/compare` `/copy [tsv|csv|json|md|insert]` `/limit [rows]` `/writes` `/tx [auto|manual]` `/commit` `/rollback` `/ask <question>` `/explain` `/ai [connection] [level]` `/update` `/settings` `/stats [on|off]` `/plan [actual] [sql]` `/more` `/diff <connection> [database]` `/fanout <folder> [sql]` `/activity` `/jobs` `/top-queries` `/kill <session>` `/last` `/refresh` `/help` `/quit`
 
 ## Claude
 

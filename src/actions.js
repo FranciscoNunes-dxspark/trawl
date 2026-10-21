@@ -1,8 +1,8 @@
 // Every operation the UI offers, written once. Keys and slash commands both call these.
 // `ctx` is the app's handle: session, schema, query, confirm, note, prefill, and so on (see App.jsx).
-import { readFileSync, statSync } from 'node:fs';
+import { mkdirSync, readFileSync, readdirSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
-import { basename, extname, resolve } from 'node:path';
+import { basename, dirname, extname, join, resolve } from 'node:path';
 import { ADD_USAGE, cleanFolder, commitMode, describeConn, isReadOnly, parseAddArgs, splitArgs } from './connections.js';
 import { csvInsertScript, parseCsv } from './csv.js';
 import * as ed from './editor.js';
@@ -23,6 +23,10 @@ import { agentProbe, buildActivity, buildJobHistory, buildJobs, buildTopQueries,
 import { dialectOf, definitionSqlFor, qualifiedFor, selectTopFor } from './dialects.js';
 import { buildSchema, createTableScript, definitionSql, describeObject, findObject, objectName, rowsOf } from './schema.js';
 import { grepHits, usesReport, usesSummary, usesText } from './references.js';
+import { EXTRAS_SQL, KIND_DIRS, buildTableExtras, createKey, planFiles, scriptFiles, scriptedObjects, summaryLine, summaryText, uniqueColumns, withoutAutoIncrement } from './scriptall.js';
+import { TOOLS, createPlainSql, historySql, migrationStatus, nextRank, parseFlywayName, pickHistory, probeSql, recordSql, statusText } from './migrations.js';
+import { generateScript, refValuesSql } from './generate.js';
+import { LANGUAGE_NAMES, LANGUAGES, languageOf, scaffold } from './scaffold.js';
 import { applySqlcmd, bindVariables, classifyScript, countQuery, oneLine, scriptVariables, splitStatements, sqlcmdVariables, statementAt, toCsv, toJson, toMarkdown, withoutLeadingComments } from './sql.js';
 
 // A WHERE that still changes more rows than this is asked about too.
@@ -425,10 +429,11 @@ export function describe(ctx, text) {
   ctx.showText(objectName(obj), describeObject(obj, ctx.schema));
 }
 
-// A view's, procedure's, function's or trigger's own CREATE text, from the server, or null.
-async function readDefinition(session, obj, signal) {
+// A view's, procedure's, function's or trigger's own CREATE text, from the server, or null. `sql`
+// asks another way (MySQL's SHOW CREATE TABLE).
+async function readDefinition(session, obj, signal, sql) {
   const dialect = dialectOf(session);
-  const set = (await session.run(dialect.kind === 'sqlserver' ? definitionSql(obj) : definitionSqlFor(dialect, obj), { signal, limit: 1 })).sets[0];
+  const set = (await session.run(sql ?? (dialect.kind === 'sqlserver' ? definitionSql(obj) : definitionSqlFor(dialect, obj)), { signal, limit: 1 })).sets[0];
   // MySQL's SHOW CREATE answers with the name first and the text in a "Create …" column (a
   // trigger's in "SQL Original Statement").
   const at = Math.max(0, set?.columns.findIndex((c) => /^(create |sql original statement)/i.test(c.name)) ?? 0);
@@ -1413,4 +1418,343 @@ export async function exportResults(ctx, path) {
   } catch (e) {
     ctx.note(`Couldn't write ${full}: ${e.message}`, 'error');
   }
+}
+
+const firstLine = (s) => String(s ?? '').split('\n')[0];
+const plural = (n, what) => `${n.toLocaleString('en')} ${what}${n === 1 ? '' : 's'}`;
+const pathArg = (s) => String(s ?? '').trim().replace(/^"(.*)"$/, '$1');
+
+// Every file under `root` in /script-all's layout (<schema>/<Tables|Views|…>/<name>.sql), as a Map of
+// its path (with /) to its text.
+function readLayout(root) {
+  const out = new Map();
+  let schemas = [];
+  try {
+    schemas = readdirSync(root, { withFileTypes: true }).filter((d) => d.isDirectory());
+  } catch {
+    return out;
+  }
+  for (const s of schemas) {
+    for (const dir of Object.values(KIND_DIRS)) {
+      let files = [];
+      try {
+        files = readdirSync(join(root, s.name, dir), { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const f of files) if (f.isFile() && /\.sql$/i.test(f.name)) out.set(`${s.name}/${dir}/${f.name}`, readFileSync(join(root, s.name, dir, f.name), 'utf8'));
+    }
+  }
+  return out;
+}
+
+/**
+ * /script-all <folder>: every table, view, procedure, function and trigger of the database in a file
+ * of its own under the folder (<schema>/Tables/<name>.sql and so on), for keeping the schema in git.
+ * Only files whose text changed are written. Files in that layout whose objects are gone are listed,
+ * and removed only after asking.
+ */
+export async function scriptAll(ctx, rest) {
+  if (!needSession(ctx)) return;
+  const folder = pathArg(rest);
+  if (!folder) return ctx.prefill('/script-all ');
+  const root = resolve(folder);
+  const session = ctx.session;
+  const dialect = dialectOf(session);
+  let done = null;
+  const r = await ctx.task(
+    `script ${session.database} into ${root}`,
+    async (signal) => {
+      const read = async (sql) => (await session.run(sql, { signal, limit: 1_000_000 })).sets;
+      const schema = buildSchema(await read(dialect.schemaSql));
+      const modules = rowsOf((await read(dialect.grepSql('')))[0]);
+      let extras = null;
+      let creates = null;
+      let note = null;
+      if (dialect.kind === 'mysql') {
+        // MySQL writes its own CREATE for each object, tables included; the catalog only has bodies.
+        creates = new Map();
+        for (const o of scriptedObjects(schema, modules)) {
+          const sql = o.kind === 'table' ? `SHOW CREATE TABLE ${qualifiedFor(dialect, o.schema, o.name)};` : undefined;
+          const text = await readDefinition(session, o, signal, sql).catch((e) => (e.cancelled ? Promise.reject(e) : null));
+          if (text) creates.set(createKey(o.kind, o.schema, o.name), o.kind === 'table' ? withoutAutoIncrement(text) : text);
+        }
+      } else {
+        try {
+          extras = buildTableExtras(await read(EXTRAS_SQL[dialect.kind]));
+        } catch (e) {
+          if (e.cancelled) throw e;
+          note = `The defaults, checks and indexes couldn't be read (${firstLine(e.message)}), so the tables have their columns and keys only.`;
+        }
+      }
+      const { files, skipped } = scriptFiles({ schema, extras, modules, dialect, creates });
+      const plan = planFiles(files, readLayout(root), { keep: skipped.map((x) => x.path) });
+      for (const f of plan.written) {
+        const full = join(root, ...f.path.split('/'));
+        mkdirSync(dirname(full), { recursive: true });
+        writeFileSync(full, f.text, 'utf8');
+      }
+      done = { plan, skipped, note, database: session.database };
+      return [summaryLine(plan), ...(plan.stale.length ? [`${plural(plan.stale.length, 'file')} of objects that are gone: asking before removing them.`] : [])];
+    },
+    { label: `Scripting ${session.database}` },
+  );
+  if (!r.ok || !done) return;
+  const { plan } = done;
+  const removed = [];
+  let kept = [];
+  if (plan.stale.length) {
+    ctx.showText(`Files of objects no longer in ${done.database}`, plan.stale.map((p) => `  - ${p}`).join('\n'));
+    const ok = await ctx.confirm({
+      title: `Remove ${plural(plan.stale.length, 'file')} whose object${plan.stale.length === 1 ? ' is' : 's are'} gone from ${done.database}?`,
+      detail: `The list is above (pgup/pgdn scroll it): files in Trawl's layout under ${root} that no table, view, routine or trigger has now.`,
+      scrollsOverlay: true,
+      options: YES_NO('Yes, remove them'),
+    });
+    ctx.closeOverlay();
+    if (ok) {
+      for (const p of plan.stale) {
+        const full = join(root, ...p.split('/'));
+        try {
+          unlinkSync(full);
+          removed.push(p);
+        } catch (e) {
+          ctx.note(`Couldn't remove ${full}: ${firstLine(e.message)}`, 'error');
+          continue;
+        }
+        // A folder left empty goes too: the kind's, then the schema's.
+        for (const dir of [dirname(full), dirname(dirname(full))]) {
+          try {
+            rmdirSync(dir);
+          } catch {
+            break;
+          }
+        }
+      }
+    } else kept = plan.stale;
+  }
+  const title = `Script all: ${done.database} → ${root}`;
+  const text = summaryText(plan, { database: done.database, folder: root, removed, kept, skipped: done.skipped, note: done.note });
+  ctx.rememberOutput(title, text);
+  ctx.showText(title, text);
+  if (removed.length) ctx.note(`${summaryLine(plan, removed.length)} in ${root}.`, 'ok');
+}
+
+// The migration scripts under a folder (and EF Core's .cs migrations), with paths relative to it.
+function migrationFiles(root) {
+  const out = [];
+  const walk = (dir, rel) => {
+    for (const e of readdirSync(dir, { withFileTypes: true }).sort((x, y) => (x.name < y.name ? -1 : 1))) {
+      const path = rel ? `${rel}/${e.name}` : e.name;
+      if (e.isDirectory()) {
+        if (!/^(\.git|node_modules|bin|obj)$/i.test(e.name)) walk(join(dir, e.name), path);
+      } else if (/\.(sql|cs)$/i.test(e.name)) out.push({ path, text: readFileSync(join(dir, e.name), 'utf8').replace(/^﻿/, '') });
+    }
+  };
+  walk(root, '');
+  return out;
+}
+
+// The folder and the history it's compared with: { history, rows, columns, status, files, database }, or null.
+async function readMigrations(ctx, root) {
+  const session = ctx.session;
+  const dialect = dialectOf(session);
+  let files;
+  try {
+    if (!statSync(root).isDirectory()) throw Object.assign(new Error('not a folder'), { code: 'ENOTDIR' });
+    files = migrationFiles(root);
+  } catch (e) {
+    ctx.note(`${root}: ${e.code === 'ENOENT' ? 'no such folder' : e.code === 'ENOTDIR' ? 'not a folder' : firstLine(e.message)}`, 'error');
+    return null;
+  }
+  let out = null;
+  const r = await ctx.task(
+    `migrations in ${root}`,
+    async (signal) => {
+      const found = rowsOf((await session.run(probeSql(dialect.kind), { signal, limit: 100 })).sets[0]);
+      const history = pickHistory(found, { sqlserver: 'dbo', postgres: 'public' }[dialect.kind] ?? session.database);
+      let rows = [];
+      let columns = [];
+      if (!history.missing) {
+        const set = (await session.run(historySql(dialect, history), { signal, limit: 1_000_000 })).sets[0];
+        rows = rowsOf(set);
+        columns = set?.columns.map((c) => c.name) ?? [];
+      }
+      const status = migrationStatus({ tool: history.tool, files, rows });
+      if (history.missing && files.some((f) => parseFlywayName(f.path.split('/').at(-1))?.prefix === 'V')) {
+        status.notes.unshift(`These look like Flyway's, but ${session.database} has no flyway_schema_history, so Trawl keeps its own ${TOOLS.plain.table} for them; flyway baseline (or migrate) once makes Flyway's.`);
+      }
+      out = { history, rows, columns, status, files, database: session.database };
+      return [`${TOOLS[history.tool].label}: ${status.pending.length} pending of ${plural(files.length, 'file')}`];
+    },
+    { label: 'Reading the migrations', quiet: true },
+  );
+  return r.ok ? out : null;
+}
+
+function showMigrationStatus(ctx, root, m) {
+  const title = `Migrations: ${root}`;
+  const text = statusText(m.status, { database: m.database, folder: root, history: m.history, files: m.files.length });
+  ctx.rememberOutput(title, text);
+  const n = m.status.pending.length;
+  ctx.showText(title, text, m.status.runnable && n ? { keys: { R: () => runMigrations(ctx, root) }, hint: `R runs the ${n} pending (/migrations run)` } : {});
+}
+
+/**
+ * /migrations [run] <folder>: the folder's migration scripts against the database's history table
+ * (Flyway, EF Core, DbUp, or Trawl's own): what's applied, pending, changed or missing. R there, or
+ * /migrations run, runs the pending ones in order. With run and no folder, the last one shown.
+ */
+export async function migrations(ctx, rest) {
+  if (!needSession(ctx)) return;
+  const args = splitArgs(rest);
+  const run = args[0]?.toLowerCase() === 'run';
+  const folder = (run ? args.slice(1) : args).join(' ') || (run ? (ctx.migrationsFolder ?? '') : '');
+  if (!folder) return run ? ctx.note('Which folder? /migrations run <folder>, or /migrations <folder> to see it first.', 'error') : ctx.prefill('/migrations ');
+  const root = resolve(folder);
+  ctx.migrationsFolder = root;
+  if (run) return runMigrations(ctx, root);
+  const m = await readMigrations(ctx, root);
+  if (m) showMigrationStatus(ctx, root, m);
+}
+
+/**
+ * Runs the pending migrations in order, each through runSql's checks (read-only, the questions before
+ * risky statements, manual commit) and recorded in the history as its tool would, stopping at the
+ * first that fails or is refused. Trawl's own history table is made first, after asking.
+ */
+export async function runMigrations(ctx, root) {
+  if (!needSession(ctx)) return;
+  const m = await readMigrations(ctx, root);
+  if (!m) return;
+  const { status, history } = m;
+  if (!status.runnable) return ctx.note(status.notes.at(-1), 'error');
+  if (!status.pending.length) return ctx.note(`Nothing pending in ${root}: ${m.database} has them all.`);
+  const session = ctx.session;
+  const { conn } = session;
+  const dialect = dialectOf(session);
+  if (isReadOnly(conn) && !ctx.writesAllowed) return ctx.note(`${conn.name} is read-only${conn.prod ? ' (production)' : ''}, and migrations change it. /writes allows writes until you disconnect.`, 'error');
+  const n = status.pending.length;
+  const odd = status.entries.filter((e) => ['changed', 'missing', 'failed'].includes(e.status)).length;
+  const names = status.pending.map((e) => e.script);
+  const ok = await ctx.confirm({
+    title: `Run ${plural(n, 'pending migration')} on ${conn.name}${conn.prod ? ' (production)' : ''}?`,
+    detail: `${odd ? `${odd} applied ${odd === 1 ? 'one is' : 'ones are'} changed, missing or failed, which ${TOOLS[status.tool].label} would stop at. ` : ''}${names.slice(0, 6).join(', ')}${n > 6 ? ` and ${n - 6} more` : ''}, in order, each recorded in ${history.table}; the first that fails stops the rest.`,
+    options: YES_NO(`Yes, run ${n === 1 ? 'it' : 'them'}`),
+    danger: Boolean(conn.prod) || odd > 0,
+  });
+  if (!ok) return;
+  if (history.missing) {
+    const make = await ctx.confirm({
+      title: `Make ${TOOLS.plain.table} in ${m.database} to record them?`,
+      detail: `Trawl's own history table, in ${history.schema}: each script's name, its checksum, who ran it, when, and how long it took.`,
+      options: YES_NO('Yes, make it'),
+    });
+    if (!make) return;
+    const c = await runSql(ctx, createPlainSql(dialect, history.schema), { title: `create ${TOOLS.plain.table}`, keep: true });
+    if (!c?.ok) return;
+  }
+  let rank = nextRank(m.rows);
+  let ran = 0;
+  for (const [i, e] of status.pending.entries()) {
+    const r = await runSql(ctx, e.file.text, {
+      title: `migration ${e.script}`,
+      keep: true,
+      run: async (text, { wrap, title }) => {
+        const started = Date.now();
+        const q = await ctx.query(wrap ? `${dialect.begin}\n${text}` : text, { title, wrapped: wrap, keep: true });
+        if (!q.ok) return q;
+        return ctx.query(recordSql(dialect, history, e, { ms: Date.now() - started, rank, columns: m.columns }), { title: `record ${e.script} in ${history.table}`, keep: true });
+      },
+    });
+    if (!r?.ok) {
+      const left = n - i - 1;
+      ctx.note(`Stopped at ${e.script}${r ? '' : ', which didn’t run'}${left ? `: the ${plural(left, 'migration')} after it didn’t run` : ''}.`, 'error');
+      break;
+    }
+    rank++;
+    ran++;
+  }
+  if (!ran) return;
+  if (ctx.tranCount) ctx.note(`Ran ${plural(ran, 'migration')} in an open transaction (${conn.name} commits manually): /commit keeps them, /rollback undoes them.`);
+  else ctx.note(`Ran ${plural(ran, 'migration')}, each recorded in ${history.table}.`, 'ok');
+  const again = await readMigrations(ctx, root);
+  if (again) showMigrationStatus(ctx, root, again);
+}
+
+/**
+ * /generate <table> [rows] [--seed n]: rows of made-up test data for a table as INSERTs, in a console
+ * tab of its own (generate) to read and run; nothing runs by itself. Foreign keys take values the
+ * referenced tables have (the first thousand, read in key order), so the same seed gives the same rows.
+ */
+export async function generateData(ctx, rest) {
+  if (!needSession(ctx)) return;
+  const args = splitArgs(rest);
+  let seed = 1;
+  const at = args.findIndex((x) => x.toLowerCase() === '--seed');
+  if (at >= 0) {
+    const value = args[at + 1];
+    if (value == null) return ctx.note('--seed takes a number (or any word): /generate <table> <rows> --seed 42', 'error');
+    seed = /^\d+$/.test(value) ? Number(value) : value;
+    args.splice(at, 2);
+  }
+  const [name, many] = args;
+  if (!name) return ctx.prefill('/generate ');
+  const obj = findObject(ctx.schema, name);
+  if (!obj) return ctx.note(`No table called ${name} in ${ctx.session.database}.`, 'error');
+  if (obj.kind !== 'table') return ctx.note(`${objectName(obj)} is a ${obj.kind}; /generate writes INSERTs into a table.`, 'error');
+  const count = many == null ? 10 : Number(many);
+  if (!Number.isInteger(count) || count < 1 || count > 100_000) return ctx.note('How many rows: a whole number from 1 to 100000 (/generate <table> <rows>).', 'error');
+  const session = ctx.session;
+  const dialect = dialectOf(session);
+  const schema = ctx.schema;
+  let built = null;
+  const r = await ctx.task(
+    `generate ${plural(count, 'row')} for ${objectName(obj)}`,
+    async (signal) => {
+      let unique = [];
+      try {
+        unique = uniqueColumns(buildTableExtras((await session.run(EXTRAS_SQL[dialect.kind], { signal, limit: 1_000_000 })).sets), obj);
+      } catch (e) {
+        // Without the indexes, only the primary key is kept unique.
+        if (e.cancelled) throw e;
+      }
+      const refs = [];
+      for (const fk of schema.foreignKeys.filter((f) => f.from.toLowerCase() === objectName(obj).toLowerCase())) {
+        const set = (await session.run(refValuesSql(dialect, fk), { signal, limit: 1000 })).sets[0];
+        const at = fk.columns.map(([, to]) => set?.columns.findIndex((c) => c.name.toLowerCase() === to.toLowerCase()) ?? -1);
+        const rows = at.some((i) => i < 0) ? [] : set.rows.slice(0, 1000).map((row) => at.map((i) => row[i]));
+        refs.push({ ...fk, rows, capped: rows.length >= 1000 });
+      }
+      built = generateScript(obj, count, { seed, kind: dialect.kind, quote: dialect.quote, refs, unique });
+      return ['The INSERTs are in a console tab of their own (generate): read them, then R runs them.'];
+    },
+    { label: `Making ${plural(count, 'row')} for ${objectName(obj)}` },
+  );
+  if (!r.ok || !built) return;
+  ctx.addConsoleTab(freeName(ctx.consoleTabs.names.map((n) => ({ name: n })), 'generate'));
+  ctx.setConsole(ed.fromText(built.script));
+}
+
+/**
+ * /scaffold <table> [csharp|ef|ts|python]: the table's or view's columns as a C# class (the default),
+ * an EF Core entity, a TypeScript interface or a Python dataclass, shown and copied to the clipboard.
+ */
+export function scaffoldObject(ctx, rest) {
+  if (!needSession(ctx)) return;
+  const args = splitArgsLoose(rest);
+  if (!args.length) return ctx.prefill('/scaffold ');
+  let lang = 'csharp';
+  if (args.length > 1) {
+    lang = languageOf(args.at(-1));
+    if (!lang) return ctx.note(`/scaffold makes ${LANGUAGES.join(', ')} (C# by default), not ${args.at(-1)}.`, 'error');
+    args.pop();
+  }
+  const obj = findObject(ctx.schema, args.join(' '));
+  if (!obj || (obj.kind !== 'table' && obj.kind !== 'view')) return ctx.note(`No table or view called ${args.join(' ')} in ${ctx.session.database}.`, 'error');
+  const text = scaffold(obj, lang, { kind: dialectOf(ctx.session).kind });
+  const title = `${LANGUAGE_NAMES[lang]}: ${objectName(obj)}`;
+  ctx.rememberOutput(title, text);
+  ctx.showText(title, text);
+  return ctx.copy(text, `the ${LANGUAGE_NAMES[lang]} for ${objectName(obj)}`);
 }

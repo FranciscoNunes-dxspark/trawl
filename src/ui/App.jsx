@@ -955,6 +955,8 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     }
     // ctrl+r is the console's run key, not r for refresh; no other global key takes ctrl or alt.
     if (key.ctrl || key.meta) return;
+    // A .sql or .txt file dropped on the terminal (which types its path) opens in a console tab.
+    if (input.length > 1 && a.openDropped(ctx, input)) return;
     if (input === '/' || input === ':') return prefill('/');
     if (input === '!') return prefill('!');
     if (input === '?') return ctx.showHelp();

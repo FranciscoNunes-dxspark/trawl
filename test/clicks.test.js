@@ -282,6 +282,32 @@ test('in the console a click puts the cursor on the character under it, double a
   }
 });
 
+test("a click on a console tab's name in the title brings it up", async () => {
+  process.env.TRAWL_HOME = join(base, 'home-tabs');
+  const mouse = fakeMouse();
+  const app = start({ mouse });
+  try {
+    await until(() => frame().includes('Translations'), 'the explorer');
+    app.stdin.write('2');
+    await until(() => frame().includes('An empty console'), 'the console');
+    app.stdin.write('+');
+    await until(() => frame().includes('Console 1 console [2 query]'), 'a second tab');
+    // While typing too: the title isn't text.
+    let p = at('1 console');
+    mouse.click(p.x + 2, p.y);
+    await until(() => frame().includes('Console [1 console] 2 query'), 'the first tab');
+    p = at('2 query');
+    // The space between two tabs is neither.
+    mouse.click(p.x - 1, p.y);
+    await new Promise((r) => setTimeout(r, 100));
+    assert.match(frame(), /\[1 console\]/);
+    mouse.click(p.x, p.y);
+    await until(() => frame().includes('Console 1 console [2 query]'), 'the second tab again');
+  } finally {
+    app.unmount();
+  }
+});
+
 test('clicks under the console go to the results there, and clicking away from a cell keeps what was typed', async () => {
   // A home of its own, for an empty console.
   process.env.TRAWL_HOME = join(base, 'home-under');

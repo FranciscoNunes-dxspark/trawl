@@ -17,6 +17,8 @@ node scripts/logo.js                                           # regenerate asse
 node scripts/shared-check.js ../splice [--diff]                # drift in the files shared with a sibling app
 ```
 
+`patches/ink+6.8.0.patch` (applied by `patch-package` on `npm install`, so CI and the release builds get it too) keeps Ink's width and tokenize caches from one frame to the next rather than starting each frame empty, which about halves the cost of a keystroke. Upgrading Ink means checking `build/output.js` still has `OutputCaches` and remaking the patch (`npx patch-package ink`), or dropping it once Ink does this itself.
+
 `--import ./src/register.js` is required whenever Node loads `.jsx`: it installs a module hook (`src/jsx-hooks.js`) that compiles `.jsx` with esbuild on import. There is no dev build step. CI runs `npm test` on Linux and Windows, so path handling and line endings must work on both (`.gitattributes` forces LF).
 
 Releases are automatic, as in Tiller: every push to main (except Markdown-only ones) runs the Release workflow, which publishes the latest release's version with the patch raised, or `package.json`'s version when that's higher (bump it there for minor or major). It sets the version in the runner before building and commits nothing back, so `package.json` on main lags behind the releases. Compiled builds get the version via `process.env.TRAWL_VERSION` (defined by `scripts/build.js`), which also sets `COMPILED` (and defines `NODE_ENV` as production, for React's faster build); from a checkout `src/version.js` reads `package.json`, and the update check is skipped.

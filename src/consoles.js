@@ -2,6 +2,8 @@
 // beside the config. The first is console.sql, as when there was only one. Pure: App keeps their
 // text and undo history, config.js reads and writes the files.
 
+import { fileURLToPath } from 'node:url';
+
 export const FIRST_TAB = { name: 'console', file: 'console.sql' };
 
 /** The tabs as config.json lists them ({ name, file }), the first console.sql when there are none. */
@@ -46,4 +48,37 @@ export function findTab(tabs, which) {
   const w = String(which ?? '').trim();
   if (/^\d+$/.test(w)) return Number(w) >= 1 && Number(w) <= tabs.length ? Number(w) - 1 : -1;
   return tabs.findIndex((t) => t.name.toLowerCase() === w.toLowerCase());
+}
+
+/**
+ * The files in what a terminal types when files are dropped on it: absolute paths to .sql or .txt
+ * files, separated by spaces, quoted when they have spaces in them (or, outside Windows, with a \
+ * before each), or as file:// URLs. Null when `text` is anything else, which is then just typing.
+ */
+export function droppedPaths(text, { windows = process.platform === 'win32' } = {}) {
+  const s = String(text ?? '').trim();
+  if (!s || /[\r\n]/.test(s)) return null;
+  const token = windows ? /"([^"]*)"|'([^']*)'|(\S+)/g : /"([^"]*)"|'([^']*)'|((?:\\.|\S)+)/g;
+  const absolute = windows ? /^(?:[a-z]:[\\/]|\\\\)/i : /^\//;
+  const paths = [];
+  for (const [, double, single, bare] of s.matchAll(token)) {
+    let path = double ?? single ?? (windows ? bare : bare.replace(/\\(.)/g, '$1'));
+    if (/^file:\/\//i.test(path)) {
+      try {
+        path = fileURLToPath(path, { windows });
+      } catch {
+        return null;
+      }
+    }
+    if (!absolute.test(path) || !/\.(sql|txt)$/i.test(path)) return null;
+    paths.push(path);
+  }
+  return paths.length ? paths : null;
+}
+
+/** A tab name for a file: its name without the extension, as one word. */
+export function tabNameFor(path) {
+  const base = String(path).split(/[\\/]/).pop().replace(/\.[^.]*$/, '');
+  const name = base.replace(/[^\p{L}\p{N}_-]+/gu, '-').replace(/^-+|-+$/g, '').slice(0, 24);
+  return !name ? 'file' : /^\d+$/.test(name) ? `file-${name}` : name;
 }

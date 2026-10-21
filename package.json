@@ -14,7 +14,8 @@
     "demo": "node bin/trawl.js --demo",
     "test": "node --import ./src/register.js --test test/*.test.js",
     "build": "npx --yes bun@1.4.2 scripts/build.js",
-    "build:all": "npx --yes bun@1.4.2 scripts/build.js --all"
+    "build:all": "npx --yes bun@1.4.2 scripts/build.js --all",
+    "postinstall": "patch-package"
   },
   "license": "MIT",
   "dependencies": {
@@ -28,6 +29,7 @@
     "tedious": "^20.3.8"
   },
   "devDependencies": {
-    "ink-testing-library": "^4.0.0"
+    "ink-testing-library": "^4.0.0",
+    "patch-package": "^8.0.1"
   }
 }

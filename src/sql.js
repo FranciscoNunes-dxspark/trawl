@@ -7,6 +7,14 @@ const FILL = '\u0001';
 
 /** Masks comments (nested /* *\/ too), 'strings', "identifiers" and [identifiers] in `src`. */
 export function mask(src) {
+  // As splitStatements, the last answer is kept: highlighting, splitting and completing all mask the same text.
+  if (src !== lastMask.src) lastMask = { src, masked: maskText(src) };
+  return lastMask.masked;
+}
+
+let lastMask = { src: null, masked: '' };
+
+function maskText(src) {
   let out = '';
   let i = 0;
   const n = src.length;
@@ -115,8 +123,18 @@ function isModuleHeader(words) {
  * a `;`, a `GO` line or a blank line, except inside parentheses or a BEGIN/CASE … END block.
  * A procedure, function, trigger or view runs on to the next `GO`, as SQL Server requires.
  * Each is { text, line, endLine, label }, with `label` the statement's first line of code.
+ * The console asks this of the same text several times a keystroke (the gutter, the suggestions,
+ * the syntax line), so the last answer is kept; callers only read it.
  */
 export function splitStatements(text) {
+  if (text !== lastSplit.text) lastSplit = { text, statements: split(text) };
+  return lastSplit.statements;
+}
+
+let lastSplit = { text: null, statements: [] };
+const WORD_AFTER = /[\s\u0001]*(\w+)/y;
+
+function split(text) {
   const src = normalise(text);
   const m = mask(src);
   const lineOf = lineIndex(src);
@@ -126,7 +144,10 @@ export function splitStatements(text) {
   let blocks = [];
   let whole = false;
   let words = [];
-  const wordAfter = (pos) => m.slice(pos).match(/^[\s\u0001]*(\w+)/)?.[1].toUpperCase() ?? null;
+  const wordAfter = (pos) => {
+    WORD_AFTER.lastIndex = pos;
+    return WORD_AFTER.exec(m)?.[1].toUpperCase() ?? null;
+  };
 
   const flush = (end) => {
     const piece = m.slice(start, end);

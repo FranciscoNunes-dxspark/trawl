@@ -41,6 +41,7 @@ Query, the console (a SQL editor, kept between sessions)
   /new  /save <file.sql>   Clear it · Write it to a file
   [  ]  +          Console tabs: the one before · the one after · a new one (/tab new [name])
   /tab …           /tab <name or number> switch · /tab rename <name> · /tab close · /tab alone lists them
+                   click a tab's name in the title to go to it · drop a .sql or .txt file on Trawl to open it in a tab
   S                Save the statement under the cursor (or the selection) as a snippet (/snippet save <name>)
 
 Snippets and parameters

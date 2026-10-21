@@ -3,8 +3,8 @@ import { Box, Text, useInput } from 'ink';
 import * as a from '../actions.js';
 import { accept, completeAt, signatureAt } from '../complete.js';
 import * as ed from '../editor.js';
-import { highlight, oneLine, splitStatements, statementAt, withoutLeadingComments } from '../sql.js';
-import { fit, fitSegments } from '../text.js';
+import { highlight, mask, oneLine, splitStatements, statementAt, withoutLeadingComments } from '../sql.js';
+import { fit, fitSegments, stringWidth } from '../text.js';
 import { theme } from '../theme.js';
 import { useMouse } from './hooks.js';
 import { Panel, Row } from './parts.jsx';
@@ -29,6 +29,29 @@ function overlay(segs, x, add) {
     else out.push({ ...c });
   }
   return out;
+}
+
+/**
+ * The panel's title, "Console" or with the tabs after it ("Console 1 console [2 query]"), and the
+ * columns each tab's label covers ({ from, to }, counted from the panel's left edge, after "╭─ ").
+ */
+export function consoleTitle(tabs, tab) {
+  if (tabs.length < 2) return { title: 'Console', spans: [] };
+  let x = 3 + 'Console '.length;
+  const spans = [];
+  const labels = tabs.map((t, i) => {
+    const label = i === tab ? `[${i + 1} ${t}]` : `${i + 1} ${t}`;
+    spans.push({ from: x, to: x + stringWidth(label) });
+    x += stringWidth(label) + 1;
+    return label;
+  });
+  return { title: `Console ${labels.join(' ')}`, spans };
+}
+
+// Whether the cursor is inside a string, comment or quoted name, where a pasted path is text to keep.
+function inQuotes(editor) {
+  const before = [...editor.lines.slice(0, editor.row), editor.lines[editor.row].slice(0, editor.col)].join('\n');
+  return mask(`${before}x`).endsWith('\u0001');
 }
 
 /** The statement ctrl+r would run: the one the cursor is on, or the nearest above it. */
@@ -61,6 +84,7 @@ export function ConsoleView({ editor, tabs = ['console'], tab = 0, editing, ctx,
   const gutterW = String(editor.lines.length).length + 2;
   const textW = Math.max(10, width - 2 - gutterW);
   const colors = COLORS();
+  const { title, spans } = consoleTitle(tabs, tab);
 
   // Scrolled with the wheel, the text stays where it was put, the cursor out of sight if need be,
   // until a key changes the text, moves the cursor or starts or stops typing.
@@ -115,6 +139,7 @@ export function ConsoleView({ editor, tabs = ['console'], tab = 0, editing, ctx,
   // A click puts the cursor on the character under it, a double-click selects the word and a triple
   // the line; a click in the gutter selects the statement, and one on a suggestion takes it. A drag
   // selects the SQL it covers (and copies it), running on past the top or bottom as it scrolls.
+  // A click on a tab's name in the title brings that tab up.
   const popupRef = useRef(null);
   const dragFrom = useRef(null);
   const cellAt = (editor, x, y) => ed.clickAt(editor, top.current + y - 1, x - 1 - gutterW, { left: left.current });
@@ -138,7 +163,12 @@ export function ConsoleView({ editor, tabs = ['console'], tab = 0, editing, ctx,
         if (sel?.text) ctx.copySelection(sel.text);
         return;
       }
-      if (e.y < 1 || e.y > innerH) return;
+      if (e.y === 0) {
+        const i = spans.findIndex((s) => e.x >= s.from && e.x < s.to);
+        if (i >= 0 && i !== ctx.consoleTabs.index) ctx.showConsoleTab(i);
+        return;
+      }
+      if (e.y > innerH) return;
       const pop = popupRef.current;
       const k = e.y - 1 - (pop?.y ?? 0);
       if (pop?.items && k >= 0 && k < pop.items.length && e.x - 1 >= pop.x && e.x - 1 < pop.x + pop.w) {
@@ -231,6 +261,8 @@ export function ConsoleView({ editor, tabs = ['console'], tab = 0, editing, ctx,
       if (key.ctrl || key.meta || !input) return;
       const typed = input.replace(/[\x00-\x08\x0b-\x0c\x0e-\x1f\x7f]/g, '');
       if (!typed) return;
+      // A file dropped on the terminal arrives as its path: it opens in a tab, unless it went into a string.
+      if (typed.length > 1 && !inQuotes(editor) && a.openDropped(ctx, typed)) return;
       // One character of a word joins the undo step before it; a space, or a paste, starts one.
       ctx.setConsole(ed.insert(editor, typed), { merge: typed.length === 1 && typed !== ' ' });
       if (WORD_CHAR.test(typed)) setMenu({ index: 0 });
@@ -359,7 +391,7 @@ export function ConsoleView({ editor, tabs = ['console'], tab = 0, editing, ctx,
       ? 'typing · ctrl+n suggest · ctrl+r run · ctrl+z undo · esc stop'
       : `${editor.lines.length} lines · ↵ type · ctrl+r run · R run all · f format · p plan · ctrl+f find`;
   return (
-    <Panel title={tabs.length > 1 ? `Console ${tabs.map((t, i) => (i === tab ? `[${i + 1} ${t}]` : `${i + 1} ${t}`)).join(' ')}` : 'Console'} hint={hint} width={width} height={height} focused={active}>
+    <Panel title={title} hint={hint} width={width} height={height} focused={active}>
       {empty && !editing ? (
         <Box flexDirection="column">
           <Row pointer={false} width={width - 2} segments={[{ text: '  An empty console. Press i (or ↵) and type some SQL; ctrl+r runs the statement under the cursor.', color: theme.dim }]} />

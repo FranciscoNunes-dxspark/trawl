@@ -205,6 +205,32 @@ test('console tabs: + opens one, [ and ] switch, each keeps its own text and fil
   app.unmount();
 });
 
+test('a .sql or .txt file dropped on the terminal opens in a console tab named after it, but not into a string', async () => {
+  const dir = join(base, 'dropped folder');
+  mkdirSync(dir, { recursive: true });
+  const report = join(dir, 'top scorers.sql');
+  writeFileSync(report, '﻿SELECT TOP 3 Name\r\nFROM dbo.Players;\r\n');
+  const notes = join(dir, 'notes.txt');
+  writeFileSync(notes, Buffer.from('﻿SELECT 42 AS answer', 'utf16le'));
+  const app = start();
+  await until(() => frame().includes('Clubs'), 'the explorer');
+  // Dropped anywhere outside a text field, as the terminal types it: quoted, for the space.
+  app.stdin.write(`"${report}"`);
+  await until(() => frame().includes('[2 top-scorers]') && frame().includes('FROM dbo.Players;'), 'the file in a tab of its own');
+  assert.match(frame(), /SELECT TOP 3 Name/);
+  app.stdin.write('i');
+  await until(() => frame().includes('typing SQL'), 'typing');
+  // While typing too; SSMS's UTF-16 files read as text.
+  app.stdin.write(`"${notes}"`);
+  await until(() => frame().includes('[3 notes]') && frame().includes('SELECT 42 AS answer'), 'the second file');
+  // Into a string, a path is text.
+  await type(app.stdin, "'");
+  app.stdin.write(`"${notes}"`);
+  await until(() => frame().includes('notes.txt'), 'the path typed into the string');
+  assert.doesNotMatch(frame(), /notes-2|\[4 /);
+  app.unmount();
+});
+
 test('/import-csv opens the INSERTs in a console tab of their own, and --run goes through the usual checks', async () => {
   const csv = join(base, 'players.csv');
   writeFileSync(csv, 'ClubId;Name;Goals\r\n1;"Nova, Ana";3\r\n2;Rui;0\r\n');

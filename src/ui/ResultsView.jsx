@@ -85,7 +85,8 @@ export function ResultsView({ results, changes, setIndex, view, ctx, width, heig
   const isNew = (row) => Boolean(set) && row >= set.rows.length;
   // Under the grid: unsaved changes first, then the error and the server's messages.
   const notes = (results?.messages ?? []).map((text) => ({ text, color: theme.dim }));
-  if (results?.error) notes.unshift({ text: results.error, color: theme.del });
+  // An error of several lines (Postgres's DETAIL and HINT, SQL Server's messages) is a note per line.
+  if (results?.error) notes.unshift(...String(results.error).split('\n').map((text) => ({ text, color: theme.del })));
   // Cut off at the row limit: say so, and how to fetch more when the query can run again.
   if (cutOff(results, setIndex)) {
     const step = ctx.config.limit;

@@ -8,6 +8,8 @@ import { osc52 } from './selection.js';
 function run(file, args, input) {
   return new Promise((resolve, reject) => {
     const child = execFile(file, args, { windowsHide: true, timeout: 10_000 }, (err) => (err ? reject(err) : resolve()));
+    // A program that isn't there fails through the callback; writing to it mustn't throw as well.
+    child.stdin.on('error', () => {});
     child.stdin.end(input);
   });
 }

@@ -1,6 +1,6 @@
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 // Read per call so tests can point TRAWL_HOME somewhere temporary.
 export const configDir = () => process.env.TRAWL_HOME || join(homedir(), '.trawl');
@@ -34,23 +34,33 @@ export function withRan(config, entry) {
   return { ...config, ran: [entry, ...config.ran].slice(0, 500) };
 }
 
-// The Query console's text lives beside the config, so it is there again next time.
-const consolePath = () => join(configDir(), 'console.sql');
+// The Query console's text lives beside the config, so it is there again next time: console.sql for
+// the first tab, consoles/<name>.sql for the others (consoles.js).
+const consolePath = (file = 'console.sql') => join(configDir(), file);
 
-export function loadConsole() {
+export function loadConsole(file) {
   try {
-    return readFileSync(consolePath(), 'utf8');
+    return readFileSync(consolePath(file), 'utf8');
   } catch {
     return '';
   }
 }
 
-export function saveConsole(text) {
+export function saveConsole(text, file) {
   try {
-    mkdirSync(configDir(), { recursive: true });
-    writeFileSync(consolePath(), text);
+    mkdirSync(dirname(consolePath(file)), { recursive: true });
+    writeFileSync(consolePath(file), text);
   } catch {
     // As with the config: not being able to keep it shouldn't stop anything.
+  }
+}
+
+/** Deletes a closed tab's file. */
+export function removeConsole(file) {
+  try {
+    if (file !== 'console.sql') rmSync(consolePath(file), { force: true });
+  } catch {
+    // Left behind, it does no harm.
   }
 }
 

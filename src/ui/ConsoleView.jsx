@@ -51,7 +51,7 @@ export function runConsole(ctx, editor, { all = false } = {}) {
  * The Query tab without a file: a SQL editor. ↵ or i starts typing and esc stops, so the
  * number keys and q mean text while typing and views or quit otherwise.
  */
-export function ConsoleView({ editor, editing, ctx, width, height, active }) {
+export function ConsoleView({ editor, tabs = ['console'], tab = 0, editing, ctx, width, height, active }) {
   const top = useRef(0);
   const left = useRef(0);
   const text = ed.toText(editor);
@@ -98,6 +98,11 @@ export function ConsoleView({ editor, editing, ctx, width, height, active }) {
     if (key.ctrl && input === 'f') return ctx.prefill('/search ');
     if (input === 'f') return a.formatConsole(ctx);
     if (input === 'p') return a.showPlan(ctx);
+    // The tabs: the one before, the one after, a new one.
+    if ((input === '[' || input === ']') && tabs.length > 1) return ctx.showConsoleTab((ctx.consoleTabs.index + (input === '[' ? tabs.length - 1 : 1)) % tabs.length);
+    if (input === '+') return a.consoleTab(ctx, 'new');
+    // After every handler has had the S, or the prompt would take it as its first letter.
+    if (input === 'S') return queueMicrotask(() => ctx.prefill('/snippet save '));
     if (input === 'n' || input === 'N') return a.searchConsole(ctx, '', { back: input === 'N' });
     if (key.downArrow || input === 'j') return set(ed.move(editor, { rows: 1 }));
     if (key.upArrow || input === 'k') return set(ed.move(editor, { rows: -1 }));
@@ -354,7 +359,7 @@ export function ConsoleView({ editor, editing, ctx, width, height, active }) {
       ? 'typing · ctrl+n suggest · ctrl+r run · ctrl+z undo · esc stop'
       : `${editor.lines.length} lines · ↵ type · ctrl+r run · R run all · f format · p plan · ctrl+f find`;
   return (
-    <Panel title="Console" hint={hint} width={width} height={height} focused={active}>
+    <Panel title={tabs.length > 1 ? `Console ${tabs.map((t, i) => (i === tab ? `[${i + 1} ${t}]` : `${i + 1} ${t}`)).join(' ')}` : 'Console'} hint={hint} width={width} height={height} focused={active}>
       {empty && !editing ? (
         <Box flexDirection="column">
           <Row pointer={false} width={width - 2} segments={[{ text: '  An empty console. Press i (or ↵) and type some SQL; ctrl+r runs the statement under the cursor.', color: theme.dim }]} />

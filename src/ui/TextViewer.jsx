@@ -6,9 +6,10 @@ import { Panel, Row } from './parts.jsx';
 
 /**
  * Full-height scrollable text: /describe, a record, the last output, help. `pageOnly`: a question
- * below has the other keys, so only page up/down scroll this.
+ * below has the other keys, so only page up/down scroll this. `keys` maps a letter to an action of
+ * this text's own, which `hint` names.
  */
-export function TextViewer({ title, text, loading, ctx, width, height, active, pageOnly = false, onClose }) {
+export function TextViewer({ title, text, loading, keys, hint, ctx, width, height, active, pageOnly = false, onClose }) {
   const lines = useMemo(() => (text ?? '').replace(/\n$/, '').split('\n'), [text]);
   const [offset, setOffset] = useState(0);
   const innerH = height - 2;
@@ -19,6 +20,11 @@ export function TextViewer({ title, text, loading, ctx, width, height, active, p
     (input, key) => {
       if (pageOnly && !key.pageDown && !key.pageUp) return;
       if (key.escape || input === 'q') return onClose();
+      // Keys of the viewer's own (a for Claude on a plan): it closes first, and the action runs once this key is handled.
+      if (keys?.[input]) {
+        onClose();
+        return queueMicrotask(keys[input]);
+      }
       if (key.downArrow || input === 'j') to(offset + 1);
       else if (key.upArrow || input === 'k') to(offset - 1);
       else if (key.pageDown || input === ' ' || (key.ctrl && input === 'd')) to(offset + innerH - 1);
@@ -32,7 +38,7 @@ export function TextViewer({ title, text, loading, ctx, width, height, active, p
 
   const pos = lines.length > innerH ? `${Math.min(lines.length, offset + innerH)}/${lines.length}` : '';
   return (
-    <Panel title={title} hint={`${pos}${pos ? ' · ' : ''}esc close`} width={width} height={height} focused={active}>
+    <Panel title={title} hint={`${pos}${pos ? ' · ' : ''}${hint ? `${hint} · ` : ''}esc close`} width={width} height={height} focused={active}>
       {loading ? (
         <Row pointer={false} width={width - 2} segments={[{ text: 'Loading…', color: theme.dim }]} />
       ) : (

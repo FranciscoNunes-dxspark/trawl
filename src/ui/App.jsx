@@ -4,20 +4,23 @@ import { readFileSync, statSync, unwatchFile, watchFile } from 'node:fs';
 import { basename, resolve } from 'node:path';
 import * as a from '../actions.js';
 import { findCommand, suggestionsFor } from '../commands.js';
-import { loadClaudeHistory, loadConsole, saveConfig, saveConsole, withRan } from '../config.js';
+import { loadClaudeHistory, loadConsole, removeConsole, saveConfig, saveConsole, withRan } from '../config.js';
+import { freeFile, tabsOf } from '../consoles.js';
 import * as ed from '../editor.js';
 import { commitMode, describeConn, isReadOnly } from '../connections.js';
 import { copyToClipboard } from '../clipboard.js';
 import { osCredentials } from '../credentials.js';
 import { connect as openSession } from '../db.js';
-import { changesText, editTarget } from '../edit.js';
+import { changesText, editTarget, readTarget } from '../edit.js';
 import { HELP } from '../help.js';
-import { SCHEMA_SQL, buildSchema } from '../schema.js';
+import { buildSchema } from '../schema.js';
+import { dialectOf, qualifiedFor } from '../dialects.js';
 import { qualified, splitStatements, statisticsSummary } from '../sql.js';
 import { BULLET, theme } from '../theme.js';
 import { fitSegments, stringWidth } from '../text.js';
 import { useTerminalSize } from './hooks.js';
 import { Confirm, Panel, PromptBox, Row, SecretPrompt, Spinner, Suggestions, confirmHeight } from './parts.jsx';
+import { ActivityView } from './ActivityView.jsx';
 import { ConnectionsView } from './ConnectionsView.jsx';
 import { SettingsView } from './SettingsView.jsx';
 import { ConsoleView } from './ConsoleView.jsx';
@@ -26,11 +29,13 @@ import { HistoryView } from './HistoryView.jsx';
 import { QueryView } from './QueryView.jsx';
 import { ResultsView } from './ResultsView.jsx';
 import { TextViewer } from './TextViewer.jsx';
+import { Picker } from './Picker.jsx';
 import { WELCOME_HEIGHT, Welcome } from './Glim.jsx';
 import { FACES, moodFor } from '../glim.js';
 import { checksDisabled, isDue, isNewer, openUrl, updateAdvice } from '../update.js';
 import { askClaude as askClaudeCli } from '../ai.js';
 import { COMPILED, VERSION } from '../version.js';
+import { worthNotifying } from '../notify.js';
 
 const VIEWS = [
   { id: 'explorer', label: 'Explorer' },
@@ -38,14 +43,16 @@ const VIEWS = [
   { id: 'results', label: 'Results' },
   { id: 'history', label: 'History' },
   { id: 'connections', label: 'Connections' },
+  { id: 'activity', label: 'Activity' },
 ];
 
 const HINTS = {
   explorer: '↵ first rows · d describe · s query it in the console · c CREATE script · /find filter',
   query: '↵ run statement · v select several · R run file · e edit in the console · /console',
-  results: 'h/l columns · o sort · f filter · ↵ record · y/Y copy · e edit · n NULL · d delete · s save · x export',
+  results: 'h/l columns · o sort · f filter · ↵ record · y/Y copy · F follow key · p pin · c compare · e edit · n NULL · d delete · s save · x export',
   history: '↵ run again · e edit in the console · ◆ ran by Claude',
   connections: '↵ connect · n new · p password · f folder · x forget',
+  activity: 'R read again · ↵ full SQL · x kill · a idle sessions too',
 };
 
 // Typed at the prompt without "!", these still run as SQL.
@@ -151,8 +158,10 @@ const DOUBLE_CLICK_MS = 400;
  * files by default). `credentials` keeps passwords (the OS store by default) and `open` starts
  * a session (db.js); the tests pass their own. `setTitle(text)` names the terminal window. `mouse` is
  * mouse.js's terminalMouse() from cli.jsx (missing where the terminal can't report it); tests pass their own.
+ * `notify(title, body)` says a long run has finished (cli.jsx rings the terminal's bell and raises a
+ * notification); without it, as in most tests, nothing is said.
  */
-export function App({ config: initialConfig, initialFile, initialConnection, checkLatest, installUpdate, askClaude = askClaudeCli, findDataSources, credentials = osCredentials, open = openSession, clipboard = copyToClipboard, setTitle, mouse }) {
+export function App({ config: initialConfig, initialFile, initialConnection, checkLatest, installUpdate, askClaude = askClaudeCli, findDataSources, credentials = osCredentials, open = openSession, clipboard = copyToClipboard, setTitle, mouse, notify }) {
   const { exit } = useApp();
   const { columns, rows } = useTerminalSize();
   const [config, setConfigState] = useState(initialConfig);
@@ -161,6 +170,9 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
   const [tranCount, setTranCountState] = useState(0);
   const [writesAllowed, setWritesAllowedState] = useState(false);
   const [results, setResults] = useState(null);
+  // The Activity view's sessions ({ me, sessions, at, conn, error }), read when it opens and on R.
+  const [activity, setActivityState] = useState(null);
+  const activityRef = useRef(null);
   const [changes, setChangesState] = useState(NO_CHANGES);
   const [resultIndex, setResultIndexState] = useState(0);
   const [file, setFile] = useState(null);
@@ -176,7 +188,13 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
   const [filter, setFilter] = useState('');
   const [welcome, setWelcome] = useState(true);
   const [update, setUpdate] = useState(null);
-  const [editor, setEditorState] = useState(() => ed.fromText(loadConsole()));
+  // The console's tabs, { name, file, editor, history }: the one on screen lives in editorRef and
+  // historyRef below, and goes back into its entry when another tab comes up.
+  const tabsRef = useRef(null);
+  if (!tabsRef.current) tabsRef.current = tabsOf(initialConfig).map((t) => ({ ...t, editor: null, history: ed.newHistory() }));
+  const [tabIndex, setTabIndexState] = useState(() => Math.max(0, Math.min(tabsRef.current.length - 1, Number(initialConfig.consoleTab) || 0)));
+  const tabIndexRef = useRef(tabIndex);
+  const [editor, setEditorState] = useState(() => ed.fromText(loadConsole(tabsRef.current[tabIndexRef.current].file)));
   const [queryMode, setQueryMode] = useState(initialFile ? 'file' : 'console');
   // How Results shows the set on screen: sorted on a column ({ col, dir }) and narrowed by /filter.
   const [resultView, setResultView] = useState({ sort: null, filter: '' });
@@ -229,6 +247,10 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     sessionRef.current = s;
     setSessionState(s);
   };
+  const setActivity = (a) => {
+    activityRef.current = a;
+    setActivityState(a);
+  };
   const setSchemaBoth = (s) => {
     schemaRef.current = s;
     setSchema(s);
@@ -269,7 +291,32 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     editorRef.current = next;
     setEditorState(next);
     clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(() => saveConsole(ed.toText(next)), 400);
+    const { file } = tabsRef.current[tabIndexRef.current];
+    saveTimer.current = setTimeout(() => saveConsole(ed.toText(next), file), 400);
+  };
+  // Writes the tab on screen now, rather than when typing stops.
+  const flushConsole = () => {
+    clearTimeout(saveTimer.current);
+    saveConsole(ed.toText(editorRef.current), tabsRef.current[tabIndexRef.current].file);
+  };
+  // The tabs' names and files, and which is open, are kept in the config.
+  const keepTabs = () => setConfig((c) => ({ ...c, consoleTabs: tabsRef.current.map(({ name, file }) => ({ name, file })), consoleTab: tabIndexRef.current }));
+  // Brings tab `i` up in the console. `drop` leaves the one on screen out (it was just closed).
+  const showTab = (i, { drop = false } = {}) => {
+    if (!drop) {
+      flushConsole();
+      Object.assign(tabsRef.current[tabIndexRef.current], { editor: editorRef.current, history: historyRef.current });
+    } else clearTimeout(saveTimer.current);
+    const tab = tabsRef.current[i];
+    tab.editor ??= ed.fromText(loadConsole(tab.file));
+    tabIndexRef.current = i;
+    setTabIndexState(i);
+    historyRef.current = tab.history;
+    editorRef.current = tab.editor;
+    setEditorState(tab.editor);
+    keepTabs();
+    setQueryMode('console');
+    setView('query');
   };
   const stepConsole = (step, nothing) => {
     const r = step(historyRef.current, editorRef.current);
@@ -315,16 +362,20 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     setBusy(b);
     const id = quiet ? null : addEntry({ title, status: 'running' });
     if (!quiet && !title.startsWith('connect ')) setWelcome(false);
+    // A long run that ends says so, for when you've looked away (Settings' "Notify when done").
+    const tell = (lines) => !quiet && notify && worthNotifying(Date.now() - b.started, configRef.current) && notify(`Trawl: ${title}`, lines[0] ?? '');
     try {
       const lines = await start(controller.signal);
       lastOutput.current = { title, text: lines.join('\n') || 'Done' };
       if (id) updateEntry(id, { status: 'ok', lines: lines.length ? lines : ['Done'] });
+      tell(lines.length ? lines : ['Done']);
       return { ok: true };
     } catch (error) {
       const lines = error.cancelled ? ['Cancelled'] : error.message.split('\n');
       lastOutput.current = { title, text: lines.join('\n') };
       if (id) updateEntry(id, { status: 'error', lines });
       else addEntry({ title, status: 'error', lines });
+      if (!error.cancelled) tell(lines);
       return { ok: false, error };
     } finally {
       busyRef.current = null;
@@ -333,7 +384,7 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
   };
 
   const loadSchema = async (s, signal) => {
-    const res = await s.run(SCHEMA_SQL, { signal, limit: 1_000_000 });
+    const res = await s.run(dialectOf(s).schemaSql, { signal, limit: 1_000_000 });
     const next = buildSchema(res.sets);
     if (sessionRef.current === s) setSchemaBoth(next);
     return next;
@@ -349,6 +400,7 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     setSchemaBoth(null);
     setTranCount(0);
     setWritesAllowed(false);
+    setActivity(null);
   };
 
   // A login with no password to hand (or a turned-down one) asks for it, then tries again. A
@@ -437,8 +489,13 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     if (res && !keep) {
       // Whether, and where, the rows can be edited and saved back (edit.js).
       const sc = schemaRef.current;
-      const edit = res.error ? { reason: 'the statement failed' } : sc?.database !== s.database ? { reason: 'the schema is still loading' } : editTarget(sql, res.sets, sc);
-      const shown = { id: nextId.current++, title, sql, ...res, error: res.error?.message ?? null, edit, conn: s.conn.name, database: s.database };
+      const why = res.error ? { reason: 'the statement failed' } : sc?.database !== s.database ? { reason: 'the schema is still loading' } : null;
+      // Saving edits writes T-SQL; following keys works everywhere.
+      const native = dialectOf(s).kind === 'sqlserver';
+      const edit = why ?? (native ? editTarget(sql, res.sets, sc) : { reason: `saving edits is for SQL Server only, and this is ${dialectOf(s).label}` });
+      // Which table the rows are, for following a foreign key from a cell (F).
+      const source = why ?? (edit.table ? { table: edit.table, columns: edit.columns } : readTarget(sql, res.sets, sc));
+      const shown = { id: nextId.current++, title, sql, ...res, error: res.error?.message ?? null, edit, source, conn: s.conn.name, database: s.database };
       showResults(shown);
       setResultIndex(0);
       if (res.sets.length && !stay) setView('results');
@@ -460,9 +517,11 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
       confirmRef.current = full;
       setConfirmReq(full);
     });
+  // The answer's key reaches App's own dispatcher after the Confirm's: the question stays in the ref
+  // until then, or a digit answering it would also switch views.
   const onConfirm = (value) => {
     const req = confirmRef.current;
-    confirmRef.current = null;
+    queueMicrotask(() => confirmRef.current === req && (confirmRef.current = null));
     setConfirmReq(null);
     req?.done(value);
   };
@@ -587,8 +646,7 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
 
   const quit = async () => {
     if (!(await a.leaveSession(ctx))) return;
-    clearTimeout(saveTimer.current);
-    saveConsole(ed.toText(editorRef.current));
+    flushConsole();
     dropSession();
     exit();
   };
@@ -618,9 +676,16 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
       get results() {
         return resultsRef.current;
       },
+      // The console's tabs: { names, index }.
+      get consoleTabs() {
+        return { names: tabsRef.current.map((t) => t.name), index: tabIndexRef.current };
+      },
       // Edits staged in Results, not yet saved.
       get changes() {
         return changesRef.current;
+      },
+      get activity() {
+        return activityRef.current;
       },
       // What useMouse registers: the component on screen takes the main area's clicks and wheel.
       mouseHandlers: [],
@@ -637,6 +702,7 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
       note(`Disconnected from ${name}.`);
     },
     setConfig,
+    setActivity,
     setWritesAllowed,
     setResultIndex,
     // o in Results: by this column, A to Z, then Z to A, then as the server sent them.
@@ -648,10 +714,22 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
       setView('results');
     },
     currentSet: () => resultsRef.current?.sets[resultIndexRef.current] ?? null,
+    // A session of its own on another connection (fan-out, schema diff); the caller closes it.
+    openSession: (conn, opts = {}) => open(conn, { credentials, password: typed.current.get(conn.name), ...opts }),
+    // Results that didn't come from running SQL on this session: fan-out's merged rows, a comparison.
+    present: (res) => {
+      showResults({ id: nextId.current++, error: null, messages: [], ...res });
+      setResultIndex(0);
+      setView('results');
+    },
+    // A line in History for SQL that ran somewhere other than this session.
+    recordRun: (entry) => setConfig((c) => withRan(c, entry)),
     note,
     confirm,
     // A password field in place of the prompt: resolves { value, remember } or null.
     askSecret: (req) => confirm({ ...req, secret: true, options: [] }),
+    // A line of text in the same place, shown as typed: resolves the text, or null on esc.
+    askText: async (req) => (await confirm({ ...req, secret: true, plain: true, options: [] }))?.value ?? null,
     credentials,
     // Whether this terminal can report the mouse at all (Settings says so).
     mouseAvailable: Boolean(mouse),
@@ -690,6 +768,27 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     editorHasKeys: () => focusRef.current === 'editor' && !overlayRef.current && !confirmRef.current,
     setConsole,
     undoConsole: () => stepConsole(ed.undo, 'Nothing to undo.'),
+    showConsoleTab: (i) => showTab(i),
+    // A new, empty tab after the others, on screen.
+    addConsoleTab: (name) => {
+      const tabs = tabsRef.current;
+      const file = freeFile(tabs, name);
+      saveConsole('', file);
+      tabs.push({ name, file, editor: ed.fromText(''), history: ed.newHistory() });
+      showTab(tabs.length - 1);
+    },
+    // Closes the tab on screen, and its file goes; the one before it comes up.
+    closeConsoleTab: () => {
+      const tabs = tabsRef.current;
+      const i = tabIndexRef.current;
+      const [gone] = tabs.splice(i, 1);
+      removeConsole(gone.file);
+      showTab(Math.max(0, i - 1), { drop: true });
+    },
+    renameConsoleTab: (name) => {
+      tabsRef.current[tabIndexRef.current].name = name;
+      keepTabs();
+    },
     redoConsole: () => stepConsole(ed.redo, 'Nothing to redo.'),
     // Stopping waits until this key has been handled everywhere, so the esc (or ctrl+c) that
     // ends typing isn't also taken as a global key: clear the log, or quit.
@@ -716,12 +815,18 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
       setView('query');
       setFocus('editor');
     },
-    startQuery: (obj) => ctx.editInConsole(`SELECT TOP (100) *\nFROM ${qualified(obj.schema, obj.name)}\nWHERE `, { atEnd: true }),
+    startQuery: (obj) => {
+      const d = dialectOf(sessionRef.current);
+      if (d.kind !== 'sqlserver') return ctx.editInConsole(`SELECT *\nFROM ${qualifiedFor(d, obj.schema, obj.name)}\nWHERE \nLIMIT 100`, { atEnd: true });
+      return ctx.editInConsole(`SELECT TOP (100) *\nFROM ${qualified(obj.schema, obj.name)}\nWHERE `, { atEnd: true });
+    },
     quit,
     checkUpdates,
     askClaude,
     findDataSources,
-    showText: (title, text) => setOverlay({ title, text }),
+    showText: (title, text, extra = {}) => setOverlay({ title, text, ...extra }),
+    // A list to pick from (Picker.jsx): { title, hint, items, keys, empty }.
+    showPicker: (picker) => setOverlay({ picker }),
     closeOverlay: () => setOverlay(null),
     rememberOutput: (title, text) => (lastOutput.current = { title, text }),
     showHelp: () => setOverlay({ title: 'Keyboard shortcuts', text: HELP }),
@@ -791,14 +896,14 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     if (view !== 'results' && focusRef.current === 'cell') setFocus('view');
   }, [view, queryMode]);
 
-  const lists = { config, schema };
+  const lists = { config, schema, conn: session?.conn.name, tabs: tabsRef.current.map((t) => t.name) };
   const suggestions = focus === 'prompt' && !confirmReq ? suggestionsFor(prompt.value, lists) : [];
   const sel = Math.min(sugIndex, Math.max(0, suggestions.length - 1));
 
   // Line editing in the prompt.
   const promptKeys = (input, key) => {
     const { value, cursor } = promptRef.current;
-    const items = suggestionsFor(value, { config: configRef.current, schema: schemaRef.current });
+    const items = suggestionsFor(value, { config: configRef.current, schema: schemaRef.current, conn: sessionRef.current?.conn.name, tabs: tabsRef.current.map((t) => t.name) });
     const pick = items[Math.min(sugIndex, items.length - 1)];
     const edit = (v, c) => {
       setPrompt(v, c);
@@ -980,6 +1085,8 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     // Over whichever view is open; ↵ on the row limit hands over to the prompt, and the overlay stays.
     const settingsActive = focus === 'view' && !confirmReq;
     main = <SettingsView config={config} ctx={ctx} updates={{ check: Boolean(checkLatest), install: Boolean(installUpdate) }} update={update} width={W} height={mainH} active={settingsActive} onClose={closeOnKey} />;
+  } else if (overlay?.picker) {
+    main = <Picker {...overlay.picker} ctx={ctx} width={W} height={mainH} active={focus === 'view' && !confirmReq} onClose={closeOnKey} />;
   } else if (overlay) {
     main = <TextViewer {...overlay} ctx={ctx} width={W} height={mainH} active={focus === 'view' && (!confirmReq || confirmReq.scrollsOverlay)} pageOnly={Boolean(confirmReq)} onClose={closeOnKey} />;
   } else if (view === 'connections') {
@@ -990,7 +1097,7 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     const editing = focus === 'editor';
     main = (
       <Box flexDirection="column" width={W} height={mainH}>
-        <ConsoleView editor={editor} editing={editing} ctx={ctx} width={W} height={mainH - under} active={(viewActive || editing) && !overlay && !confirmReq} />
+        <ConsoleView editor={editor} tabs={tabsRef.current.map((t) => t.name)} tab={tabIndex} editing={editing} ctx={ctx} width={W} height={mainH - under} active={(viewActive || editing) && !overlay && !confirmReq} />
         {under ? <ResultsView results={results} changes={changes} setIndex={resultIndex} view={resultView} ctx={ctx} width={W} height={under} top={mainH - under} active={false} /> : null}
       </Box>
     );
@@ -998,6 +1105,8 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     main = <QueryView file={file} ctx={ctx} width={W} height={mainH} active={viewActive} />;
   } else if (view === 'results') {
     main = <ResultsView results={results} changes={changes} setIndex={resultIndex} view={resultView} ctx={ctx} width={W} height={mainH} active={viewActive || (focus === 'cell' && !confirmReq)} />;
+  } else if (view === 'activity') {
+    main = <ActivityView activity={activity} session={session} ctx={ctx} width={W} height={mainH} active={viewActive} />;
   } else if (view === 'history') {
     // Claude's queries come from trawl mcp's log, read each time the tab draws (it's small).
     const ran = [...config.ran, ...loadClaudeHistory()].sort((x, y) => y.at - x.at);
@@ -1014,6 +1123,8 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
 
   const left = flash
     ? flash.text
+    : confirmReq?.plain
+    ? 'type the value · ↵ done · esc cancel'
     : confirmReq?.secret
     ? 'type the password (shown as *) · ↵ done · esc cancel'
     : focus === 'prompt'
@@ -1024,6 +1135,8 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
           ? 'editing the cell · ↵ keep it (s saves) · tab next column · esc leave it as it was · ctrl+u clear'
           : overlay?.settings
           ? 'j/k move · ↵ or space change it · esc close'
+          : overlay?.picker
+          ? `j/k move · ${overlay.picker.hint} · esc close`
           : overlay
           ? 'j/k scroll · space page · esc close'
           : view === 'query' && queryMode === 'console'

@@ -6,7 +6,7 @@ A keyboard-driven SQL Server client for the terminal, built the same way as [Til
 
 ```
 ><((•> Trawl  │  club-a  myserver.database.windows.net/ClubA   PROD   read-only
- 1 Explorer   2 Query   3 Results   4 History   5 Connections
+ 1 Explorer   2 Query   3 Results   4 History   5 Connections   6 Activity
 ╭─ SELECT TOP (500) * FROM [dbo].[Matches]; ─────────────────────────────── 8 rows · 6 ms ─╮
 │    Id │ HomeId │ AwayId │ PlayedOn   │ HomeGoals │ AwayGoals                             │
 │  ─────┼────────┼────────┼────────────┼───────────┼──────────                             │
@@ -69,16 +69,45 @@ Save connections with `/add`:
 | A SQL login | `/add local localhost,1433 Dev --user sa --trust-cert` |
 | Windows (NTLM) | `/add corp sqlhost\SQLEXPRESS Dev --user me --domain CORP` |
 | In a folder | `/add club-b srv.database.windows.net ClubB --folder Clubs/PROD` |
+| PostgreSQL | `/add shop db.local:5432 shop --kind postgres --user app` |
+| MySQL or MariaDB | `/add blog db.local:3306 blog --kind mysql --user app --ssl` |
 
 `--trust-cert` trusts the server's certificate without checking it, as SSMS's "Trust server certificate" does. A local SQL Server signs its own, which Trawl can't verify otherwise. If you leave it off and connecting fails on the certificate, Trawl asks whether to trust it, and keeps that on the connection.
 
 Azure SQL gets a fresh token from the Azure CLI each time it connects, so there's no password to keep. A SQL or Windows login asks for its password the first time you connect, shown as `*`. With "Keep it" ticked (`tab` changes it), a password that signs in is saved in the operating system's credential store: **Windows Credential Manager** (as `Trawl:<connection>`), the macOS Keychain, or the Secret Service keyring on Linux (through `secret-tool`). It is never written to Trawl's own files. A saved password the server turns down is asked for again. `p` in Connections, or `/password [connection]`, sets a new one ahead of time; leaving it empty removes the saved one, and forgetting a connection removes its password too. If you'd rather keep a password in an environment variable, `/add … --password-env <VAR>` names it, and the variable comes first when it's set.
 
-Connections live in `~/.trawl/config.json` (or `TRAWL_HOME`), along with the prompt history, the run history and what Settings (`,`) changes: the row limit, the accent colour, the mouse and updates.
+Connections live in `~/.trawl/config.json` (or `TRAWL_HOME`), along with the prompt history, the run history and what Settings (`,`) changes: the row limit, the accent colour, the mouse, updates and notifications.
+
+When a query (or anything else with the spinner) takes longer than 10 seconds, Trawl rings the terminal's bell and asks it for a desktop notification saying what finished and how (OSC 9, which Windows Terminal, iTerm2, WezTerm and kitty show, or OSC 777 in GNOME Terminal and other VTE terminals), for when you've switched to another window. **Notify when done** in Settings turns it off, and `"notifyAfter": 30` in `config.json` changes the seconds. A run you cancel says nothing.
+
+### PostgreSQL and MySQL
+
+Besides SQL Server, a connection can be to PostgreSQL or MySQL (MariaDB too): `/add … --kind postgres` or `--kind mysql`, with the server as `host` or `host:port` (5432 and 3306 by default) and a login (`--user`), whose password is asked for and kept as for a SQL login. TLS is off unless you add `--ssl`, or `--trust-cert` to use it without checking the server's certificate. Trawl talks to them through the `pg` and `mysql2` drivers, plain JavaScript in the same executable.
+
+Most of Trawl works the same there: the Explorer, the console and its suggestions, scripts, Results with sorting, filters, copying, comparing and following foreign keys, History, the read-only and production rules, manual commit (`BEGIN`/`START TRANSACTION`, then `/commit` or `/rollback`), the questions before risky statements and the row count before an `UPDATE` or `DELETE`, parameters and snippets, `/fanout` (a folder can mix kinds), CSV import, Activity and `/kill` (`pg_terminate_backend` on Postgres), `p` for the plan (`EXPLAIN`, which doesn't run anything) and Claude's explanation of it, `c` for a view's or routine's definition, and `trawl mcp`. The differences:
+
+- A script runs a statement at a time, split at `;` (Postgres's `$$` bodies and MySQL's backslash escapes are understood); there is no `GO`, and MySQL's `DELIMITER` isn't supported.
+- Rows past the row limit are dropped once they arrive, rather than the query being stopped there, so a huge `SELECT` still crosses the network: add a `LIMIT`.
+- Editing results in place is SQL Server only (the save script is T-SQL); `e` says so. So are `/stats` and the sync script of `/diff`, which compares tables, columns and keys only (not indexes or definitions) when either side isn't SQL Server.
+- Activity on MySQL doesn't show who blocks whom.
+- `/ask` writes T-SQL, and the suggestions and `/format` know T-SQL's keywords and functions, not every other one.
+- `/import datagrip` still leaves Postgres and MySQL data sources out.
 
 ### Folders
 
 The Connections tab groups connections by folder, as DataGrip does: each folder's heading, its connections under it, and the ones in no folder last. `--folder` puts a connection in one when adding it, and `f` in Connections or `/folder <connection> <folder>` moves it; `/folder <connection>` with no folder takes it out. Nested folders are written with `/`, like `Clubs/PROD`.
+
+### Comparing schemas
+
+`/diff <connection> [database]` compares the schema of the database you're in with another one's: a saved connection's (its own database, or the one named), or `/diff <database>` for another database on this server. It reads both catalogs and lists what differs, by kind: tables, and inside the tables both have, columns (type, nullability, identity), the primary key, foreign keys and indexes; then views, procedures and functions, by their definitions, with the lines that differ. `<` marks what only this database has, `>` what only the other has, and `~` what both have, differently.
+
+Then it asks whether to put the script that would make **this** database match the other in the console: `CREATE TABLE` for a missing table (with its keys), `ALTER TABLE … ADD`/`ALTER COLUMN` for columns, constraints and indexes, and the other side's definitions for views, procedures and functions (`CREATE OR ALTER` where they differ, a batch each). Dropping a table or a column loses its data, so those lines come commented out, to uncomment on purpose; so does what can't change in place, like an identity or a primary key. Nothing runs until you do, and then the usual checks apply. For the other direction, connect to the other database and `/diff` back. The demo's `ClubB` has drifted a little from `ClubA`, so `/diff ClubB` shows it.
+
+### One query on a folder of databases
+
+`/fanout <folder> <sql>` runs one query on every connection in a folder (and in the folders under it), as when the same schema lives in a database per client: `/fanout Clubs SELECT COUNT(*) AS Players FROM dbo.Players`. Without the SQL, it runs the console's selection, or the statement under its cursor. Each connection gets a session of its own, four at a time, and the rows come back as one result set in Results, each led by a `connection` and a `database` column; columns are matched by name, so a database missing one shows `NULL` there. A connection that fails (a missing table, no saved password) says why under the grid, and the others carry on. `esc` stops them all.
+
+It only reads: anything that would change data or schema is refused, and what runs is rolled back afterwards, as `trawl mcp` does. Each connection's run is in History. A login that has never connected has no saved password yet: connect to it once in Trawl first.
 
 ### From DataGrip
 
@@ -97,15 +126,16 @@ Press `?` inside for every shortcut. The essentials:
 
 | Where | Keys |
 | --- | --- |
-| Anywhere | `1`–`5` or `tab` switch views · `/` commands · `!` SQL · `r` reload the schema · `,` settings · `esc` cancel the running query · `q` quit |
+| Anywhere | `1`–`6` or `tab` switch views · `/` commands · `!` SQL · `r` reload the schema · `,` settings · `esc` cancel the running query · `q` quit |
 | Lists | `j`/`k` or arrows · `g`/`G` top/bottom · `ctrl+d`/`ctrl+u` page |
 | Explorer | `↵` first rows (on a database: switch to it) · `d` describe · `s` start a query on it in the console · `c` its CREATE script, into the console · `/find <text>` filter |
-| Query, the console | `↵` or `i` start typing · `esc` stop · `ctrl+r` run the selection, or the statement under the cursor · `R` run it all · `f` format · `p` plan · `ctrl+f` find, then `n`/`N` · `ctrl+z`/`ctrl+y` undo/redo · while typing, `tab` takes a suggestion and `ctrl+n` asks for them |
+| Query, the console | `↵` or `i` start typing · `esc` stop · `ctrl+r` run the selection, or the statement under the cursor · `R` run it all · `f` format · `p` plan (then `a`: Claude explains it) · `S` save as a snippet · `[`/`]` previous/next tab · `+` new tab · `ctrl+f` find, then `n`/`N` · `ctrl+z`/`ctrl+y` undo/redo · while typing, `tab` takes a suggestion and `ctrl+n` asks for them |
 | Query, a file | `↵` run the statement under the cursor · `v` select several · `R` run the whole file · `e` edit in the console |
-| Results | `h`/`l` columns · `[`/`]` result sets · `o` sort by the column · `f` filter · `y`/`Y` copy the cell/row · `↵` the row as a record · `e` edit · `n` NULL · `d` delete · `u` undo · `s` save · `x` export |
+| Results | `h`/`l` columns · `[`/`]` result sets · `o` sort by the column · `f` filter · `y`/`Y` copy the cell/row · `↵` the row as a record · `F` follow the foreign key · `p` pin · `c` compare with the pinned · `e` edit · `n` NULL · `d` delete · `u` undo · `s` save · `x` export |
 | History | `↵` run again · `e` edit in the console · `◆` marks what Claude ran |
 | Connections | `↵` connect · `n` new · `p` password · `f` folder · `x` forget |
-| Settings (`,`) | `↵` or space changes the row limit, the accent colour, the mouse, and whether Trawl checks for and installs updates · `esc` closes |
+| Activity | `R` read again · `↵` the session in full · `x` kill · `a` idle sessions too |
+| Settings (`,`) | `↵` or space changes the row limit, the accent colour, the mouse, whether Trawl checks for and installs updates, and whether it notifies when a long run ends · `esc` closes |
 
 One-liners can also go straight in the prompt: SQL there runs with `!`, or without it when it starts with a SQL keyword (`select …`, `exec …`).
 
@@ -115,7 +145,9 @@ The mouse works too: click a tab, a row or the prompt, and double-click a row to
 
 The Query tab starts as a console: a SQL editor inside Trawl, with keywords, strings, comments and numbers in colour. Press `↵` or `i` to start typing and `esc` to stop. While you type, every key is text, so the digits and `q` don't switch views or quit. `ctrl+r` runs the statement under the cursor (the gutter marks which one), and its results appear under the console, so you can keep typing. `R` runs everything, and `3` shows the results full size.
 
-The console is saved as you type (in `~/.trawl/console.sql`) and is there again next time. `/save <file.sql>` writes it to a file, and `/new` clears it. `s` on a table in the Explorer starts a `SELECT … WHERE` for it, and `e` in History or on a file's statement copies that SQL into the console to edit.
+The console is saved as you type (in `~/.trawl/console.sql`) and is there again next time. `/save <file.sql>` writes it to a file, and `/new` clears it.
+
+The console can have several tabs, all on the same connection (so a temp table or an open transaction is shared, as between SSMS's batches in one window): `+` (when not typing) or `/tab new [name]` opens one, `[` and `]` go to the one before or after, `/tab <name>` or `/tab <number>` goes to one, `/tab rename <name>` renames the one on screen, and `/tab close` closes it (asking first if it has text). The panel's title lists them, the one on screen in brackets. Each tab keeps its own text, in a file of its own (the first in `console.sql`, the others under `~/.trawl/consoles/`), and its own undo history; they're all there again next time, on the tab you left. `s` on a table in the Explorer starts a `SELECT … WHERE` for it, and `e` in History or on a file's statement copies that SQL into the console to edit.
 
 Editing keys: arrows, `home`/`end` (or `ctrl+a`/`ctrl+e`), `ctrl+←`/`ctrl+→` a word at a time, `ctrl+w` deletes the word before the cursor, `ctrl+u`/`ctrl+k` cut to the start or end of the line, `tab` inserts two spaces, and a new line keeps the indent of the one above. Pasting works, multi-line text included. Holding `shift` with any of the movement keys selects text: typing or `backspace` replaces it, `ctrl+r` runs just the selection (the gutter marks its lines), and `esc` lets go of it. `ctrl+f` (or `/search <text>`) finds text in the console, ignoring case, and selects it; `n` and `N` then find the next and previous match, wrapping round the end.
 
@@ -124,6 +156,14 @@ Editing keys: arrows, `home`/`end` (or `ctrl+a`/`ctrl+e`), `ctrl+←`/`ctrl+→`
 `p` (when not typing) or `/plan` shows the estimated plan of the statement under the cursor, or the selection, as text (`SET SHOWPLAN_TEXT`): nothing runs, so it's safe on a write too. `/stats` turns on `SET STATISTICS IO` and `TIME` for the session (the header says `stats on`), and each run then ends with one line, such as `Logical reads: Players 3, Clubs 2 · CPU 16 ms · elapsed 20 ms`, in place of the server's long messages; `/stats off` stops it. `ctrl+z` undoes, a word at a time, and `ctrl+y` redoes; they work while typing or not, and cover everything that changes the console (`/new`, `/ask`, `s` in the Explorer, `e` in History) until you quit.
 
 As you type, a list under the cursor suggests what could come next, from the schema of the database you're in, as SSMS's IntelliSense does: tables and views after `FROM`, `JOIN`, `UPDATE` or `INTO` (schema-qualified, so `Pla` becomes `dbo.Players`), a table's columns after its alias or name and a dot (`p.` in `… FROM dbo.Players p`), the join condition after `ON`, from the foreign keys between the table just joined and those before it (`JOIN dbo.Clubs c ON` offers `c.Id = p.ClubId`), the columns of the statement's tables, keywords and functions anywhere else, procedures after `EXEC` and then their parameters (`@Season = `), and databases after `USE`. You don't have to ask: the list opens as you type a name or a dot, and straight after `FROM `, `JOIN `, `ON `, `EXEC ` and `USE `, where it's clear what comes next. Inside a function's parentheses, the line above shows its syntax with the argument you're on picked out (`DATEADD(datepart, number, date)`), and among a procedure's arguments, its parameters and their types from the schema. With the cursor just after the `*` of `SELECT *` (or `p.*`), `tab` writes out the columns in its place, qualified with their alias when the statement reads more than one table. `tab` takes the highlighted one; `↑`/`↓` pick another, and then `↵` takes it too (otherwise `↵` is still a new line). `esc` closes the list without leaving the console, and `ctrl+n` brings it up where nothing has been typed yet (`ctrl+space` does too, in terminals that send it: the Windows console sends a plain space). Nothing is suggested inside comments or strings, and `/refresh` reloads the schema the suggestions come from.
+
+### Snippets and parameters
+
+A query you run often can be kept as a snippet: `S` in the console (or `/snippet save <name>`) saves the selection, or the statement under the cursor, under a name, for the connection you're on (saved while not connected, it's for every connection). `/snippets` lists the ones for this connection: `↵` runs one, `e` puts it in the console, `x` forgets it. `/snippet <name>` runs one straight away, and `/snippet delete <name>` forgets it. They're kept in `config.json`.
+
+SQL can have parameters, as in DataGrip: a variable it uses without declaring it, like `@id` in `SELECT * FROM dbo.Players WHERE Id = @id`, is asked for before it runs (snippets, the console, files, the prompt). Type a number, `NULL`, or text, which Trawl quotes for you (`N'…'`); type the quotes yourself to give a literal as it is (`'2026-01-01'`). Each `@name` is replaced by the value, and the value is offered again next time until you quit. A variable `DECLARE`d in the same batch isn't a parameter, and neither are `@@ROWCOUNT` and the like, the argument names in `EXEC dbo.p @Season = 2024`, or the parameters of a `CREATE PROCEDURE` or `FUNCTION`. `esc` at a question cancels the run.
+
+sqlcmd variables work too, as in SSMS's SQLCMD mode: `:setvar Env "prod"` gives `$(Env)` its value, and a `$(name)` with no `:setvar` is asked for. The value goes into the SQL as it is, and the `:setvar` lines are left out of what the server gets. Other sqlcmd commands (`:r`, `:connect`) aren't supported.
 
 ### Scripts
 
@@ -139,6 +179,20 @@ Each result set stops at the row limit (500 to start with; `/limit <n>` changes 
 
 `y` copies the cell under the cursor and `Y` the row, tab-separated. `/copy` copies the whole result set: tab-separated by default (it pastes into a spreadsheet as cells), or `/copy csv`, `/copy json`, or `/copy insert` for `INSERT` statements into its table. Trawl uses the system clipboard (PowerShell's `Set-Clipboard`, `pbcopy`, `wl-copy`, `xclip` or `xsel`), and over SSH asks the terminal to copy instead (OSC 52, which Windows Terminal, iTerm2, kitty, WezTerm and tmux understand).
 
+### Comparing results
+
+To see what a change did, pin a result first: `p` in Results (or `/pin`) keeps the result set on screen. Run the query again (after an update, say, or on another database), and `c` (or `/compare`) shows the difference as a result set of its own: a `change` column first, `~` for a row whose values changed (with the new values, and a `was` column at the end saying `Goals: 3 → 4`), `+` for a row that's new and `−` for one that's gone, and a line under it counting them and the rows that are the same. When the pinned rows are one table's with its primary key (as for editing, below), rows are matched by the key, so a changed row shows as changed; otherwise whole rows are compared, so it shows as one removed and one added. Both results need the same columns, in any order. The pin stays until you pin another.
+
+### Following foreign keys
+
+When the rows on screen are one table's (as for editing, below, though the primary key needn't be there), `h`/`l` move a cursor between cells, and `F` (or `/follow`) follows the cell's foreign key: on `Players.ClubId`, it opens the club that row refers to (`SELECT TOP (…) * FROM [dbo].[Clubs] WHERE [Id] = 2`); on a key other tables refer to, like `Clubs.Id`, it opens their rows that refer to it. When there are several ways to go, it asks which. A key of several columns takes them all from the row, and a `NULL` refers to nothing. The query runs like any other, so it lands in History and Results, and `F` works there again.
+
+### Importing a CSV file
+
+`/import-csv <file.csv> <table>` turns a CSV file into `INSERT` statements for a table of the database you're in. The file's header names the columns, matched to the table's ignoring case, spaces and underscores (`club_id` is `ClubId`); identity columns and headers the table hasn't are left out, and the script says which, and which `NOT NULL` columns the file doesn't have. Values can be separated by commas, semicolons or tabs (whichever the header uses), quoted with `"` (with `""` inside, and line breaks), and the file can have Windows line endings and a byte-order mark. An empty value is `NULL` where the column allows it. Each value is checked against its column's type first, and a bad one says its row and column (`Row 3, Goals: int takes a whole number ("x")`).
+
+The script opens in a console tab of its own (`import`), to read through and then run with `R`. `/import-csv <file.csv> <table> --run` runs it straight away instead. Either way it goes through the usual checks: a read-only connection refuses it, and with manual commit it waits for `/commit`.
+
 ### Editing results
 
 When the rows on screen are the rows of one table, with its primary key among the columns (`↵` on a table in the Explorer, or a `SELECT … FROM` one table with no join or grouping), you can change them in place, as in DataGrip:
@@ -150,6 +204,12 @@ When the rows on screen are the rows of one table, with its primary key among th
 - The usual rules apply: a read-only connection refuses it until `/writes`, and with manual commit the changes wait for `/commit`.
 
 Columns that are expressions or renamed in the query, identity columns and `rowversion` can't be edited. If something can't be edited, `e` says why.
+
+### Activity
+
+The Activity tab (`6`, or `/activity`) lists the server's sessions, as SSMS's Activity Monitor does, read from `sys.dm_exec_sessions` and `sys.dm_exec_requests`: each one's status, what it waits on (`LCK_M_S`, `CXPACKET`…), how long it has run, its login and the SQL it is running (or ran last). Blocking chains come first, drawn as a tree: the session at the head (often one sitting idle with a transaction open), then the sessions waiting on it, and those waiting on them, with `▲` and a count on each session that blocks others. Sessions that are only sleeping are left out; `a` shows them too.
+
+The list is read when the tab opens, and again on `R`. `↵` shows a session's details and its SQL in full. `x` (or `/kill <session>`) ends a session with `KILL`, after asking: what it hasn't committed is rolled back. A read-only connection refuses it until `/writes`, and so does an open transaction (KILL can't run inside one). Reading the sessions needs `VIEW SERVER STATE` (`VIEW DATABASE STATE` on Azure SQL Database, which lists that database's sessions only).
 
 ### Safety
 
@@ -163,7 +223,7 @@ Columns that are expressions or renamed in the query, identity columns and `rowv
 
 Type `/` and the menu narrows as you type. `tab` completes, `↑`/`↓` picks, `↵` runs. `/connect` completes connection names, `/use` database names and `/describe` tables and views.
 
-`/import datagrip [folder]` `/connect <name>` `/add …` `/forget <name>` `/folder <connection> [folder]` `/password [connection]` `/disconnect` `/use <database>` `/open <file.sql>` `/console` `/new` `/format` `/search <text>` `/save <file.sql>` `/describe <table>` `/script <name>` `/find [text]` `/export <file>` `/filter [text]` `/copy [tsv|csv|json|insert]` `/limit [rows]` `/writes` `/tx [auto|manual]` `/commit` `/rollback` `/ask <question>` `/ai [connection] [level]` `/update` `/settings` `/stats [on|off]` `/plan [sql]` `/last` `/refresh` `/help` `/quit`
+`/import datagrip [folder]` `/import-csv <file.csv> <table> [--run]` `/connect <name>` `/add …` `/forget <name>` `/folder <connection> [folder]` `/password [connection]` `/disconnect` `/use <database>` `/open <file.sql>` `/snippet [name]` `/snippets` `/console` `/tab …` `/new` `/format` `/search <text>` `/save <file.sql>` `/describe <table>` `/script <name>` `/find [text]` `/export <file>` `/filter [text]` `/follow` `/pin` `/compare` `/copy [tsv|csv|json|insert]` `/limit [rows]` `/writes` `/tx [auto|manual]` `/commit` `/rollback` `/ask <question>` `/explain` `/ai [connection] [level]` `/update` `/settings` `/stats [on|off]` `/plan [sql]` `/diff <connection> [database]` `/fanout <folder> [sql]` `/activity` `/kill <session>` `/last` `/refresh` `/help` `/quit`
 
 ## Claude
 
@@ -173,7 +233,7 @@ Each connection has a Claude access level, shown in Connections and changed with
 
 | Level | Claude sees |
 | --- | --- |
-| `schema` (the default) | Table and column names, the SQL, and error messages. Never rows. |
+| `schema` (the default) | Table and column names, the SQL, its plans, and error messages. Never rows. |
 | `results` | Rows too, when it runs a query. `/ai results` asks first, since the data then leaves your machine. |
 | `off` | Nothing. |
 
@@ -184,6 +244,10 @@ Each connection has a Claude access level, shown in Connections and changed with
 `/ask top scorers per club this season` sends Claude the question and the database's tables and columns (names only, never rows) and puts the query it writes into the console, under the question and Claude's note as comments. **Nothing runs by itself**: read it, change it if you like, then `ctrl+r`. The usual checks apply when you do, so a risky statement still asks first.
 
 It uses the Claude Code CLI you're already signed in to (`claude -p`), with no tools and none of your MCP servers, so Claude can only answer. Nothing to configure, and no API key. `esc` cancels while it thinks. A connection at the `off` level can't be asked about.
+
+### Explain a plan
+
+On a plan (`p` in the console, or `/plan`), `a` asks Claude to explain it, and `/explain` does the same for the last plan shown: what the plan does step by step, what is likely to cost the most (scans, lookups, sorts, conversions, a missing index) and what might help, with a `CREATE INDEX` when one would. Claude gets the query and its plan text, never rows, so a connection at the `schema` level can ask; one at `off` can't. The answer opens in the viewer, and `/last` shows it again.
 
 ### Claude Code reads your databases (MCP)
 
@@ -229,9 +293,3 @@ Glim is Trawl's anglerfish: it carries its own light into the deep, which is rou
 
 The logo and the Windows icon in `assets/` are drawn from the same pixels (`src/glim.js`); `node scripts/logo.js` regenerates them. `glim.svg`, `glim.png` and `glim.ico` sit on the dark rounded square; `glim-transparent.svg`, `glim-transparent.png` (544 × 416) and `glim-transparent@4x.png` are just the fish, cropped (with room for the badge), on transparency, and `glim-transparent.ico` is the fish centred on a transparent square (16 to 256 px). Each one carries an "SQL" pixel-art badge in the bottom-right corner, so Trawl's icon is easy to tell from Tiller's at a glance.
 
-## Not yet
-
-- Postgres and MySQL (the driver layer is one interface, so they'd be new adapters).
-- Running one query across a group of databases, with each row tagged by database.
-- Schema diff between two databases.
-- An Activity view: sessions, blocking, kill.

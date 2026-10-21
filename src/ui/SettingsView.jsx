@@ -4,6 +4,7 @@ import { configDir } from '../config.js';
 import { ACCENTS, setAccent, theme } from '../theme.js';
 import { relTime, wrap } from '../text.js';
 import { checksDisabled } from '../update.js';
+import { NOTIFY_AFTER } from '../notify.js';
 import { VERSION } from '../version.js';
 import { useListNav, useMouse } from './hooks.js';
 import { Lines, Panel, Row } from './parts.jsx';
@@ -94,6 +95,16 @@ export function SettingsView({ config, ctx, updates, update, width, height, acti
       hint: '↵ check',
       about: ['Asks GitHub now, the same as /update, and installs a newer release in the downloaded Trawl.', `The last check: ${lastCheck}.`],
       change: () => ctx.checkUpdates(),
+    },
+    {
+      label: 'Notify when done',
+      value: onOff(config.notify !== false, `after ${Number(config.notifyAfter) >= 0 ? Number(config.notifyAfter) : NOTIFY_AFTER} s`),
+      hint: '↵ turn on or off',
+      about: [
+        `When a query (or anything with the spinner) takes longer than ${Number(config.notifyAfter) >= 0 ? Number(config.notifyAfter) : NOTIFY_AFTER} seconds, Trawl rings the terminal's bell and asks it for a desktop notification saying how it went, for when you've looked away.`,
+        'Windows Terminal, iTerm2, WezTerm, kitty and GNOME Terminal show one; others just ring. "notifyAfter" in config.json changes the seconds.',
+      ],
+      change: () => toggle('notify'),
     },
   ];
   const nav = useListNav(rows.length, innerH);

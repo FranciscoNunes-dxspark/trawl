@@ -15,7 +15,7 @@ export const theme = {
   routine: '#d787ff',
   nul: '#6c6c6c',
   number: '#ffaf5f',
-  sqlMode: '#ff87d7',
+  bangMode: '#ff87d7',
 };
 
 // Windows terminals draw ⏺ as a wide emoji, so use the plain circle there (as Claude Code does).

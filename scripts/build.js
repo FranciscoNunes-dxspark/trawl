@@ -3,6 +3,7 @@
 //   bun scripts/build.js --all           every release target
 //   bun scripts/build.js bun-linux-x64   specific targets
 // Output goes to dist/.
+import { readdirSync } from 'node:fs';
 import pkg from '../package.json' with { type: 'json' };
 
 const TARGETS = {
@@ -29,14 +30,18 @@ const noDevtools = {
 for (const target of targets) {
   if (!TARGETS[target]) throw new Error(`Unknown target ${target}. Known: ${Object.keys(TARGETS).join(', ')}`);
   const outfile = `dist/${TARGETS[target]}`;
-  // Glim as the .exe icon. Bun can only write it when building on Windows, so CI builds that target there.
-  const windows = target.includes('windows') && process.platform === 'win32' ? { icon: 'assets/glim.ico', title: 'Trawl' } : undefined;
+  // The mascot as the .exe icon: the .ico on the dark square that scripts/logo.js draws (glim.ico, logo.ico).
+  // Bun can only write it when building on Windows, so CI builds that target there.
+  const icon = readdirSync('assets').find((f) => f.endsWith('.ico') && !f.includes('transparent'));
+  const windows = target.includes('windows') && process.platform === 'win32' ? { icon: `assets/${icon}`, title: 'Trawl' } : undefined;
   const result = await Bun.build({
     entrypoints: ['src/cli.jsx'],
     compile: { target, outfile, windows },
     minify: true,
     plugins: [noDevtools],
-    define: { 'process.env.TRAWL_VERSION': JSON.stringify(pkg.version) },
+    // NODE_ENV picks React's production build (several times faster to draw); defined in the bundle, it
+    // never reaches the environment of what the app starts (git, az, its hooks).
+    define: { 'process.env.TRAWL_VERSION': JSON.stringify(pkg.version), 'process.env.NODE_ENV': '"production"' },
   });
   if (!result.success) {
     for (const log of result.logs) console.error(log);

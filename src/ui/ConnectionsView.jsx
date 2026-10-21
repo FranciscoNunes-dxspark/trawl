@@ -3,6 +3,7 @@ import { Box, useInput } from 'ink';
 import * as a from '../actions.js';
 import { AI_LABELS, aiLevel } from '../ai.js';
 import { commitMode, connectionRows, describeConn, isReadOnly } from '../connections.js';
+import { dialectOf } from '../dialects.js';
 import { theme } from '../theme.js';
 import { fit } from '../text.js';
 import { useListNav, useMouse } from './hooks.js';
@@ -44,6 +45,7 @@ export function ConnectionsView({ connections, current, ctx, width, height, acti
   const details = c
     ? [
         ...(c.folder ? [[{ text: 'Folder    ', color: theme.dim }, { text: `${c.folder}/` }]] : []),
+        ...(c.kind ? [[{ text: 'Kind      ', color: theme.dim }, { text: dialectOf(c).label }]] : []),
         [{ text: 'Server    ', color: theme.dim }, { text: c.server }],
         [{ text: 'Database  ', color: theme.dim }, { text: c.database ?? '(the login’s default)' }],
         [{ text: 'Sign-in   ', color: theme.dim }, { text: c.demo ? 'none (demo)' : AUTH[c.auth] ?? c.auth }],

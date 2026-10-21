@@ -1,0 +1,130 @@
+// PostgreSQL behind the same session interface as db.js's SQL Server one, through pg (plain
+// JavaScript, so the Bun build carries it). A script runs a statement at a time (dialects.js
+// splitScript), each result set cut at the row limit; pg reads a result whole, so the rows past the
+// limit still cross the network before they're dropped. esc cancels with pg_cancel_backend.
+import pg from 'pg';
+import { DbError, runScript } from './db.js';
+import { DIALECTS, splitScript } from './dialects.js';
+import { hostPort } from './connections.js';
+
+const dialect = DIALECTS.postgres;
+
+// The type names the grid goes by (numbers right-aligned): pg's type ids for the common ones.
+const TYPES = { 16: 'bit', 17: 'bytea', 20: 'BigInt', 21: 'SmallInt', 23: 'Int', 25: 'text', 114: 'json', 700: 'Real', 701: 'Float', 790: 'Money', 1042: 'char', 1043: 'varchar', 1082: 'date', 1083: 'time', 1114: 'timestamp', 1184: 'timestamptz', 1700: 'Numeric', 2950: 'uuid', 3802: 'jsonb' };
+
+// Timestamps without a zone are read as UTC (as tedious's useUTC does), and dates kept as written.
+const types = {
+  getTypeParser(oid, format) {
+    if (oid === 1114) return (s) => new Date(`${s.replace(' ', 'T')}Z`);
+    if (oid === 1082) return (s) => s;
+    return pg.types.getTypeParser(oid, format);
+  },
+};
+
+/** The pg options for a connection: host:port from `server`, TLS when asked for (--ssl, or --trust-cert without checking it). */
+export function pgConfig(conn, { database = conn.database, password } = {}) {
+  const { host, port } = hostPort(conn.server, dialect.defaultPort);
+  const ssl = conn.trustCert ? { rejectUnauthorized: false } : conn.ssl || conn.encrypt ? true : false;
+  return { host, port, user: conn.user, password, database: database ?? 'postgres', ssl, application_name: 'Trawl', connectionTimeoutMillis: 20000, types };
+}
+
+/** Opens a session (see db.js connect). Throws a DbError; `badLogin` when the password was turned down. */
+export async function open(conn, { database, password, signal } = {}) {
+  const config = pgConfig(conn, { database, password });
+  const client = new pg.Client(config);
+  const onAbort = () => client.end().catch(() => {});
+  signal?.addEventListener('abort', onAbort, { once: true });
+  try {
+    await client.connect();
+  } catch (e) {
+    if (signal?.aborted) throw new DbError('Cancelled', { cancelled: true });
+    const err = new DbError(e.message, { number: e.code ?? null });
+    // 28P01: wrong password; 28000: no such login (or pg_hba refuses it).
+    err.badLogin = e.code === '28P01';
+    if (/self[- ]signed|unable to verify|certificate/i.test(e.message) && !conn.trustCert) err.untrustedCert = true;
+    throw err;
+  } finally {
+    signal?.removeEventListener('abort', onAbort);
+  }
+  return postgresSession(conn, client, { database: config.database, cancel: () => cancelBackend(config, client.processID) });
+}
+
+// esc: a second connection asks the server to cancel what this one runs.
+async function cancelBackend(config, pid) {
+  const other = new pg.Client({ ...config, connectionTimeoutMillis: 5000 });
+  try {
+    await other.connect();
+    await other.query('SELECT pg_cancel_backend($1)', [pid]);
+  } finally {
+    other.end().catch(() => {});
+  }
+}
+
+/** One statement's results into the shared state: result sets cut at `limit`, and rows affected. */
+export function collectResult(result, state, limit) {
+  for (const r of Array.isArray(result) ? result : [result]) {
+    if (r.fields?.length) {
+      const rows = r.rows ?? [];
+      const set = { columns: r.fields.map((f) => ({ name: f.name, type: TYPES[f.dataTypeID] ?? '' })), rows: rows.slice(0, limit), truncated: rows.length > limit };
+      state.sets.push(set);
+      if (set.truncated) state.stopped = true;
+    } else if (/^(INSERT|UPDATE|DELETE|MERGE|COPY)$/.test(r.command ?? '') && r.rowCount != null) {
+      state.messages.push(`${r.rowCount} row${r.rowCount === 1 ? '' : 's'} affected`);
+    }
+  }
+}
+
+/** The line a Postgres error points at (its character `position`), counted in the whole script. */
+const errorLine = (e, text, line) => (e.position ? line + text.slice(0, Number(e.position) - 1).split('\n').length - 1 : line);
+
+/**
+ * A session over a connected client ({ query(config), on, end, getTransactionStatus }), with the same
+ * interface as db.js's. `cancel()` stops the running query. The tests pass a stand-in client.
+ */
+export function postgresSession(conn, client, { database = null, cancel = async () => {} } = {}) {
+  let messages = null;
+  const session = {
+    conn,
+    database,
+    dialect: dialect.kind,
+    closed: false,
+    onEnd: null,
+    run: (script, opts = {}) =>
+      runScript(
+        session,
+        script,
+        async (text, line, state) => {
+          const { signal, limit = 500 } = opts;
+          const onAbort = () => cancel().catch(() => {});
+          signal?.addEventListener('abort', onAbort, { once: true });
+          try {
+            collectResult(await client.query({ text, rowMode: 'array' }), state, limit);
+          } catch (e) {
+            if (e.code === '57014' || signal?.aborted) throw new DbError('Cancelled', { cancelled: true });
+            throw new DbError(e.message, { number: e.code ?? null, line: errorLine(e, text, line) });
+          } finally {
+            signal?.removeEventListener('abort', onAbort);
+          }
+        },
+        { ...opts, split: (s) => splitScript(s, dialect) },
+      ),
+    // The protocol says whether a transaction is open ('T') or failed and waiting for ROLLBACK ('E').
+    async tranCount() {
+      const status = client.getTransactionStatus?.();
+      return status === 'T' || status === 'E' ? 1 : 0;
+    },
+    close() {
+      if (!session.closed) client.end().catch(() => {});
+    },
+    collect(list) {
+      messages = list;
+    },
+  };
+  client.on('notice', (n) => messages?.push(n.message));
+  client.on('end', () => {
+    session.closed = true;
+    session.onEnd?.();
+  });
+  client.on('error', () => {});
+  return session;
+}

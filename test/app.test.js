@@ -235,7 +235,7 @@ test('Settings, an overlay, changes the row limit, the accent and updates, and k
   await until(() => frame().includes('Clubs'), 'the explorer');
   app.stdin.write(',');
   await until(() => frame().includes('Row limit') && frame().includes('500 rows'), 'Settings');
-  assert.match(frame(), /1 Explorer .* 5 Connections\s*$/m, 'no tab of its own');
+  assert.match(frame(), /1 Explorer .* 6 Activity\s*$/m, 'no tab of its own');
   assert.match(frame(), /Check for updates\s+on\s+\(not in a checkout\)/);
   // ↵ on the row limit hands it to /limit, and Settings is still open after.
   app.stdin.write(KEYS.enter);

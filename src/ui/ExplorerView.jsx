@@ -140,7 +140,7 @@ export function ExplorerView({ schema, ctx, width, height, active, filter }) {
           const k = KIND[row.obj.kind];
           return (
             <Row
-              key={`${row.obj.schema}.${row.obj.name}`}
+              key={`${row.obj.kind}:${row.obj.schema}.${row.obj.name}`}
               width={innerW}
               selected={idx === nav.index}
               focused={active}

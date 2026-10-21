@@ -26,8 +26,9 @@ test('an UPDATE or DELETE of one table with a primary key is read first, by a ca
   assert.match(d.select, /SELECT TOP \(10001\) \* FROM Players p where p\.Id in \(select Id from dbo\.Players where Goals > 2\);$/);
   // No WHERE: the whole table (the danger question asks first anyway).
   assert.match(plan('DELETE dbo.Matches').select, /FROM dbo\.Matches;$/);
-  // Postgres and MySQL say LIMIT.
-  assert.match(plan('DELETE FROM dbo.Clubs WHERE Id = 3', 'postgres').select, /SELECT \* FROM dbo\.Clubs WHERE Id = 3 LIMIT 10001;$/);
+  // Postgres and MySQL say LIMIT; Postgres reads each column as text (but bytea), as the server writes it.
+  assert.match(plan('DELETE FROM dbo.Clubs WHERE Id = 3', 'mysql').select, /SELECT \* FROM dbo\.Clubs WHERE Id = 3 LIMIT 10001;$/);
+  assert.match(plan('DELETE FROM dbo.Clubs WHERE Id = 3', 'postgres').select, /SELECT "Id"::text AS "Id", "Name"::text AS "Name", .* FROM dbo\.Clubs WHERE Id = 3 LIMIT 10001;$/);
   assert.equal(plan("UPDATE i18n.Translations SET Value = 'x' WHERE Culture = 'en'").keys.join(), 'ResourceKey,Culture');
 });
 
@@ -112,4 +113,29 @@ test('ten copies are kept per connection, newest first', () => {
   assert.equal(list.length, UNDO_KEEP);
   assert.equal(list[0].at, UNDO_KEEP + 2);
   assert.deepEqual(withSnapshot(null, { at: 1 }), [{ at: 1 }]);
+});
+
+test("Postgres: every column but a generated one goes back, as the server wrote it (microseconds, intervals, arrays, json's spacing)", () => {
+  const t = {
+    schema: 'public',
+    name: 'g',
+    columns: [
+      { name: 'id', type: 'integer', pk: true, identity: true },
+      { name: 'at', type: 'timestamp without time zone' },
+      { name: 'dur', type: 'interval' },
+      { name: 'tags', type: 'text[]' },
+      { name: 'js', type: 'json' },
+      { name: 'raw', type: 'bytea' },
+      { name: 'twice', type: 'numeric', computed: true },
+    ],
+  };
+  const schema = { objects: [{ ...t, kind: 'table' }], foreignKeys: [] };
+  const d = undoPlan('DELETE FROM public.g WHERE id > 1', schema, { kind: 'postgres' });
+  assert.equal(d.select, '-- trawl:snapshot\nSELECT "id"::text AS "id", "at"::text AS "at", "dur"::text AS "dur", "tags"::text AS "tags", "js"::text AS "js", "raw", "twice"::text AS "twice" FROM public.g WHERE id > 1 LIMIT 10001;');
+  const set = { columns: t.columns.map((c) => ({ name: c.name })), rows: [['2', '2024-04-01 01:30:00.123456', '1 day 02:00:00', '{a,"b,c"}', '{"a": 1}', Buffer.from([0, 255]), '4']] };
+  const s = JSON.parse(JSON.stringify(snapshotOf(d, set, { sql: 'DELETE FROM public.g WHERE id > 1', conn: 'c', database: 'd', kind: 'postgres' })));
+  assert.match(reverseScript(s), /INSERT INTO "public"\."g" \("id", "at", "dur", "tags", "js", "raw"\) OVERRIDING SYSTEM VALUE VALUES\n {2}\(2, '2024-04-01 01:30:00\.123456', '1 day 02:00:00', '\{a,"b,c"\}', '\{"a": 1\}', decode\('00ff', 'hex'\)\);/);
+  const u = undoPlan("UPDATE public.g SET dur = '1s', tags = '{}' WHERE id = 2", schema, { kind: 'postgres' });
+  const us = JSON.parse(JSON.stringify(snapshotOf(u, set, { sql: '', conn: 'c', database: 'd', kind: 'postgres' })));
+  assert.match(reverseScript(us), /UPDATE "public"\."g" SET "dur" = '1 day 02:00:00', "tags" = '\{a,"b,c"\}' WHERE "id" = 2;/);
 });

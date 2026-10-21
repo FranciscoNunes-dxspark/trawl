@@ -119,7 +119,7 @@ test('Postgres: defaults and checks as the server writes them, indexes from pg_g
     ].join('\n'),
   );
   for (const kind of ['sqlserver', 'postgres', 'mysql']) assert.match(EXTRAS_SQL[kind], /^-- trawl:script-extras\n/);
-  assert.equal(EXTRAS_SQL.postgres.match(/^SELECT/gm).length, 5);
+  assert.equal(EXTRAS_SQL.postgres.match(/^SELECT/gm).length, 6);
   assert.equal(EXTRAS_SQL.mysql.match(/^SELECT/gm).length, 5);
 });
 
@@ -179,4 +179,35 @@ test('planning: what is new, changed, the same (line ends aside), and stale (onl
   assert.match(text, /- dbo\/Views\/Gone\.sql/);
   assert.match(text, /! dbo\.Locked/);
   assert.match(summaryText({ written: [], unchanged: ['x'], stale: [] }, { database: 'ClubA', folder: '/s' }), /Nothing changed since the files were written/);
+});
+
+test("Postgres: an identity's kind, a foreign key's ON DELETE, overloads as statements, and extensions' objects left out quietly", () => {
+  const set = (names, rows) => ({ columns: names.map((name) => ({ name })), rows });
+  const o = { schema: 'sales', name: 'lines', kind: 'table', columns: [{ name: 'id', type: 'integer', identity: true, pk: true }, { name: 'order_id', type: 'bigint' }] };
+  const schema = {
+    objects: [o, { schema: 'hr', name: 'raise', kind: 'function', columns: [], params: [] }, { schema: 'public', name: 'pg_stat_statements', kind: 'view', columns: [] }],
+    foreignKeys: [{ name: 'lines_order_fkey', from: 'sales.lines', to: 'sales.orders', columns: [['order_id', 'order_id']] }],
+  };
+  const extras = buildTableExtras([
+    set(['schema', 'object', 'column', 'name', 'definition'], []),
+    set(['schema', 'object', 'name', 'definition'], []),
+    set(['schema', 'object', 'name', 'is_unique', 'is_unique_constraint', 'is_primary_key', 'type_desc', 'filter_definition', 'columns', 'included', 'definition'], [['sales', 'lines', 'lines_pkey', true, false, true, null, null, 'id', null, 'CREATE UNIQUE INDEX lines_pkey ON sales.lines USING btree (id)']]),
+    set(['schema', 'object', 'column', 'seed', 'increment', 'definition'], [['sales', 'lines', 'id', null, null, 'GENERATED ALWAYS AS IDENTITY']]),
+    set(['schema', 'object', 'column', 'definition', 'is_persisted'], []),
+    set(['schema', 'object', 'name', 'definition'], [['sales', 'lines', 'lines_order_fkey', 'FOREIGN KEY (order_id) REFERENCES sales.orders(order_id) ON DELETE CASCADE NOT VALID']]),
+  ]);
+  const modules = [
+    { schema: 'hr', name: 'raise', type: 'FN', definition: 'CREATE OR REPLACE FUNCTION hr.raise(a integer)\n RETURNS void\n LANGUAGE sql\nAS $function$ SELECT 1 $function$\n' },
+    { schema: 'hr', name: 'raise', type: 'FN', definition: 'CREATE OR REPLACE FUNCTION hr.raise(a integer, b text)\n RETURNS void\n LANGUAGE sql\nAS $function$ SELECT 2 $function$\n' },
+    { schema: 'sales', name: 'lines_audit', type: 'TR', parent: 'lines', definition: 'CREATE TRIGGER lines_audit AFTER INSERT ON sales.lines FOR EACH ROW EXECUTE FUNCTION log_change()' },
+  ];
+  const { files, skipped } = scriptFiles({ schema, extras, modules, dialect: PG });
+  const text = (path) => files.find((f) => f.path === path).text;
+  assert.match(text('sales/Tables/lines.sql'), /"id" integer GENERATED ALWAYS AS IDENTITY NOT NULL,/);
+  assert.match(text('sales/Tables/lines.sql'), /ALTER TABLE "sales"\."lines" ADD CONSTRAINT "lines_order_fkey"\n {2}FOREIGN KEY \(order_id\) REFERENCES sales\.orders\(order_id\) ON DELETE CASCADE NOT VALID;\n$/);
+  // Each definition ends its statement, so the file runs as a script.
+  assert.match(text('hr/Functions/raise.sql'), /\$function\$ SELECT 1 \$function\$;\n\nCREATE OR REPLACE FUNCTION hr\.raise\(a integer, b text\)[\s\S]*\$function\$ SELECT 2 \$function\$;\n$/);
+  assert.equal(text('sales/Triggers/lines_audit.sql'), 'CREATE TRIGGER lines_audit AFTER INSERT ON sales.lines FOR EACH ROW EXECUTE FUNCTION log_change();\n');
+  assert.deepEqual(skipped, [{ name: 'public.pg_stat_statements', path: 'public/Views/pg_stat_statements.sql', quiet: true }]);
+  assert.match(PG.grepSql(''), /x\.classid = 'pg_class'::regclass AND x\.objid = c\.oid AND x\.deptype = 'e'/);
 });

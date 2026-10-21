@@ -128,9 +128,25 @@ export function undoPlan(sql, schema, { kind = 'sqlserver' } = {}) {
   const select =
     kind === 'sqlserver'
       ? `-- trawl:snapshot\nSELECT TOP (${UNDO_ROWS + 1}) * FROM ${from}${filter};`
-      : `-- trawl:snapshot\nSELECT * FROM ${from}${filter} LIMIT ${UNDO_ROWS + 1};`;
+      : `-- trawl:snapshot\nSELECT ${kind === 'postgres' ? pgColumns(table) : '*'} FROM ${from}${filter} LIMIT ${UNDO_ROWS + 1};`;
   return { op: op.toLowerCase(), table, keys, select, setColumns };
 }
+
+/**
+ * Postgres's columns for the copy, each as the server writes it (::text) but bytea: the text goes back
+ * into its type exactly, where pg's JavaScript values wouldn't (a timestamp's microseconds, an
+ * interval, json's own spacing, an array of anything).
+ */
+function pgColumns(table) {
+  const q = DIALECTS.postgres.quote;
+  return table.columns.map((c) => (/^bytea$/i.test(c.type) ? q(c.name) : `${q(c.name)}::text AS ${q(c.name)}`)).join(', ');
+}
+
+/**
+ * Whether a column of the copy can be given its value back. On Postgres every one but a generated
+ * column can (and an identity, for an UPDATE): the copy holds each value as the server wrote it.
+ */
+const restorable = (c, kind, { update = false } = {}) => !c.unknown && !c.computed && !(update && c.identity) && (kind === 'postgres' || canEdit({ ...c, identity: false }, kind));
 
 /** The table, when Trawl knows it and it has a primary key whose values match exactly. */
 function tableWithKey(text, schema, kind) {
@@ -257,12 +273,12 @@ export function reverseScript(s) {
     for (const key of s.inserted) body.push(`DELETE FROM ${name} WHERE ${s.keys.map((k, j) => `${q(k)} = ${key[j]}`).join(' AND ')};`);
   } else if (s.op === 'update') {
     const named = s.setColumns?.length ? s.setColumns.map(col) : s.columns.map((_, i) => i).filter((i) => !keyAt.includes(i));
-    const cols = [...new Set(named)].filter((i) => i >= 0 && !keyAt.includes(i) && canEdit(s.columns[i], kind));
+    const cols = [...new Set(named)].filter((i) => i >= 0 && !keyAt.includes(i) && restorable(s.columns[i], kind, { update: true }));
     if (!cols.length) return [...head, '-- None of the columns it set can be given a value back (identity or computed).', ''].join('\n');
     for (const row of s.rows) body.push(`UPDATE ${name} SET ${cols.map((i) => `${q(s.columns[i].name)} = ${lit(row, i)}`).join(', ')} WHERE ${whereKey(row)};`);
   } else {
     // Every column a value can go back into, the identity too; not computed ones or rowversion.
-    const cols = s.columns.map((c, i) => i).filter((i) => !s.columns[i].unknown && !s.columns[i].computed && canEdit({ ...s.columns[i], identity: false }, kind));
+    const cols = s.columns.map((c, i) => i).filter((i) => restorable(s.columns[i], kind));
     const identity = cols.some((i) => s.columns[i].identity);
     const list = cols.map((i) => q(s.columns[i].name)).join(', ');
     const over = identity && kind === 'postgres' ? ' OVERRIDING SYSTEM VALUE' : '';

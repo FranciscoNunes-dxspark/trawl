@@ -15,6 +15,33 @@ test('types read the way they are declared', () => {
   assert.equal(typeLabel('datetime2', 8, 27, 7), 'datetime2');
   assert.equal(typeLabel('datetime2', 6, 19, 0), 'datetime2(0)');
   assert.equal(typeLabel('int', 4, 10, 0), 'int');
+  // Postgres and MySQL give the whole type, and no sizes to add to it; a quoted name keeps its case.
+  assert.equal(typeLabel('numeric', null, null, null), 'numeric');
+  assert.equal(typeLabel('character varying', null, null, null), 'character varying');
+  assert.equal(typeLabel('varchar', null, null, null), 'varchar');
+  assert.equal(typeLabel('numeric(12,2)', null, null, null), 'numeric(12,2)');
+  assert.equal(typeLabel('"Odd Name"."Mood"', null, null, null), '"Odd Name"."Mood"');
+});
+
+test("Postgres: a table and a function can share a name, and each gets its own columns or parameters; the table is found first", () => {
+  const schema = buildSchema([
+    set(['db'], [['shop']]),
+    set(['name'], [['shop']]),
+    set(['schema', 'name', 'type', 'rows'], [['public', 'customers', 'FN', null], ['public', 'customers', 'U', 2000], ['public', 'stats', 'V', null], ['public', 'stats', 'FN', null]]),
+    set(['schema', 'object', 'name', 'type', 'max_length', 'precision', 'scale', 'is_nullable', 'is_identity', 'is_computed', 'pk'], [
+      ['public', 'customers', 'id', 'integer', null, null, null, false, true, false, 1],
+      ['public', 'stats', 'calls', 'bigint', null, null, null, true, false, false, 0],
+    ]),
+    set(['name', 'schema', 'object', 'column', 'ref_schema', 'ref_object', 'ref_column'], []),
+    set(['schema', 'object', 'name', 'type', 'max_length', 'precision', 'scale', 'is_output'], [['public', 'customers', 'id', 'integer', null, null, null, false]]),
+  ]);
+  const of = (kind, name) => schema.objects.find((o) => o.kind === kind && o.name === name);
+  assert.deepEqual(of('table', 'customers').columns.map((c) => c.name), ['id']);
+  assert.deepEqual(of('function', 'customers').params, [{ name: 'id', type: 'integer', output: false }]);
+  assert.deepEqual(of('function', 'customers').columns, []);
+  assert.deepEqual(of('view', 'stats').columns.map((c) => c.name), ['calls']);
+  assert.equal(findObject(schema, 'public.customers').kind, 'table');
+  assert.equal(findObject(schema, 'stats').kind, 'view');
 });
 
 test('the catalog result sets become one schema', () => {

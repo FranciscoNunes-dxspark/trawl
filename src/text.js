@@ -1,7 +1,20 @@
-import stringWidth from 'string-width';
+import fullWidth from 'string-width';
 import cliTruncate from 'cli-truncate';
 
-export { stringWidth };
+// Nearly everything drawn is printable ASCII, where a column is a character. string-width and
+// cli-truncate handle the rest (wide CJK, emoji), but cost far more on every row of every render.
+const ASCII = /^[\x20-\x7e]*$/;
+
+/** Columns `s` takes up in the terminal. */
+export function stringWidth(s) {
+  return ASCII.test(s) ? s.length : fullWidth(s);
+}
+
+/** Cuts `s` to `width` columns, ending in "…". */
+function truncate(s, width) {
+  if (!ASCII.test(s)) return cliTruncate(s, width);
+  return width <= 1 ? '…'.slice(0, width) : `${s.slice(0, width - 1)}…`;
+}
 
 /** Makes a line safe to draw: tabs become spaces, control characters (and \r from CRLF files) go. */
 export function clean(s) {
@@ -20,7 +33,7 @@ export function fit(text, width, align = 'left') {
   if (width <= 0) return '';
   const t = clean(String(text ?? ''));
   const w = stringWidth(t);
-  if (w > width) return cliTruncate(t, width);
+  if (w > width) return truncate(t, width);
   const pad = ' '.repeat(width - w);
   return align === 'right' ? pad + t : t + pad;
 }
@@ -40,7 +53,7 @@ export function fitSegments(segments, width, pad = true) {
       out.push(text === seg.text ? seg : { ...seg, text });
       left -= w;
     } else {
-      out.push({ ...seg, text: cliTruncate(text, left) });
+      out.push({ ...seg, text: truncate(text, left) });
       left = 0;
     }
   }

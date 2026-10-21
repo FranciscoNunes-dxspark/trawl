@@ -1,16 +1,39 @@
-// Checks the files Trawl shares with its sibling apps (Tiller, Splice) for drift: they were copied
-// between the apps and should stay recognisably the same.
+// Checks the files shared between the sibling apps (Trawl, Splice) for drift: they were copied
+// between the apps and should stay the same apart from the apps' names.
 //   node scripts/shared-check.js ../splice           which shared files differ, and by how much
 //   node scripts/shared-check.js ../splice --diff    and the lines that differ
 // The apps' own names (Trawl, Splice, TRAWL_VERSION…) don't count as differences. Exits with 1 when
-// a file differs, so it can run in CI; files only one app has are listed, not counted.
+// a file differs, so it can run in CI; files only one app has are listed, not counted. This file is
+// one of them, so it imports nothing from the app.
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { lineDiff } from '../src/diff.js';
 
 // The files copied between the apps (CLAUDE.md lists them), as paths from each checkout's root.
-export const SHARED = ['src/text.js', 'src/ui/parts.jsx', 'src/ui/hooks.js', 'src/mouse.js', 'src/selection.js', 'src/clipboard.js', 'src/jsx-hooks.js', 'src/register.js', 'src/version.js', 'scripts/build.js'];
+export const SHARED = ['src/text.js', 'src/ui/parts.jsx', 'src/ui/hooks.js', 'src/mouse.js', 'src/selection.js', 'src/clipboard.js', 'src/jsx-hooks.js', 'src/register.js', 'src/version.js', 'scripts/build.js', 'scripts/shared-check.js'];
+
+/**
+ * The lines of `a` and `b` as a diff: [' ', line] kept, ['-', line] only in a, ['+', line] only in b.
+ * A longest-common-subsequence diff, which is plenty for files this size.
+ */
+export function lineDiff(a, b) {
+  const x = a.split('\n');
+  const y = b.split('\n');
+  // Too big to compare line by line in reasonable time: say it all changed.
+  if (x.length * y.length > 4_000_000) return [...x.map((l) => ['-', l]), ...y.map((l) => ['+', l])];
+  const lcs = Array.from({ length: x.length + 1 }, () => new Uint32Array(y.length + 1));
+  for (let i = x.length - 1; i >= 0; i--) for (let j = y.length - 1; j >= 0; j--) lcs[i][j] = x[i] === y[j] ? lcs[i + 1][j + 1] + 1 : Math.max(lcs[i + 1][j], lcs[i][j + 1]);
+  const out = [];
+  let [i, j] = [0, 0];
+  while (i < x.length && j < y.length) {
+    if (x[i] === y[j]) (out.push([' ', x[i]]), i++, j++);
+    else if (lcs[i + 1][j] >= lcs[i][j + 1]) out.push(['-', x[i++]]);
+    else out.push(['+', y[j++]]);
+  }
+  while (i < x.length) out.push(['-', x[i++]]);
+  while (j < y.length) out.push(['+', y[j++]]);
+  return out;
+}
 
 /** The app's name, from its package.json ("trawl"), or the folder's name. */
 export function appName(dir) {

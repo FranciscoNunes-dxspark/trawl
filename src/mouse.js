@@ -101,13 +101,13 @@ const RESTORE = '\x1b8';
  * The mouse over `stdin` and `stdout`: { subscribe(fn) → unsubscribe, enable(on), stdout, off() }.
  * Listeners get the wheel, and a left click once the button comes back up where it went down.
  * Dragging instead selects text, painted over the frame and copied on release (clipboard.js, as y
- * copies in Results: the system clipboard, or OSC 52 through `stdout`); listeners then get
+ * copies: the system clipboard, or OSC 52 through `stdout`); listeners then get
  * { type: 'copy', text }. A key, a click or the wheel clears the selection. Ink must draw through
  * `stdout` (the same stream, watched for frames to select from and paint over); `off` turns the
  * terminal's reporting off when Trawl exits.
  *
- * `claimDrags(fn)`: where `fn(press)` says so, the app selects for itself (Trawl's console selects
- * SQL): listeners get each move as { drag: true, x, y, from } (`from` where the button went down),
+ * `claimDrags(fn)`: where `fn(press)` says so, the app selects for itself (as a text editor in it
+ * would): listeners get each move as { drag: true, x, y, from } (`from` where the button went down),
  * the last with `release` set, and nothing is painted.
  */
 export function mouseSession(stdin, stdout, { copy = (text) => copyToClipboard(text, { write: (s) => stdout.write(s) }) } = {}) {

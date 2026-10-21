@@ -3,11 +3,14 @@ import { Box, Text, useInput } from 'ink';
 import { theme } from '../theme.js';
 import { clean, fit, fitSegments, stringWidth } from '../text.js';
 
-/** One line of styled segments, cut to `width`. Draws the ❯ cursor and the selection background. */
-export function Row({ segments, width, selected = false, focused = true, pointer = true }) {
+/**
+ * One line of styled segments, cut to `width`. Draws the ❯ cursor and the selection background;
+ * `marked` gives a row the background without the cursor (one of several rows selected).
+ */
+export function Row({ segments, width, selected = false, marked = false, focused = true, pointer = true }) {
   const head = pointer ? [{ text: selected ? '❯ ' : '  ', color: theme.accent, bold: true }] : [];
   const segs = fitSegments([...head, ...segments], width);
-  const bg = selected && focused ? theme.selBg : undefined;
+  const bg = (selected || marked) && focused ? theme.selBg : undefined;
   return (
     <Text wrap="truncate">
       {segs.map((s, i) => (
@@ -74,7 +77,7 @@ export function Lines({ lines, width, height, offset = 0 }) {
 
 const FRAMES = ['·', '✢', '✳', '✶', '✻', '✽', '✻', '✶', '✳', '✢'];
 
-/** "✻ Running… (3s · esc to cancel)", animated while a query runs. */
+/** "✻ Running… (3s · esc to cancel)", animated while a command runs. */
 export function Spinner({ label, started, width }) {
   const [tick, setTick] = useState(0);
   useEffect(() => {
@@ -194,8 +197,9 @@ export function Confirm({ req, width, onDone }) {
 
 /** The input box. Rendering only: App owns the text and handles the keys (see usePromptKeys). */
 export function PromptBox({ value, cursor, focused, width, placeholder }) {
-  const sqlMode = value.startsWith('!');
-  const color = !focused ? theme.border : sqlMode ? theme.sqlMode : theme.accent;
+  // "!" runs what follows as it is (SQL, or a git command), and the box takes another colour.
+  const bangMode = value.startsWith('!');
+  const color = !focused ? theme.border : bangMode ? theme.bangMode : theme.accent;
   const inner = width - 6;
   let body;
   if (!focused && !value) {
@@ -221,7 +225,7 @@ export function PromptBox({ value, cursor, focused, width, placeholder }) {
   return (
     <Box borderStyle="round" borderColor={color} width={width} paddingX={1}>
       <Text color={focused ? color : theme.dim} bold>
-        {sqlMode ? '! ' : '> '}
+        {bangMode ? '! ' : '> '}
       </Text>
       {body}
     </Box>

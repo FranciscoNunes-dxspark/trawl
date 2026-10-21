@@ -1,0 +1,63 @@
+diff --git a/node_modules/ink/build/output.js b/node_modules/ink/build/output.js
+index 471e055..fa270c8 100644
+--- a/node_modules/ink/build/output.js
++++ b/node_modules/ink/build/output.js
+@@ -1,6 +1,18 @@
+ import sliceAnsi from 'slice-ansi';
+ import stringWidth from 'string-width';
+ import { styledCharsFromTokens, styledCharsToString, tokenize, } from '@alcalzone/ansi-tokenize';
++// Kept from frame to frame (patched in by Trawl: most lines are the same as in the frame before),
++// and emptied when one grows past its limit. A line's styled characters are an object each, so
++// fewer of those are kept: a screen is a few dozen lines, and a keystroke changes a handful.
++const STYLED_LIMIT = 1000;
++const WIDTH_LIMIT = 10000;
++const remember = (map, key, value, limit = WIDTH_LIMIT) => {
++    if (map.size >= limit) {
++        map.clear();
++    }
++    map.set(key, value);
++    return value;
++};
+ class OutputCaches {
+     widths = new Map();
+     blockWidths = new Map();
+@@ -8,16 +20,14 @@ class OutputCaches {
+     getStyledChars(line) {
+         let cached = this.styledChars.get(line);
+         if (cached === undefined) {
+-            cached = styledCharsFromTokens(tokenize(line));
+-            this.styledChars.set(line, cached);
++            cached = remember(this.styledChars, line, styledCharsFromTokens(tokenize(line)), STYLED_LIMIT);
+         }
+         return cached;
+     }
+     getStringWidth(text) {
+         let cached = this.widths.get(text);
+         if (cached === undefined) {
+-            cached = stringWidth(text);
+-            this.widths.set(text, cached);
++            cached = remember(this.widths, text, stringWidth(text));
+         }
+         return cached;
+     }
+@@ -28,17 +38,17 @@ class OutputCaches {
+             for (const line of text.split('\n')) {
+                 lineWidth = Math.max(lineWidth, this.getStringWidth(line));
+             }
+-            cached = lineWidth;
+-            this.blockWidths.set(text, cached);
++            cached = remember(this.blockWidths, text, lineWidth);
+         }
+         return cached;
+     }
+ }
++const sharedCaches = new OutputCaches();
+ export default class Output {
+     width;
+     height;
+     operations = [];
+-    caches = new OutputCaches();
++    caches = sharedCaches;
+     constructor(options) {
+         const { width, height } = options;
+         this.width = width;

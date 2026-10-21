@@ -1581,6 +1581,9 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
               : HINTS[view];
   const right = focus === 'prompt' || focus === 'editor' || focus === 'cell' || confirmReq?.secret ? '' : '  / commands · ! SQL · ? help';
 
+  // The prompt's example, in the connection's own SQL (TOP or LIMIT).
+  const example = dialectOf(session).selectTop('dbo.Players', 10);
+
   return (
     <Box flexDirection="column" width={W} height={H}>
       <Header session={session} tranCount={tranCount} tranFor={tranCount && tranSince.current ? openFor(Date.now() - tranSince.current) : ''} writesAllowed={writesAllowed} file={file} width={W} connecting={connecting} mood={mood} update={update} />
@@ -1602,7 +1605,7 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
       ) : confirmReq ? (
         <Confirm key={confirmReq.id} req={confirmReq} width={W} onDone={onConfirm} />
       ) : (
-        <PromptBox value={prompt.value} cursor={prompt.cursor} focused={focus === 'prompt'} width={W} placeholder='Press / for commands, ! to run SQL (try "!SELECT TOP (10) * FROM dbo.Players"), ? for shortcuts' />
+        <PromptBox value={prompt.value} cursor={prompt.cursor} focused={focus === 'prompt'} width={W} placeholder={`Press / for commands, ! to run SQL (try "!${example}"), ? for shortcuts`} />
       )}
       {suggestions.length ? <Suggestions items={suggestions} selected={sel} width={W} /> : null}
       <Row

@@ -7,12 +7,13 @@ import { fit } from '../text.js';
 import { useListNav, useMouse } from './hooks.js';
 import { Lines, Panel, Row } from './parts.jsx';
 
+// Colours as getters, so they're the theme's as it is now (light or dark).
 const KIND = {
-  table: { mark: 'T', color: theme.table },
-  view: { mark: 'V', color: theme.view },
-  procedure: { mark: 'P', color: theme.routine },
-  function: { mark: 'F', color: theme.routine },
-  other: { mark: '?', color: theme.dim },
+  table: { mark: 'T', get color() { return theme.table; } },
+  view: { mark: 'V', get color() { return theme.view; } },
+  procedure: { mark: 'P', get color() { return theme.routine; } },
+  function: { mark: 'F', get color() { return theme.routine; } },
+  other: { mark: '?', get color() { return theme.dim; } },
 };
 
 const count = (n) => (n == null ? '' : n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e4 ? `${Math.round(n / 1e3)}k` : String(n));

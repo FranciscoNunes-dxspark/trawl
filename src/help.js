@@ -12,7 +12,7 @@ export const HELP = [
       ['r', 'Reload the schema'],
       ['esc', 'Cancel the running query, or clear the activity lines'],
       ['?', 'This help'],
-      [',', 'Settings (/settings): row limit, accent colour, mouse, updates'],
+      [',', 'Settings (/settings): row limit, accent colour, theme, mouse, updates'],
       ['q / ctrl+c', 'Quit (asks first if a transaction is open)'],
       ['mouse', 'Click a tab, a row, a cell or the prompt · double-click does ↵ (but never runs a statement)\nthe wheel scrolls (shift+wheel: Results\' columns) · drag to select text, copied when you let go\nin the console: a click starts typing there; double-click a word, triple-click a line, click the gutter for the statement, click a suggestion to take it; a drag selects the SQL (ctrl+r runs just that)'],
     ],
@@ -198,7 +198,7 @@ export const HELP = [
     title: 'Settings',
     about: ', or /settings: Trawl\'s own; a connection\'s are on Connections',
     rows: [
-      ['↵ or space', 'Change it: the row limit, the accent colour, the mouse, checking for and installing updates, notifying when a run takes over 10 s (a bell and a desktop notification), and warning about a transaction left open'],
+      ['↵ or space', 'Change it: the row limit, the accent colour, the theme (dark, light, or auto from the terminal), the mouse, checking for and installing updates, notifying when a run takes over 10 s (a bell and a desktop notification), and warning about a transaction left open'],
       ['esc / q', 'Close'],
     ],
   },

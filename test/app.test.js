@@ -10,7 +10,7 @@ import { DEMO_CONNECTIONS } from '../src/connections.js';
 import { memoryCredentials } from '../src/credentials.js';
 import { DbError, untrustedCert } from '../src/db.js';
 import { demoSession } from '../src/demo.js';
-import { setAccent } from '../src/theme.js';
+import { applyTheme, theme } from '../src/theme.js';
 import { App } from '../src/ui/App.jsx';
 
 const KEYS = { down: '\x1b[B', enter: '\r', esc: '\x1b' };
@@ -248,6 +248,15 @@ test('Settings, an overlay, changes the row limit, the accent and updates, and k
   await until(() => frame().includes('Accent colour') && frame().includes('↵ next colour'), 'the accent row');
   app.stdin.write(' ');
   await until(() => /Accent colour\s+██ teal/.test(frame()), 'teal');
+  // The theme goes round dark, light and auto (the default, dark where the terminal doesn't say).
+  app.stdin.write('j');
+  await until(() => /Theme\s+auto/.test(frame()) && frame().includes('COLORFGBG'), 'the theme row');
+  app.stdin.write(KEYS.enter);
+  await until(() => /Theme\s+dark/.test(frame()), 'dark');
+  app.stdin.write(KEYS.enter);
+  await until(() => /Theme\s+light/.test(frame()), 'light');
+  assert.equal(theme.mode, 'light');
+  assert.equal(theme.accent, '#008787', "the preset accent's own shade for a light background");
   // The mouse, which this test terminal can't report.
   app.stdin.write('j');
   await until(() => frame().includes('Drag to select text'), 'the mouse row');
@@ -267,6 +276,7 @@ test('Settings, an overlay, changes the row limit, the accent and updates, and k
   const config = JSON.parse(readFileSync(join(process.env.TRAWL_HOME, 'config.json'), 'utf8'));
   assert.equal(config.limit, 200);
   assert.equal(config.accent, '#5fd7d7');
+  assert.equal(config.theme, 'light');
   assert.equal(config.mouse, false);
   assert.equal(config.autoUpdate, false);
   assert.equal(config.checkUpdates, false);
@@ -282,7 +292,7 @@ test('Settings, an overlay, changes the row limit, the accent and updates, and k
   app.stdin.write(KEYS.esc);
   await until(() => !frame().includes('Row limit'), 'closed with esc');
   app.unmount();
-  setAccent('#5fafff');
+  applyTheme({});
 });
 
 test('the console: type SQL, ctrl+r runs it with the results underneath, and it is kept', async () => {

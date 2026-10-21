@@ -16,7 +16,7 @@ function labelled(lines) {
   return lines.map((l, i) => (i < sqlAt ? [{ text: l.slice(0, 10), color: theme.dim }, { text: l.slice(10) }] : l));
 }
 
-const NOT_CONNECTED = [[{ text: '  Not connected. Press 5 for Connections, or /connect <name>.', color: theme.dim }]];
+const NOT_CONNECTED = () => [[{ text: '  Not connected. Press 5 for Connections, or /connect <name>.', color: theme.dim }]];
 
 // A message across the list, wrapped to it.
 const para = (text, width, color) => wrap(text, width - 2).map((l) => [{ text: `  ${l}`, color }]);
@@ -89,7 +89,7 @@ function SessionsList({ activity, session, ctx, width, height, active }) {
         ? `${rows.length} of ${activity.sessions.length}${chains ? ` · ${chains} blocking` : ''} · read ${relTime(activity.at)} ago`
         : 'reading…';
   let body;
-  if (!session) body = NOT_CONNECTED;
+  if (!session) body = NOT_CONNECTED();
   else if (activity?.error) body = [[{ text: `  ${activity.error}`, color: theme.del }], '', [{ text: '  Reading sessions needs VIEW SERVER STATE (VIEW DATABASE STATE on Azure SQL Database).', color: theme.dim }]];
   else if (activity && !rows.length) body = [[{ text: all ? '  No sessions.' : '  Nothing running, and nothing blocked. a shows the idle sessions too.', color: theme.dim }]];
 
@@ -198,7 +198,7 @@ function JobsList({ read, session, ctx, width, height, active }) {
           ? ''
           : 'reading…';
   let body;
-  if (!session) body = NOT_CONNECTED;
+  if (!session) body = NOT_CONNECTED();
   else if (read?.error) body = [...para(read.error, innerW, theme.del), '', ...para("Reading the jobs needs one of msdb's SQL Agent roles (SQLAgentReaderRole, say) or sysadmin.", innerW, theme.dim)];
   else if (read?.unavailable) body = para(read.unavailable, innerW, theme.dim);
   else if (read && !jobs.length) body = [[{ text: '  No SQL Agent jobs on this server.', color: theme.dim }]];
@@ -296,7 +296,7 @@ function TopQueriesList({ read, session, ctx, width, height, active }) {
           ? ''
           : 'reading…';
   let body;
-  if (!session) body = NOT_CONNECTED;
+  if (!session) body = NOT_CONNECTED();
   else if (read?.error) body = [...para(read.error, innerW, theme.del), '', ...para('Reading them needs VIEW DATABASE STATE (VIEW SERVER STATE for the plan cache).', innerW, theme.dim)];
   else if (read?.unavailable) body = para(read.unavailable, innerW, theme.dim);
   else if (read && !queries.length) body = [...(read.note ? para(read.note, innerW, theme.warn) : []), ...para(`No queries in ${source?.label ?? 'the statistics'} yet.`, innerW, theme.dim)];

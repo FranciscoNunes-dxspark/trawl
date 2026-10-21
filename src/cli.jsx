@@ -4,7 +4,7 @@ import { COMPILED, VERSION } from './version.js';
 import { fetchLatest, installUpdate, removeOldExecutables } from './update.js';
 import { loadConfig } from './config.js';
 import { DEMO_CONNECTIONS } from './connections.js';
-import { setAccent } from './theme.js';
+import { applyTheme } from './theme.js';
 import { App } from './ui/App.jsx';
 import { terminalMouse } from './mouse.js';
 import { notification } from './notify.js';
@@ -56,7 +56,7 @@ async function runApp() {
 
   const config = loadConfig();
   if (demo) config.connections = [...DEMO_CONNECTIONS, ...config.connections.filter((c) => !DEMO_CONNECTIONS.some((d) => d.name === c.name))];
-  setAccent(config.accent);
+  applyTheme(config);
 
   // Draw on the alternate screen, like a full-screen app, and give the terminal back untouched on
   // exit, window title included: terminals that keep a stack of titles get theirs back (CSI 22/23 t),

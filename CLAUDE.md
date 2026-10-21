@@ -54,7 +54,7 @@ The Explorer is the server as a tree: `schema.databases` (system databases last)
 
 Clipboard (`src/clipboard.js`): through the OS's own tools, as `credentials.js` (PowerShell's `Set-Clipboard`, `pbcopy`, `wl-copy`/`xclip`/`xsel`), falling back to OSC 52 over SSH or when they fail. `App` takes it as the `clipboard` prop; tests pass a recorder.
 
-Theme and text: use `BULLET` instead of `⏺` (Windows draws it wide), and `src/text.js` (`fit`, `fitSegments`, `stringWidth`) for width-aware truncation, never `.length`.
+Theme and text: `src/theme.js` has a dark and a light palette (`DARK`, `LIGHT`); `applyTheme(config)` copies one into `theme` (the Theme setting, `auto` reading `COLORFGBG`) and the accent over it (a preset accent takes its `light` shade), at start-up in `cli.jsx` and from Settings. Every colour comes from `theme` and is read while drawing: a module-level table of colours uses getters (`KIND` in `ExplorerView.jsx`) or a function (`COLORS()` in `ConsoleView.jsx`), never values copied at import, which would keep the palette Trawl started with. Use `BULLET` instead of `⏺` (Windows draws it wide), and `src/text.js` (`fit`, `fitSegments`, `stringWidth`) for width-aware truncation, never `.length`.
 
 ## Tests
 

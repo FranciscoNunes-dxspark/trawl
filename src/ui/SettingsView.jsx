@@ -1,7 +1,7 @@
 import React from 'react';
 import { Box, useInput } from 'ink';
 import { configDir } from '../config.js';
-import { ACCENTS, setAccent, theme } from '../theme.js';
+import { ACCENTS, THEMES, applyTheme, setAccent, theme } from '../theme.js';
 import { relTime, wrap } from '../text.js';
 import { checksDisabled } from '../update.js';
 import { NOTIFY_AFTER } from '../notify.js';
@@ -26,6 +26,7 @@ export function SettingsView({ config, ctx, updates, update, width, height, acti
 
   const accent = config.accent ?? ACCENTS[0].color;
   const preset = ACCENTS.findIndex((x) => x.color.toLowerCase() === accent.toLowerCase());
+  const themeSetting = THEMES.includes(config.theme) ? config.theme : 'auto';
   const checksOff = checksDisabled(config);
   const envOff = checksOff && config.checkUpdates !== false;
   const onOff = (on, note = '') => [{ text: on ? 'on' : 'off', color: on ? theme.ok : theme.dim, bold: true }, ...(note ? [{ text: `  ${note}`, color: theme.dim }] : [])];
@@ -45,7 +46,7 @@ export function SettingsView({ config, ctx, updates, update, width, height, acti
     {
       label: 'Accent colour',
       value: [
-        { text: '██ ', color: accent },
+        { text: '██ ', color: theme.accent },
         { text: preset >= 0 ? ACCENTS[preset].name : accent, bold: true },
         { text: preset === 0 ? '  (Glim’s)' : '', color: theme.dim },
       ],
@@ -55,6 +56,20 @@ export function SettingsView({ config, ctx, updates, update, width, height, acti
         const next = ACCENTS[(preset + 1) % ACCENTS.length].color;
         setAccent(next);
         ctx.setConfig((c) => ({ ...c, accent: next }));
+      },
+    },
+    {
+      label: 'Theme',
+      value: [{ text: themeSetting, bold: true }, { text: themeSetting === 'auto' ? `  ${theme.mode} here${process.env.COLORFGBG ? '' : ' (the terminal doesn’t say)'}` : '', color: theme.dim }],
+      hint: '↵ next',
+      about: [
+        'Dark or light colours, for a dark or a light terminal background; the accent colour stays yours either way (a preset takes its darker shade on light).',
+        'auto, the default, goes by COLORFGBG, which some terminals set (Konsole, rxvt, iTerm2 with its option on), and is dark where it isn’t set. ↵ goes through dark, light and auto; it is "theme" in config.json.',
+      ],
+      change: () => {
+        const next = THEMES[(THEMES.indexOf(themeSetting) + 1) % THEMES.length];
+        ctx.setConfig((c) => ({ ...c, theme: next }));
+        applyTheme(ctx.config);
       },
     },
     {

@@ -164,7 +164,7 @@ Press `?` inside for every shortcut: the sections down the left, opening on the 
 | Activity, jobs | `↵` recent runs · `s` start the job · `R` read again |
 | Activity, top queries | `o` sort by total duration, CPU, reads or executions · `↵` the query in full · `e` edit in the console · `R` read again |
 | Migrations (`/migrations <folder>`) | `R` run the pending ones (`/migrations run`) |
-| Settings (`,`) | `↵` or space changes the row limit, the accent colour, the mouse, whether Trawl checks for and installs updates, whether it notifies when a long run ends, and how long a transaction may sit open before Trawl warns · `esc` closes |
+| Settings (`,`) | `↵` or space changes the row limit, the accent colour, the theme (dark, light or auto), the mouse, whether Trawl checks for and installs updates, whether it notifies when a long run ends, and how long a transaction may sit open before Trawl warns · `esc` closes |
 
 One-liners can also go straight in the prompt: SQL there runs with `!`, or without it when it starts with a SQL keyword (`select …`, `exec …`).
 
@@ -333,6 +333,10 @@ On PostgreSQL it checks what has an equivalent there: tables without a primary k
 Type `/` and the menu narrows as you type. `tab` completes, `↑`/`↓` picks, `↵` runs. `/connect` completes connection names, `/use` database names, `/describe`, `/generate` and `/scaffold` tables and views, and `/script` and `/uses` everything in the database.
 
 `/import datagrip [folder]` `/import-csv <file.csv> <table> [--run]` `/connect <name>` `/add …` `/forget <name>` `/folder <connection> [folder]` `/password [connection]` `/disconnect` `/use <database>` `/open <file.sql>` `/snippet [name]` `/snippets` `/console` `/tab …` `/new` `/format` `/search <text>` `/save <file.sql>` `/describe <table>` `/script <name>` `/grep <text>` `/uses <object>` `/find [text]` `/export <file>` `/filter [text]` `/cell` `/follow` `/pin` `/compare` `/copy [tsv|csv|json|md|insert]` `/limit [rows]` `/watch <seconds> [sql] [--until <condition>]` `/writes` `/tx [auto|manual]` `/commit` `/rollback` `/undo-write` `/ask <question>` `/why` `/explain` `/ai [connection] [level]` `/update` `/settings` `/stats [on|off]` `/plan [actual] [sql]` `/more` `/diff <connection> [database]` `/health` `/sizes` `/deadlocks` `/fanout <folder> [sql]` `/activity` `/jobs` `/top-queries` `/kill <session>` `/script-all <folder>` `/migrations [run] <folder>` `/generate <table> [rows] [--seed n]` `/scaffold <table> [csharp|ef|ts|python]` `/last` `/refresh` `/help` `/quit`
+
+### Theme
+
+Trawl's colours come in a dark and a light palette. **Theme** in Settings (`,`) goes through `dark`, `light` and `auto` (`"theme"` in `config.json`). `auto`, the default, reads the `COLORFGBG` variable that some terminals set (Konsole, rxvt, iTerm2 with its option on) to tell a light background from a dark one, and is dark where it isn't set. The accent colour stays yours either way: on light, each of the presets Settings goes through takes a darker shade of itself, and a colour of your own (`"accent": "#rrggbb"`) is used as it is.
 
 ## Claude
 

@@ -155,19 +155,22 @@ test('/watch --until stops and notifies when a row matches, and another run stop
 test('a transaction left open and idle is said once, with a notification and its locks, and the header shows it', async () => {
   const told = [];
   const app = start('demo', { notify: (title, body) => told.push([title, body]) }, { openTransactionWarning: 0.02 });
-  await until(() => frame().includes('Clubs'), 'the explorer');
-  await command(app, '!BEGIN TRANSACTION');
-  await until(() => frame().includes('TRANSACTION OPEN'), 'the open transaction');
-  await command(app, '!UPDATE dbo.Players SET Goals = 1 WHERE Id = 2');
-  await until(() => told.length === 1, 'the notification', 6000);
-  assert.equal(told[0][0], 'Trawl: a transaction is open on demo');
-  await until(() => frame().includes('Transaction open on demo for under 1m, idle under 1m: /commit or /rollback ends it.'), 'the warning');
-  assert.match(frame(), /dbo\.Players: X on 3 keys, IX on the table, IX on the page/);
-  await new Promise((r) => setTimeout(r, 1500));
-  assert.equal(told.length, 1, 'once');
-  await command(app, '/rollback');
-  await until(() => !frame().includes('TRANSACTION OPEN'), 'the rollback');
-  app.unmount();
+  try {
+    await until(() => frame().includes('Clubs'), 'the explorer');
+    // One run, so the transaction is never idle without its write (a slow machine types slowly).
+    await command(app, '!BEGIN TRANSACTION; UPDATE dbo.Players SET Goals = 1 WHERE Id = 2');
+    await until(() => frame().includes('TRANSACTION OPEN'), 'the open transaction');
+    await until(() => told.length === 1, 'the notification', 6000);
+    assert.equal(told[0][0], 'Trawl: a transaction is open on demo');
+    await until(() => frame().includes('Transaction open on demo for under 1m, idle under 1m: /commit or /rollback ends it.'), 'the warning');
+    assert.match(frame(), /dbo\.Players: X on 3 keys, IX on the table, IX on the page/);
+    await new Promise((r) => setTimeout(r, 1500));
+    assert.equal(told.length, 1, 'once');
+    await command(app, '/rollback');
+    await until(() => !frame().includes('TRANSACTION OPEN'), 'the rollback');
+  } finally {
+    app.unmount();
+  }
 });
 
 test('/why asks Claude about the last error, with the SQL and the schema, and puts the fix in the console', async () => {

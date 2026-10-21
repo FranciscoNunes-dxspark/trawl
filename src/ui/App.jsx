@@ -796,6 +796,8 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
       setClock((n) => n + 1);
       if (dueWarning({ open: tranRef.current > 0, warned: tranWarned.current, idleMs: Date.now() - lastActive.current, minutes: minutesOpen })) warnOpenTransaction();
     }, Math.max(200, Math.min(30_000, (minutesOpen || 1) * 15_000)));
+    // It never keeps the process alive by itself.
+    t.unref?.();
     return () => clearInterval(t);
   }, [tranCount, minutesOpen]);
   // Nothing keeps running after Trawl closes.

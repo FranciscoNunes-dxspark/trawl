@@ -1916,7 +1916,8 @@ async function readMigrations(ctx, root) {
 }
 
 function showMigrationStatus(ctx, root, m) {
-  const title = `Migrations: ${root}`;
+  // The folder by name: its whole path is in the text below, and in the title it would crowd out R's hint.
+  const title = `Migrations: ${basename(root)}`;
   const text = statusText(m.status, { database: m.database, folder: root, history: m.history, files: m.files.length });
   ctx.rememberOutput(title, text);
   const n = m.status.pending.length;

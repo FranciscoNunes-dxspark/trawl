@@ -50,7 +50,7 @@ Releases are automatic: every push to main (a merged pull request, say) publishe
 trawl --demo
 ```
 
-This adds two in-memory connections for the session: `demo`, and `demo-prod`, which behaves like a production connection. Each has the databases `ClubA` and `ClubB`. The demo has no SQL engine. It answers the catalog (and `/grep` and `/uses`, with a trigger on `Players` for them to find), `SELECT [TOP (n)] * FROM` a table, simple `SELECT` lists, `USE`, transactions, made-up plans (estimated and actual), `WAITFOR DELAY` (to try cancelling) and `RAISERROR`/`THROW`. Writes only report how many rows they would touch.
+This adds two in-memory connections for the session: `demo`, and `demo-prod`, which behaves like a production connection. Each has the databases `ClubA` and `ClubB`. The demo has no SQL engine. It answers the catalog (and `/grep` and `/uses`, with a trigger on `Players` for them to find), `SELECT [TOP (n)] * FROM` a table, simple `SELECT` lists, `USE`, transactions, made-up plans (estimated and actual), `WAITFOR DELAY` (to try cancelling) and `RAISERROR`/`THROW`. Writes only report how many rows they would touch, though they keep their copy for `/undo-write` all the same, and an open transaction says it holds a few made-up locks.
 
 ## Connect
 
@@ -77,7 +77,7 @@ Save connections with `/add`:
 
 Azure SQL gets a fresh token from the Azure CLI each time it connects, so there's no password to keep. A SQL or Windows login asks for its password the first time you connect, shown as `*`. With "Keep it" ticked (`tab` changes it), a password that signs in is saved in the operating system's credential store: **Windows Credential Manager** (as `Trawl:<connection>`), the macOS Keychain, or the Secret Service keyring on Linux (through `secret-tool`). It is never written to Trawl's own files. A saved password the server turns down is asked for again. `p` in Connections, or `/password [connection]`, sets a new one ahead of time; leaving it empty removes the saved one, and forgetting a connection removes its password too. If you'd rather keep a password in an environment variable, `/add … --password-env <VAR>` names it, and the variable comes first when it's set.
 
-Connections live in `~/.trawl/config.json` (or `TRAWL_HOME`), along with the prompt history, the run history and what Settings (`,`) changes: the row limit, the accent colour, the mouse, updates and notifications.
+Connections live in `~/.trawl/config.json` (or `TRAWL_HOME`), along with the prompt history, the run history and what Settings (`,`) changes: the row limit, the accent colour, the mouse, updates, notifications and the warning about open transactions.
 
 When a query (or anything else with the spinner) takes longer than 10 seconds, Trawl rings the terminal's bell and asks it for a desktop notification saying what finished and how (OSC 9, which Windows Terminal, iTerm2, WezTerm and kitty show, or OSC 777 in GNOME Terminal and other VTE terminals), for when you've switched to another window. **Notify when done** in Settings turns it off, and `"notifyAfter": 30` in `config.json` changes the seconds. A run you cancel says nothing.
 
@@ -161,7 +161,7 @@ Press `?` inside for every shortcut: the sections down the left, opening on the 
 | Activity | `R` read again · `↵` the session in full · `x` kill · `a` idle sessions too · `J` SQL Agent jobs · `Q` top queries (the same key again, or `esc`, back to the sessions) |
 | Activity, jobs | `↵` recent runs · `s` start the job · `R` read again |
 | Activity, top queries | `o` sort by total duration, CPU, reads or executions · `↵` the query in full · `e` edit in the console · `R` read again |
-| Settings (`,`) | `↵` or space changes the row limit, the accent colour, the mouse, whether Trawl checks for and installs updates, and whether it notifies when a long run ends · `esc` closes |
+| Settings (`,`) | `↵` or space changes the row limit, the accent colour, the mouse, whether Trawl checks for and installs updates, whether it notifies when a long run ends, and how long a transaction may sit open before Trawl warns · `esc` closes |
 
 One-liners can also go straight in the prompt: SQL there runs with `!`, or without it when it starts with a SQL keyword (`select …`, `exec …`).
 
@@ -225,6 +225,14 @@ A long value is cut short in the grid. `v` (or `/cell`) shows the whole of the c
 
 To see what a change did, pin a result first: `p` in Results (or `/pin`) keeps the result set on screen. Run the query again (after an update, say, or on another database), and `c` (or `/compare`) shows the difference as a result set of its own: a `change` column first, `~` for a row whose values changed (with the new values, and a `was` column at the end saying `Goals: 3 → 4`), `+` for a row that's new and `−` for one that's gone, and a line under it counting them and the rows that are the same. When the pinned rows are one table's with its primary key (as for editing, below), rows are matched by the key, so a changed row shows as changed; otherwise whole rows are compared, so it shows as one removed and one added. Both results need the same columns, in any order. The pin stays until you pin another.
 
+### Watching a query
+
+`/watch <seconds> <sql>` runs a query again every few seconds (every 2 at the most often), as for a job's progress or a queue emptying: `/watch 5 SELECT Id, Status FROM dbo.Jobs WHERE Id = 42`. Without the SQL, it watches the console's selection, or the statement under its cursor. The rows show in Results as any run's do, with the panel's title saying `watching every 5s · run 3`, and the cells that changed since the run before picked out in colour (a count of them beside the rows). When the rows are one table's with its primary key, rows are matched by the key, as comparing results does, so only the values that changed light up; otherwise a changed row shows as new, all of it in colour. The cursor, the sort and the filter stay where they were from one run to the next.
+
+It only reads: anything that would change data or schema is refused. Runs never overlap, and it stops when you press `esc`, run anything else, `/watch stop`, switch connection or database, stage an edit in Results, or a run fails. The first run goes to History; the ones after it don't.
+
+`--until <condition>` stops it when a row matches, and rings the bell and raises a desktop notification as a long run does: `/watch 10 SELECT Status FROM dbo.Jobs WHERE Id = 42 --until "Status = 'Done'"`. The condition is one column, an operator (`=`, `<>`, `>`, `<`, `>=`, `<=`) and a value (a number, `'text'`, or a single word), or `IS NULL` / `IS NOT NULL`; text is compared ignoring case. `--until "rows > 0"` and `--until "rows = 0"` (any number, any operator) count the rows instead, to wait for something to appear or for a queue to empty.
+
 ### Following foreign keys
 
 When the rows on screen are one table's (as for editing, below, though the primary key needn't be there), `h`/`l` move a cursor between cells, and `F` (or `/follow`) follows the cell's foreign key: on `Players.ClubId`, it opens the club that row refers to (`SELECT TOP (…) * FROM [dbo].[Clubs] WHERE [Id] = 2`); on a key other tables refer to, like `Clubs.Id`, it opens their rows that refer to it. When there are several ways to go, it asks which. A key of several columns takes them all from the row, and a `NULL` refers to nothing. The query runs like any other, so it lands in History and Results, and `F` works there again.
@@ -265,13 +273,15 @@ The tab has two more lists, and its title says which one is on screen. The same 
 - **Auto or manual commit, as DataGrip's Tx: Auto/Manual.** With manual commit, the first write starts a transaction, and the header shows `TRANSACTION OPEN` until you `/commit` or `/rollback`. With auto commit, each statement takes effect as it runs. Production connections use manual commit unless you change it. `/tx manual` or `/tx auto` switches the connection you're on and remembers it (switching production to auto asks first), `/add … --commit manual` sets it when adding, and a DataGrip data source set to manual comes across that way. Disconnecting, switching database or quitting with a transaction open asks first, because it rolls back.
 - **Risky statements ask first, on every connection**: `UPDATE` or `DELETE` with no `WHERE`, `DROP` and `TRUNCATE`.
 - **Writes say how many rows they change.** Before an `UPDATE` or `DELETE` runs, Trawl counts its rows with a `SELECT COUNT_BIG(*)` over the same `FROM` and `WHERE` (nothing is written to find out), and puts the number in the question. A `WHERE` that would still change more than 1,000 rows asks first too. `esc` while it counts cancels the write. Statements it can't count safely (`TOP`, `OUTPUT`, several at once) run as before.
+- **Writes can be undone.** Before an `UPDATE` or `DELETE` of one table with a primary key runs, Trawl copies the rows it is about to change, with a `SELECT *` over the same `FROM` and `WHERE`, up to 10,000 of them; an `INSERT` whose key values are written in it keeps those keys. The log says so under the run, and so does the question when one is asked (or why no copy is kept). `/undo-write` lists the last 10 kept for the connection you're on (when, the statement, how many rows), and `↵` on one puts the script that undoes it in the console tab `undo`: an `UPDATE` of each row back to its old values, found by its primary key; the deleted rows `INSERT`ed again, their identity values too (`SET IDENTITY_INSERT … ON` on SQL Server, `OVERRIDING SYSTEM VALUE` on Postgres); or a `DELETE` of the keys an `INSERT` added. Nothing runs by itself: read it, then `R`, and the usual checks apply. It puts back the values as they were then, over any change made to those rows since. What isn't copied runs as before: a table with no primary key, a join (`UPDATE … FROM`, `DELETE … FROM`, `USING`), `TOP`, `LIMIT`, `OUTPUT`, a change to the primary key itself, several statements at once, an `INSERT … SELECT` or one whose keys are the server's to give (an identity), and more than 10,000 rows. With manual commit, a write you then `/rollback` keeps its copy, and undoing it changes nothing. The actual plan (`P`) keeps no copy. The copies are kept on this machine only, a file per connection under `~/.trawl/undo/` that only you can read (never in `config.json`), and they never go to Claude, whatever the connection's Claude level: they hold the rows' data, so keep that in mind on a shared computer.
+- **A transaction left open is said once.** When a transaction has been open (`TRANSACTION OPEN` in the header) and nothing has run for 5 minutes, Trawl rings the bell and asks the terminal for a desktop notification, once a transaction, and the log says what it holds, which other sessions may be waiting on: on SQL Server its locks from `sys.dm_tran_locks` (`dbo.Players: X on 3 keys, IX on the table`), on Postgres `pg_locks` for its own backend, and on MySQL `performance_schema.data_locks` where the server has it (8.0 and later), with a reminder that `/commit` or `/rollback` ends it. From a minute on, the header says how long it has been open (`TRANSACTION OPEN 7m`). **Warn about open transactions** in Settings goes through 1, 2, 5, 10, 15, 30 and 60 minutes and off; `"openTransactionWarning": 5` in `config.json` takes any number of minutes, and `0` turns it off.
 - A statement counts as a write when it has `INSERT`, `UPDATE`, `DELETE`, `MERGE`, `SELECT … INTO`, DDL, `GRANT`/`REVOKE`, `DBCC`, or `EXEC` of anything except the read-only system procedures (`sp_help`, `sp_who2`, `sp_spaceused` and the like).
 
 ### Slash commands
 
 Type `/` and the menu narrows as you type. `tab` completes, `↑`/`↓` picks, `↵` runs. `/connect` completes connection names, `/use` database names, `/describe` tables and views, and `/script` and `/uses` everything in the database.
 
-`/import datagrip [folder]` `/import-csv <file.csv> <table> [--run]` `/connect <name>` `/add …` `/forget <name>` `/folder <connection> [folder]` `/password [connection]` `/disconnect` `/use <database>` `/open <file.sql>` `/snippet [name]` `/snippets` `/console` `/tab …` `/new` `/format` `/search <text>` `/save <file.sql>` `/describe <table>` `/script <name>` `/grep <text>` `/uses <object>` `/find [text]` `/export <file>` `/filter [text]` `/cell` `/follow` `/pin` `/compare` `/copy [tsv|csv|json|md|insert]` `/limit [rows]` `/writes` `/tx [auto|manual]` `/commit` `/rollback` `/ask <question>` `/explain` `/ai [connection] [level]` `/update` `/settings` `/stats [on|off]` `/plan [actual] [sql]` `/more` `/diff <connection> [database]` `/fanout <folder> [sql]` `/activity` `/jobs` `/top-queries` `/kill <session>` `/last` `/refresh` `/help` `/quit`
+`/import datagrip [folder]` `/import-csv <file.csv> <table> [--run]` `/connect <name>` `/add …` `/forget <name>` `/folder <connection> [folder]` `/password [connection]` `/disconnect` `/use <database>` `/open <file.sql>` `/snippet [name]` `/snippets` `/console` `/tab …` `/new` `/format` `/search <text>` `/save <file.sql>` `/describe <table>` `/script <name>` `/grep <text>` `/uses <object>` `/find [text]` `/export <file>` `/filter [text]` `/cell` `/follow` `/pin` `/compare` `/copy [tsv|csv|json|md|insert]` `/limit [rows]` `/watch <seconds> [sql] [--until <condition>]` `/writes` `/tx [auto|manual]` `/commit` `/rollback` `/undo-write` `/ask <question>` `/why` `/explain` `/ai [connection] [level]` `/update` `/settings` `/stats [on|off]` `/plan [actual] [sql]` `/more` `/diff <connection> [database]` `/fanout <folder> [sql]` `/activity` `/jobs` `/top-queries` `/kill <session>` `/last` `/refresh` `/help` `/quit`
 
 ## Claude
 
@@ -281,7 +291,7 @@ Each connection has a Claude access level, shown in Connections and changed with
 
 | Level | Claude sees |
 | --- | --- |
-| `schema` (the default) | Table and column names, the SQL, its plans, and error messages. Never rows. |
+| `schema` (the default) | Table and column names, the SQL, its plans, and error messages (`/why`). Never rows. |
 | `results` | Rows too, when it runs a query. `/ai results` asks first, since the data then leaves your machine. |
 | `off` | Nothing. |
 
@@ -292,6 +302,10 @@ Each connection has a Claude access level, shown in Connections and changed with
 `/ask top scorers per club this season` sends Claude the question and the database's tables and columns (names only, never rows) and puts the query it writes into the console, under the question and Claude's note as comments. **Nothing runs by itself**: read it, change it if you like, then `ctrl+r`. The usual checks apply when you do, so a risky statement still asks first.
 
 It uses the Claude Code CLI you're already signed in to (`claude -p`), with no tools and none of your MCP servers, so Claude can only answer. Nothing to configure, and no API key. `esc` cancels while it thinks. A connection at the `off` level can't be asked about.
+
+### Why did it fail
+
+After a run the server turned down, the log line under the error says `/why asks Claude what went wrong, and for a fix.` `/why` sends Claude the error (its message, number and line), the SQL with its lines numbered (only the lines around the error when the script is long), and the database's tables and columns (names only, never rows), and puts the corrected statement into the console, under the error and Claude's explanation as comments. **Nothing runs by itself**: read it, then `ctrl+r`, and the usual checks apply. It's for the last run only: one that worked leaves nothing to explain. A connection at the `off` level can't be asked about, and doesn't offer it.
 
 ### Explain a plan
 

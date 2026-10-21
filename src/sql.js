@@ -499,7 +499,7 @@ export function withoutLeadingComments(text) {
 
 // Sorting values from the server: NULL first, then by what they are (numbers as numbers, dates
 // by time), text by the user's locale.
-function compareValues(a, b) {
+export function compareValues(a, b) {
   if (a == null || b == null) return a == null ? (b == null ? 0 : -1) : 1;
   if (a instanceof Date && b instanceof Date) return a - b;
   if ((typeof a === 'number' || typeof a === 'bigint') && (typeof b === 'number' || typeof b === 'bigint')) return a < b ? -1 : a > b ? 1 : 0;

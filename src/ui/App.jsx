@@ -35,9 +35,11 @@ import { Picker } from './Picker.jsx';
 import { WELCOME_HEIGHT, Welcome } from './Glim.jsx';
 import { FACES, moodFor } from '../glim.js';
 import { checksDisabled, isDue, isNewer, openUrl, updateAdvice } from '../update.js';
-import { askClaude as askClaudeCli } from '../ai.js';
+import { askClaude as askClaudeCli, canSeeSchema } from '../ai.js';
 import { COMPILED, VERSION } from '../version.js';
 import { worthNotifying } from '../notify.js';
+import { changedCells, untilMatch, untilText } from '../watch.js';
+import { dueWarning, locksText, openFor, warnMinutes, warningTitle } from '../transactions.js';
 
 const VIEWS = [
   { id: 'explorer', label: 'Explorer' },
@@ -100,7 +102,7 @@ function summarize(res, limit) {
 // How far installing a newer release has got, after its version in the header.
 const UPDATE_STATES = { installing: ' downloading…', installed: ' at next start' };
 
-function Header({ session, tranCount, writesAllowed, file, width, connecting, mood, update }) {
+function Header({ session, tranCount, tranFor = '', writesAllowed, file, width, connecting, mood, update }) {
   const segs = [
     { text: `${FACES[mood]} `, color: mood === 'alert' ? theme.warn : theme.accent, bold: true },
     { text: 'Trawl', bold: true },
@@ -114,7 +116,8 @@ function Header({ session, tranCount, writesAllowed, file, width, connecting, mo
     if (isReadOnly(conn)) segs.push({ text: writesAllowed ? '  writes allowed' : '  read-only', color: writesAllowed ? theme.warn : theme.dim });
     // DataGrip's "Tx: Manual": writes wait for /commit.
     if (commitMode(conn) === 'manual') segs.push({ text: '  manual commit', color: theme.dim });
-    if (tranCount) segs.push({ text: '  ' }, { text: ` TRANSACTION OPEN `, bg: theme.warn, color: theme.ink, bold: true });
+    // How long it has been open, once that's a minute or more.
+    if (tranCount) segs.push({ text: '  ' }, { text: ` TRANSACTION OPEN${tranFor ? ` ${tranFor}` : ''} `, bg: theme.warn, color: theme.ink, bold: true });
     if (session.stats) segs.push({ text: '  stats on', color: theme.dim });
     // The server closed it (an idle Azure SQL connection, a laptop asleep): the next run opens another.
     if (session.closed) segs.push({ text: '  ' }, { text: ' DISCONNECTED ', bg: theme.warn, color: theme.ink, bold: true }, { text: '  reconnects on the next run', color: theme.dim });
@@ -257,6 +260,16 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
   const typed = useRef(new Map());
   // A connection that dropped while something else ran: said once that has finished.
   const quietDrop = useRef(null);
+  // The last run's error from the server, for /why: { message, number, line, sql, conn, database, label }.
+  const lastError = useRef(null);
+  // When the open transaction began, when the last run ended (how long it has sat idle), and whether
+  // the warning about it has been given (once a transaction).
+  const tranSince = useRef(null);
+  const lastActive = useRef(Date.now());
+  const tranWarned = useRef(false);
+  // /watch: { sql, every, until, title, conn, database, run, timer, running, lastSet, resultsId }.
+  const watchRef = useRef(null);
+  const [watching, setWatching] = useState(null);
 
   const setConfig = (update) => {
     const next = update(configRef.current);
@@ -282,6 +295,11 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     setSchema(s);
   };
   const setTranCount = (n) => {
+    if (n && !tranRef.current) {
+      tranSince.current = Date.now();
+      tranWarned.current = false;
+    }
+    if (!n) tranSince.current = null;
     tranRef.current = n;
     setTranCountState(n);
   };
@@ -377,7 +395,8 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
 
   // One thing at a time, with the spinner, esc to cancel, and a line in the activity log.
   // `start(signal)` resolves with the lines to show under the title.
-  const task = async (title, start, { label = 'Running', quiet = false } = {}) => {
+  // `hint(error)` may add a line under a failure (/why after a run).
+  const task = async (title, start, { label = 'Running', quiet = false, hint = null } = {}) => {
     if (busyRef.current) {
       note(`Wait for "${busyRef.current.label}" to finish (esc cancels it).`, 'error');
       return { ok: false, error: new Error('busy') };
@@ -397,7 +416,8 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
       tell(lines.length ? lines : ['Done']);
       return { ok: true };
     } catch (error) {
-      const lines = error.cancelled ? ['Cancelled'] : error.message.split('\n');
+      const extra = !error.cancelled && hint?.(error);
+      const lines = error.cancelled ? ['Cancelled'] : [...error.message.split('\n'), ...(extra ? [extra] : [])];
       lastOutput.current = { title, text: lines.join('\n') };
       if (id) updateEntry(id, { status: 'error', lines });
       else addEntry({ title, status: 'error', lines });
@@ -473,6 +493,7 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
   };
 
   const dropSession = () => {
+    if (watchRef.current) stopWatch('the connection closed');
     const s = sessionRef.current;
     if (s) {
       s.onEnd = null;
@@ -556,11 +577,18 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
   // fails (saving edits goes back to its savepoint with it).
   // A connection that dropped is opened again: before the run when it went while idle, and after
   // it when it went part-way, running it again only when that's safe (actions.js afterLostConnection).
-  const query = async (sql, { title, wrapped = false, lineBase = 1, stay = false, keep = false, limit: raised, top = null, again = null, runner = null, recover = '' } = {}) => {
+  // `notes` are lines to add under a run that works (what /undo-write kept). `quiet` keeps it out of
+  // the log, and `history: false` out of History (a /watch's runs after the first). `watch` ({ every,
+  // run, prev }) marks the results as a watch's, with the cells that changed since `prev`.
+  const query = async (sql, { title, wrapped = false, lineBase = 1, stay = false, keep = false, limit: raised, top = null, again = null, runner = null, recover = '', notes = [], quiet = false, history = true, watch = null } = {}) => {
+    // Any other run ends a /watch, so the two never overlap.
+    if (!watch && watchRef.current) await stopWatch('another run');
     let s = sessionRef.current;
     const limit = raised ?? configRef.current.limit;
     const hadTran = tranRef.current > 0;
     let res = null;
+    lastError.current = null;
+    const hint = (e) => (!e.lost && e.number != null && canSeeSchema(s?.conn) ? '/why asks Claude what went wrong, and for a fix.' : null);
     const r = await task(title, async (signal) => {
       const said = [];
       if (s.closed) {
@@ -572,6 +600,11 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
           res = withStatistics(await (runner ? runner(s, sql, { signal, limit, recover }) : s.run(sql, { signal, limit, recover })));
         } catch (e) {
           if (e.partial) res = withStatistics({ ...e.partial, error: e });
+          // What /why tells Claude: the SQL as it was typed (without the BEGIN manual commit put first).
+          if (!e.cancelled && !e.lost && e.number != null) {
+            const typed = wrapped ? sql.split('\n').slice(1).join('\n') : sql;
+            lastError.current = { message: e.message, number: e.number, line: e.line ? e.line - (wrapped ? 1 : 0) : null, sql: typed, conn: s.conn.name, database: s.database, label: dialectOf(s).label };
+          }
           if (e.line) e.message = `Line ${Math.max(1, lineBase + e.line - 1 - (wrapped ? 1 : 0))}: ${e.message}`;
           throw e;
         }
@@ -599,8 +632,10 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
         res = null;
         await run();
       }
-      return [...said, ...summarize(res, limit)];
-    });
+      // The notes go straight under the counts, where the log has room for them.
+      const [counts, ...messages] = summarize(res, limit);
+      return [...said, counts, ...notes, ...messages];
+    }, { quiet, hint });
     if (res && !keep && !(again && res.error)) {
       // Whether, and where, the rows can be edited and saved back (edit.js).
       const sc = schemaRef.current;
@@ -610,13 +645,19 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
       // Which table the rows are, for following a foreign key from a cell (F).
       const source = why ?? (edit.table ? { table: edit.table, columns: edit.columns } : readTarget(sql, res.sets, sc, { kind }));
       const shown = { id: again?.id ?? nextId.current++, title, sql, ...res, error: res.error?.message ?? null, edit, source, conn: s.conn.name, database: s.database, limit, top };
+      if (watch) {
+        shown.watch = { every: watch.every, run: watch.run };
+        const set = res.sets[0];
+        shown.changed = changedCells(watch.prev, set, edit.keys && set ? edit.keys.map((i) => set.columns[i].name) : []);
+      }
       showResults(shown);
       setResultIndex(again ? Math.min(again.index, Math.max(0, res.sets.length - 1)) : 0);
       if (res.sets.length && !stay) setView('results');
     }
     const summary = res && !res.error ? summarize(res, limit)[0] : r.error?.message;
+    lastActive.current = Date.now();
     if (s && sessionRef.current === s) {
-      setConfig((c) => withRan(c, { sql, conn: s.conn.name, database: s.database, at: Date.now(), ok: r.ok, summary: firstLine(summary) }));
+      if (history) setConfig((c) => withRan(c, { sql, conn: s.conn.name, database: s.database, at: Date.now(), ok: r.ok, summary: firstLine(summary) }));
       const n = await s.tranCount().catch(() => tranRef.current);
       if (n && !tranRef.current && wrapped) note(`Started a transaction (${s.conn.name} commits manually): /commit keeps the change, /rollback undoes it.`);
       setTranCount(n);
@@ -624,6 +665,118 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     }
     return r;
   };
+
+  /**
+   * /watch: runs `sql` (a read) every `every` seconds, one run at a time, in Results with the cells that
+   * changed since the run before picked out, until esc, another run, the connection changing, or
+   * `until` (watch.js) matching a row, which notifies.
+   */
+  const startWatch = async ({ sql, every, until = null, title }) => {
+    await stopWatch(watchRef.current ? 'another watch' : null);
+    const s = sessionRef.current;
+    if (!s) return;
+    const w = { sql, every, until, title, conn: s.conn.name, database: s.database, run: 0, timer: null, running: null, lastSet: null, resultsId: null };
+    watchRef.current = w;
+    note(`Watching every ${every}s${until ? `, until ${untilText(until)}` : ''}: ${title}\nesc stops it, and so does running anything else.`);
+    watchTick(w);
+  };
+  const watchTick = async (w) => {
+    if (watchRef.current !== w) return;
+    const s = sessionRef.current;
+    if (!s || s.closed || s.conn.name !== w.conn || s.database !== w.database) return stopWatch('the connection changed');
+    // Rows read again would move edits staged in Results onto other rows.
+    if (hasChanges(changesRef.current)) return stopWatch(`save (s) or undo (U) the ${changesText(changesRef.current)} in Results first`);
+    // Something else has the session (the open transaction's locks, a reconnect), or a cell is being
+    // typed into: the watch waits.
+    if (busyRef.current || focusRef.current === 'cell') return void (w.timer = setTimeout(() => watchTick(w), 300));
+    w.run++;
+    setWatching({ every: w.every, run: w.run });
+    const first = w.run === 1;
+    const same = !first && resultsRef.current?.id === w.resultsId;
+    w.running = query(w.sql, { title: w.title, watch: { every: w.every, run: w.run, prev: w.lastSet }, stay: !first, quiet: !first, history: first, again: same ? { id: w.resultsId, index: resultIndexRef.current } : null });
+    const r = await w.running;
+    w.running = null;
+    if (watchRef.current !== w) return;
+    if (!r.ok) return stopWatch(r.error?.cancelled ? 'cancelled' : `it failed: ${firstLine(r.error?.message)}`);
+    const res = resultsRef.current;
+    w.resultsId = res?.id ?? null;
+    w.lastSet = res?.sets[0] ?? null;
+    if (w.until) {
+      const m = untilMatch(w.until, w.lastSet);
+      if (m.error) return stopWatch(m.error);
+      if (m.matched) {
+        const said = `${untilText(w.until)} on run ${w.run}${m.row != null ? `, row ${m.row + 1}` : ''}`;
+        await stopWatch(null);
+        note(`${said}: stopped watching.\n${w.title}`, 'ok');
+        notify?.(`Trawl: ${said}`, w.title);
+        return;
+      }
+    }
+    w.timer = setTimeout(() => watchTick(w), w.every * 1000);
+  };
+  // Ends the watch (saying why, unless `why` is null), cancelling a run of it under way.
+  const stopWatch = async (why) => {
+    const w = watchRef.current;
+    if (!w) return;
+    watchRef.current = null;
+    clearTimeout(w.timer);
+    setWatching(null);
+    if (w.running) {
+      busyRef.current?.abort();
+      await w.running.catch(() => {});
+    }
+    // The title goes back to the statement's own; the last changes stay picked out.
+    const res = resultsRef.current;
+    if (res?.watch && res.id === w.resultsId) showResults({ ...res, watch: null });
+    if (why) note(`Stopped watching after ${plural(w.run, 'run')}${why === 'esc' ? '' : `: ${why}`}.\n${w.title}`);
+  };
+
+  // A transaction left open and idle: said once, with a bell and a notification, and what it holds.
+  const warnOpenTransaction = async () => {
+    tranWarned.current = true;
+    const s = sessionRef.current;
+    if (!s || !tranRef.current) return;
+    const now = Date.now();
+    const title = warningTitle({ conn: s.conn.name, openMs: now - (tranSince.current ?? now), idleMs: now - lastActive.current });
+    notify?.(`Trawl: a transaction is open on ${s.conn.name}`, `Open ${openFor(now - (tranSince.current ?? now)) || 'a while'}: /commit or /rollback.`);
+    const d = dialectOf(s);
+    let held = ['Trawl was busy, so it didn’t read what it holds.'];
+    if (!busyRef.current && !s.closed && d.locksSql) {
+      await task(
+        'read the open transaction’s locks',
+        async (signal) => {
+          try {
+            held = locksText((await s.run(d.locksSql, { signal, limit: 1000 })).sets);
+          } catch (e) {
+            if (e.cancelled) throw e;
+            held = [d.locksUnavailable ?? `Couldn't read its locks: ${firstLine(e.message)}`];
+          }
+          return [];
+        },
+        { label: 'Reading what the transaction holds', quiet: true },
+      );
+    }
+    note([title, ...held].join('\n'), 'error');
+  };
+  const minutesOpen = warnMinutes(config);
+  const [, setClock] = useState(0);
+  useEffect(() => {
+    if (!tranCount) return;
+    // Often enough to warn within a quarter of the wait, and for the header's minutes to keep up.
+    const t = setInterval(() => {
+      setClock((n) => n + 1);
+      if (dueWarning({ open: tranRef.current > 0, warned: tranWarned.current, idleMs: Date.now() - lastActive.current, minutes: minutesOpen })) warnOpenTransaction();
+    }, Math.max(200, Math.min(30_000, (minutesOpen || 1) * 15_000)));
+    return () => clearInterval(t);
+  }, [tranCount, minutesOpen]);
+  // Nothing keeps running after Trawl closes.
+  useEffect(
+    () => () => {
+      clearTimeout(watchRef.current?.timer);
+      watchRef.current = null;
+    },
+    [],
+  );
 
   const confirm = (req) =>
     new Promise((done) => {
@@ -812,6 +965,14 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
       get busy() {
         return busyRef.current;
       },
+      // The last run's error from the server, for /why (null after a run that worked).
+      get lastError() {
+        return lastError.current;
+      },
+      // The /watch going on, if any: { every, run, title }.
+      get watching() {
+        return watchRef.current && { every: watchRef.current.every, run: watchRef.current.run, title: watchRef.current.title };
+      },
       // What useMouse registers: the component on screen takes the main area's clicks and wheel.
       mouseHandlers: [],
     };
@@ -820,6 +981,8 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
   Object.assign(ctx, {
     task,
     query,
+    startWatch,
+    stopWatch,
     connect,
     reconnect,
     disconnect: () => {
@@ -1078,7 +1241,8 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
   // Keys that work in every view.
   const globalKeys = (input, key) => {
     if (key.escape) {
-      if (busyRef.current) busyRef.current.abort();
+      if (watchRef.current) stopWatch('esc');
+      else if (busyRef.current) busyRef.current.abort();
       else {
         setEntries([]);
         setWelcome(false);
@@ -1201,12 +1365,14 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
   const mood = moodFor({ session, busy, lastEntry: entries.at(-1), tranCount });
   // The welcome box only appears when the terminal has room for it next to a useful view.
   const showWelcome = welcome && H >= 28;
-  const mainH = Math.max(6, H - 2 - act.length - (busy ? 1 : 0) - bottom - 1 - (showWelcome ? WELCOME_HEIGHT : 0));
+  // A /watch keeps the spinner's line between its runs, so the layout doesn't jump.
+  const statusLine = busy || watching ? 1 : 0;
+  const mainH = Math.max(6, H - 2 - act.length - statusLine - bottom - 1 - (showWelcome ? WELCOME_HEIGHT : 0));
   const viewActive = focus === 'view' && !overlay && !confirmReq;
   layout.current = {
     mainTop: 2,
     mainH,
-    promptTop: 2 + mainH + (showWelcome ? WELCOME_HEIGHT : 0) + act.length + (busy ? 1 : 0),
+    promptTop: 2 + mainH + (showWelcome ? WELCOME_HEIGHT : 0) + act.length + statusLine,
     sugCount: suggestions.length,
     tabs: tabLabels(results),
   };
@@ -1286,7 +1452,7 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
 
   return (
     <Box flexDirection="column" width={W} height={H}>
-      <Header session={session} tranCount={tranCount} writesAllowed={writesAllowed} file={file} width={W} connecting={connecting} mood={mood} update={update} />
+      <Header session={session} tranCount={tranCount} tranFor={tranCount && tranSince.current ? openFor(Date.now() - tranSince.current) : ''} writesAllowed={writesAllowed} file={file} width={W} connecting={connecting} mood={mood} update={update} />
       <Tabs view={view} results={results} width={W} />
       <Box height={mainH} width={W}>
         {main}
@@ -1295,7 +1461,11 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
       {act.map((segs, i) => (
         <Row key={i} pointer={false} width={W} segments={segs} />
       ))}
-      {busy ? <Spinner label={busy.label} started={busy.started} width={W} /> : null}
+      {busy ? (
+        <Spinner label={watching ? `Watching every ${watching.every}s · run ${watching.run}` : busy.label} started={busy.started} width={W} />
+      ) : watching ? (
+        <Row pointer={false} width={W} segments={[{ text: `  watching every ${watching.every}s · run ${watching.run} · esc stops`, color: theme.dim }]} />
+      ) : null}
       {confirmReq?.secret ? (
         <SecretPrompt key={confirmReq.id} req={confirmReq} width={W} onDone={onConfirm} />
       ) : confirmReq ? (

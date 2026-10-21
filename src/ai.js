@@ -4,6 +4,7 @@
 // connection only sends them once you've said so.
 import { execFile } from 'node:child_process';
 import { objectName } from './schema.js';
+import { wrap } from './text.js';
 
 export const AI_LEVELS = ['off', 'schema', 'results'];
 
@@ -80,6 +81,44 @@ export function parseAnswer(text) {
 export function consoleText({ question, sql, note }) {
   const comment = (s) => s.split('\n').map((l) => `-- ${l}`).join('\n');
   return [comment(`Asked Claude: ${question}`), note ? comment(note) : null, sql].filter(Boolean).join('\n');
+}
+
+export const WHY_SYSTEM = `You explain an error a database server gave for SQL a developer ran, and fix the SQL.
+You get the error (its number, and the line of the SQL it is on), the SQL with its lines numbered, and the database's tables and columns (names and types, never rows); the first line says which database it is.
+Answer with at most four short sentences of plain text on what went wrong and why, then exactly one \`\`\`sql code block holding the corrected SQL: the whole statement or script, ready to run, without the line numbers.
+Use only the tables and columns in the schema; if the fix needs one that isn't there, say so instead of guessing.
+Write in the dialect the first line names. Change only what the error needs; never add DROP, TRUNCATE, or an UPDATE or DELETE without a WHERE.`;
+
+// Longer than this, only the lines around the error go to Claude.
+const WHY_LINES = 120;
+
+/**
+ * The prompt for /why: the database, the error with its number and line, the SQL with its lines
+ * numbered (around the error when it's long, the line marked >), and the schema's names. Never rows.
+ */
+export function whyPrompt({ message, number, line, sql, database, label = 'SQL Server', schema }) {
+  const lines = String(sql ?? '').replace(/\r\n?/g, '\n').split('\n');
+  const at = line && line >= 1 && line <= lines.length ? line : null;
+  const [from, to] = lines.length <= WHY_LINES ? [1, lines.length] : at ? [Math.max(1, at - 20), Math.min(lines.length, at + 20)] : [1, WHY_LINES];
+  const w = String(to).length;
+  const shown = lines.slice(from - 1, to).map((l, i) => `${from + i === at ? '>' : ' '} ${String(from + i).padStart(w)} | ${l}`);
+  const cut = from > 1 || to < lines.length ? `\n(lines ${from} to ${to} of ${lines.length})` : '';
+  const where = at ? `on line ${at}` : 'with no line given';
+  return `Database: ${database} (${label})
+
+Error${number != null ? ` ${number}` : ''}, ${where}: ${message}
+
+SQL:
+${shown.join('\n')}${cut}
+
+Schema (schema.table(column type ...)):
+${schema ? schemaText(schema, sql) : '(not loaded)'}`;
+}
+
+/** /why's answer as console text: the error and Claude's explanation as comments, then the corrected SQL. */
+export function whyConsoleText({ message, sql, note, width = 100 }) {
+  const comment = (s) => wrap(s, width - 3).map((l) => `-- ${l}`.trimEnd());
+  return [...comment(`Claude on the error: ${message.split('\n')[0]}`), ...(note ? comment(note) : []), sql].join('\n');
 }
 
 /**

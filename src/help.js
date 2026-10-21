@@ -102,6 +102,7 @@ export const HELP = [
       ['y  Y', 'Copy the cell · the row (tab-separated); /copy [tsv|csv|json|md|insert] copies the whole set (md: a Markdown table)'],
       ['p  c', 'Pin the result set (/pin) · compare the one on screen with it (/compare): ~ changed, + added, − removed, matched by the primary key when the rows are one table\'s, else row by row'],
       ['F', 'Follow the cell\'s foreign key (/follow): the row its value refers to, or on a key other tables refer to, their rows (it asks which when there are several ways to go)'],
+      ['/watch <s> [sql]', 'Run a read again every s seconds (2 at least; without sql, the console\'s statement), the cells that changed since the run before picked out; esc, another run or /watch stop ends it\n--until "Status = \'Done\'" (or <>, >, <, >=, <=, IS NULL, "rows > 0", "rows = 0") stops and notifies when a row matches'],
       { heading: 'Editing', about: 'the rows of one table, with its primary key: ↵ in the Explorer, or SELECT … FROM one table' },
       ['e or i', 'Edit the cell: ↵ keeps it, tab keeps it and edits the next column, esc leaves it'],
       ['n', 'Make the cell NULL'],
@@ -178,7 +179,7 @@ export const HELP = [
     title: 'Settings',
     about: ', or /settings: Trawl\'s own; a connection\'s are on Connections',
     rows: [
-      ['↵ or space', 'Change it: the row limit, the accent colour, the mouse, checking for and installing updates, and notifying when a run takes over 10 s (a bell and a desktop notification)'],
+      ['↵ or space', 'Change it: the row limit, the accent colour, the mouse, checking for and installing updates, notifying when a run takes over 10 s (a bell and a desktop notification), and warning about a transaction left open'],
       ['esc / q', 'Close'],
     ],
   },
@@ -187,6 +188,7 @@ export const HELP = [
     rows: [
       ['/ask <question>', 'Claude writes a query from the schema; it lands in the console, and nothing runs until ctrl+r'],
       ['/explain', 'Claude explains the last plan: what it does, what costs most, what might help (the query and plan only)'],
+      ['/why', 'Claude explains the last error (its message, line and SQL, with the schema\'s names) and puts a corrected statement in the console, the explanation as comments; nothing runs'],
       ['/ai [connection] [off|schema|results]', 'What Claude may see: nothing, names only (the default), or rows too'],
       ['trawl mcp', 'Run from Claude Code (claude mcp add --scope user trawl -- trawl mcp); it only reads'],
     ],
@@ -197,6 +199,8 @@ export const HELP = [
       'A production connection (/add … --prod) is read-only: writes are refused until /writes.',
       '/tx manual (production\'s default, as DataGrip\'s Tx: Manual): a write starts a transaction, /commit keeps it, /rollback undoes it. /tx auto commits each statement as it runs.',
       'UPDATE or DELETE with no WHERE, DROP and TRUNCATE always ask first. Before an UPDATE or DELETE runs, a SELECT COUNT over its FROM and WHERE says how many rows it changes; over 1,000, it asks first too.',
+      ['/undo-write', 'Before an UPDATE or DELETE of one table with a primary key, Trawl copies the rows it changes (up to 10,000; an INSERT, its keys), the last 10 per connection, kept on this machine. ↵ on one puts the script that undoes it in the console tab undo; nothing runs'],
+      'A transaction left open and idle (5 minutes, "Warn about open transactions" in Settings) rings the bell once, the header says how long it has been open, and the log lists its locks.',
     ],
   },
   {

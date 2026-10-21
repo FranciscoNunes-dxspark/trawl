@@ -5,6 +5,7 @@ import { ACCENTS, setAccent, theme } from '../theme.js';
 import { relTime, wrap } from '../text.js';
 import { checksDisabled } from '../update.js';
 import { NOTIFY_AFTER } from '../notify.js';
+import { minutesText, nextWarnMinutes, warnMinutes } from '../transactions.js';
 import { VERSION } from '../version.js';
 import { useListNav, useMouse } from './hooks.js';
 import { Lines, Panel, Row } from './parts.jsx';
@@ -106,6 +107,16 @@ export function SettingsView({ config, ctx, updates, update, width, height, acti
       ],
       change: () => toggle('notify'),
     },
+    {
+      label: 'Warn about open transactions',
+      value: warnMinutes(config) ? [{ text: `after ${minutesText(warnMinutes(config))} idle`, bold: true }] : onOff(false),
+      hint: '↵ next',
+      about: [
+        `When a transaction has been open and nothing has run for ${warnMinutes(config) ? minutesText(warnMinutes(config)) : 'a while'}, Trawl rings the bell and asks the terminal for a notification, once, and the log says what the transaction holds (its locks, which block other sessions) with a reminder of /commit and /rollback. The header says how long it has been open.`,
+        '↵ goes through 1, 2, 5, 10, 15, 30 and 60 minutes, then off. "openTransactionWarning" in config.json takes any number of minutes (0 is off).',
+      ],
+      change: () => ctx.setConfig((c) => ({ ...c, openTransactionWarning: nextWarnMinutes(warnMinutes(c)) })),
+    },
   ];
   const nav = useListNav(rows.length, innerH);
   const row = rows[nav.index];
@@ -141,7 +152,7 @@ export function SettingsView({ config, ctx, updates, update, width, height, acti
             width={innerW}
             selected={nav.offset + i === nav.index}
             focused={active}
-            segments={[{ text: r.label.padEnd(LABEL_W), strong: true }, ...r.value]}
+            segments={[{ text: r.label.padEnd(Math.max(LABEL_W, r.label.length + 2)), strong: true }, ...r.value]}
           />
         ))}
       </Panel>

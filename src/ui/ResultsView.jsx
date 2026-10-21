@@ -340,6 +340,8 @@ export function ResultsView({ results, changes, setIndex, view, ctx, width, heig
     if (isNew(r)) return staged ? { text: value === null ? 'NULL' : value, color: theme.ok, bold: true, italic: value === null, underline: here } : { text: 'DEFAULT', color: theme.dim, italic: true, underline: here };
     if (deleted) return { text: formatValue(v), color: theme.del, strike: true, underline: here };
     if (staged) return { text: value === null ? 'NULL' : value, color: theme.warn, bold: true, italic: value === null, underline: here };
+    // A /watch picks out what changed since its run before.
+    if (setIndex === 0 && results.changed?.has(at)) return { text: formatValue(v), color: theme.ink, bg: theme.info, italic: v == null, underline: here };
     return { text: formatValue(v), color: v == null ? theme.nul : numeric[i] ? theme.number : undefined, italic: v == null, underline: here };
   };
 
@@ -349,10 +351,13 @@ export function ResultsView({ results, changes, setIndex, view, ctx, width, heig
   else if (set) parts.push(`${set.rows.length}${set.truncated ? '+' : ''} row${set.rows.length === 1 ? '' : 's'}`);
   if (set && sort) parts.push(`by ${set.columns[sort.col]?.name} ${sort.dir > 0 ? '▲' : '▼'}`);
   if (set && widths.length > shown.length) parts.push(`cols ${firstCol + 1}–${firstCol + shown.length}/${widths.length}`);
+  if (results.changed?.size && setIndex === 0) parts.push(`${results.changed.size} changed`);
   if (results.ms != null) parts.push(`${results.ms} ms`);
+  // First, so a long statement can't push it out of sight.
+  const title = results.watch ? `watching every ${results.watch.every}s · run ${results.watch.run} · ${results.title}` : results.title;
 
   return (
-    <Panel title={results.title} hint={parts.join(' · ')} width={width} height={height} focused={active}>
+    <Panel title={title} hint={parts.join(' · ')} width={width} height={height} focused={active}>
       {set ? (
         <Box flexDirection="column">
           <Row

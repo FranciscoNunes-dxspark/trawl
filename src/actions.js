@@ -10,7 +10,8 @@ import { findDataSources, importPlan, planText } from './datagrip.js';
 import { formatSql } from './format.js';
 import { cellText } from './cell.js';
 import { changesText, hasChanges, insertScript, saveRecovery, saveScript, tsvText, withSaved } from './edit.js';
-import { AI_LABELS, AI_LEVELS, EXPLAIN_SYSTEM, aiLevel, askPrompt, canSeeSchema, consoleText, explainPrompt, parseAnswer } from './ai.js';
+import { AI_LABELS, AI_LEVELS, EXPLAIN_SYSTEM, WHY_SYSTEM, aiLevel, askPrompt, canSeeSchema, consoleText, explainPrompt, parseAnswer, whyConsoleText, whyPrompt } from './ai.js';
+import { parseWatch } from './watch.js';
 import { followTargets } from './follow.js';
 import { moreQuery, raiseTop } from './more.js';
 import { analyzedText, splitProfile } from './plans.js';
@@ -23,6 +24,9 @@ import { agentProbe, buildActivity, buildJobHistory, buildJobs, buildTopQueries,
 import { dialectOf, definitionSqlFor, qualifiedFor, selectTopFor } from './dialects.js';
 import { buildSchema, createTableScript, definitionSql, describeObject, findObject, objectName, rowsOf } from './schema.js';
 import { grepHits, usesReport, usesSummary, usesText } from './references.js';
+import { UNDO_ROWS, reverseScript, snapshotOf, snapshotRows, snapshotSummary, undoPlan, withSnapshot } from './undo.js';
+import { loadUndo, saveUndo } from './config.js';
+import { relTime } from './text.js';
 import { applySqlcmd, bindVariables, classifyScript, countQuery, oneLine, scriptVariables, splitStatements, sqlcmdVariables, statementAt, toCsv, toJson, toMarkdown, withoutLeadingComments } from './sql.js';
 
 // A WHERE that still changes more rows than this is asked about too.
@@ -136,8 +140,10 @@ async function withParameters(ctx, sql) {
  * `recover` runs if it fails (see db.js runScript).
  */
 export async function runSql(ctx, sql, { title, prefix = '', lineBase, stay, keep, top, run, recover } = {}) {
-  if (!(await liveSession(ctx))) return;
   if (!sql.trim()) return;
+  // Any other run ends a /watch, which would otherwise be in its way.
+  await ctx.stopWatch?.('another run');
+  if (!(await liveSession(ctx))) return;
   const text = await withParameters(ctx, sql.trim());
   if (text == null) return;
   const dialect = dialectOf(ctx.session);
@@ -148,11 +154,22 @@ export async function runSql(ctx, sql, { title, prefix = '', lineBase, stay, kee
   }
   const changes = write ? await countChanges(ctx, text) : null;
   if (changes === 'cancelled') return;
+  // What /undo-write will have: a copy of the rows an UPDATE or DELETE changes, an INSERT's keys.
+  // The actual plan (run) keeps none.
+  const undo = write && !run ? undoPlan(text, ctx.schema, { kind: dialect.kind }) : null;
+  const tooMany = undo?.op !== 'insert' && changes != null && changes > UNDO_ROWS;
+  const undoNote = !undo
+    ? ''
+    : undo.reason || tooMany
+      ? ` No copy is kept for /undo-write: ${undo.reason ?? `that's more than ${UNDO_ROWS.toLocaleString('en')} rows`}.`
+      : undo.op === 'insert'
+        ? ' Its keys are kept: /undo-write can take the rows out again.'
+        : ' A copy of the rows is kept first: /undo-write can put them back.';
   const on = `On ${conn.name}${conn.prod ? ' (production)' : ''}`;
   if (danger.length) {
     const ok = await ctx.confirm({
       title: danger.length === 1 ? `${danger[0]}. Run it?` : `This script has ${danger.length} risky statements. Run it?`,
-      detail: danger.length > 1 ? danger.join(' · ') : `${on}${changes != null ? `: that's ${rowsText(changes)}` : ''}.`,
+      detail: danger.length > 1 ? `${danger.join(' · ')}.${undoNote}` : `${on}${changes != null ? `: that's ${rowsText(changes)}` : ''}.${undoNote}`,
       options: YES_NO('Yes, run it'),
       danger: true,
     });
@@ -160,17 +177,102 @@ export async function runSql(ctx, sql, { title, prefix = '', lineBase, stay, kee
   } else if (changes != null && changes > MANY_ROWS) {
     const ok = await ctx.confirm({
       title: `This changes ${rowsText(changes)}. Run it?`,
-      detail: `${on}. Counted with a SELECT over the same FROM and WHERE.`,
+      detail: `${on}. Counted with a SELECT over the same FROM and WHERE.${undoNote}`,
       options: YES_NO('Yes, run it'),
       danger: true,
     });
     if (!ok) return;
   }
+  let kept = null;
+  const notes = [];
+  if (undo && !undo.reason && !tooMany) {
+    const copy = await copyRows(ctx, undo, text);
+    if (copy === 'cancelled') return;
+    if (copy.reason) notes.push(`No copy kept for /undo-write: ${copy.reason}.`);
+    else if (snapshotRows(copy.snapshot)) {
+      kept = copy.snapshot;
+      const n = snapshotRows(kept);
+      notes.push(kept.op === 'insert' ? `Kept its keys: /undo-write takes the ${n === 1 ? 'row' : rowsText(n)} out again.` : n === 1 ? 'Kept the row as it was: /undo-write puts it back.' : `Kept the ${rowsText(n)} as they were: /undo-write puts them back.`);
+    }
+  }
   // With manual commit (production's default), a write starts a transaction, so nothing sticks until /commit.
   const wrap = write && commitMode(conn) === 'manual' && !ctx.tranCount;
   const heading = title ?? `${prefix}${oneLine(withoutLeadingComments(text))}`;
   if (run) return run(text, { write, wrap, title: heading });
-  return ctx.query(wrap ? `${dialect.begin}\n${text}` : text, { title: heading, wrapped: wrap, lineBase, stay, keep, top, recover });
+  const r = await ctx.query(wrap ? `${dialect.begin}\n${text}` : text, { title: heading, wrapped: wrap, lineBase, stay, keep, top, recover, notes });
+  if (r?.ok && kept) {
+    try {
+      saveUndo(conn.name, withSnapshot(loadUndo(conn.name), kept));
+    } catch (e) {
+      ctx.note(`Couldn't keep the copy for /undo-write: ${e.message.split('\n')[0]}`, 'error');
+    }
+  }
+  return r;
+}
+
+/**
+ * The copy /undo-write keeps of what a write is about to change (undo.js): the rows the plan's SELECT
+ * reads (quietly; esc cancels the write), or an INSERT's keys. { snapshot } or { reason }, or
+ * 'cancelled'.
+ */
+async function copyRows(ctx, plan, text) {
+  const session = ctx.session;
+  const d = dialectOf(session);
+  const meta = { sql: text, conn: session.conn.name, database: session.database, kind: d.kind };
+  if (plan.op === 'insert') return { snapshot: snapshotOf(plan, null, meta) };
+  if (classifyScript(plan.select, { dialect: d.kind }).write) return { reason: 'its WHERE changes something too' };
+  let out = null;
+  const r = await ctx.task(
+    'copy the rows it changes',
+    async (signal) => {
+      try {
+        const res = await session.run(plan.select, { signal, limit: UNDO_ROWS + 1 });
+        out = snapshotOf(plan, res.sets.at(-1), { ...meta, at: Date.now() });
+      } catch (e) {
+        if (e.cancelled) throw e;
+        out = { reason: `reading them failed (${e.message.split('\n')[0]})` };
+      }
+      return [];
+    },
+    { label: 'Copying the rows it changes, for /undo-write', quiet: true },
+  );
+  if (!r.ok) return r.error?.cancelled ? 'cancelled' : { reason: r.error?.message ?? 'it failed' };
+  return out.reason ? out : { snapshot: out };
+}
+
+/**
+ * /undo-write: the copies kept of this connection's last writes (newest first: when, what, how many
+ * rows). ↵ puts the script that undoes one in the console tab undo, to read and run; nothing runs.
+ */
+export function undoWrites(ctx) {
+  if (!needSession(ctx)) return;
+  const { conn } = ctx.session;
+  const list = loadUndo(conn.name);
+  const items = list.map((s) => ({
+    label: `${relTime(s.at)} ago`.replace(/^now ago$/, 'just now'),
+    detail: `${snapshotSummary(s)} · ${s.sql}`,
+    text: [`${new Date(s.at).toLocaleString('en-GB')} on ${s.database}`, snapshotSummary(s), '', s.sql, '', ...reverseScript(s).split('\n').slice(3, 13)].join('\n'),
+    snapshot: s,
+  }));
+  ctx.showPicker({
+    title: `Undo a write on ${conn.name}`,
+    hint: '↵ the script that undoes it, into the console tab undo',
+    items,
+    empty: `No writes kept for ${conn.name} yet. Each UPDATE or DELETE of a table with a primary key keeps a copy of its rows (up to ${UNDO_ROWS.toLocaleString('en')}), and an INSERT its keys.`,
+    keys: { return: (it) => openUndo(ctx, it.snapshot) },
+  });
+}
+
+/** The script that undoes a kept write, in the console tab undo (made when there's none); nothing runs. */
+export function openUndo(ctx, snapshot) {
+  const script = reverseScript(snapshot);
+  const { names } = ctx.consoleTabs;
+  const at = names.findIndex((n) => n.toLowerCase() === 'undo');
+  if (at >= 0) ctx.showConsoleTab(at);
+  else ctx.addConsoleTab('undo');
+  ctx.setConsole(ed.fromText(script));
+  const elsewhere = ctx.session && ctx.session.database !== snapshot.database ? ` It ran on ${snapshot.database}, and you're on ${ctx.session.database}: /use ${snapshot.database} first.` : '';
+  ctx.note(`The script that undoes it is in the console tab undo: read it, then R runs it.${elsewhere}`, elsewhere ? 'error' : 'ok');
 }
 
 /**
@@ -1133,6 +1235,58 @@ export async function ask(ctx, question) {
     { label: 'Asking Claude' },
   );
   if (r.ok && answer?.sql) ctx.editInConsole(consoleText({ question, ...answer }));
+}
+
+/**
+ * /why: Claude explains the last run's error from the server (its message, number and line, the SQL
+ * around it) with the schema's names, never rows, and the corrected statement goes into the console
+ * under the explanation as comments. Nothing runs. Refused on a connection closed to Claude.
+ */
+export async function why(ctx) {
+  const err = ctx.lastError;
+  if (!err) return ctx.note('Nothing to explain: /why is for the last run, when the server turned it down with an error.', 'error');
+  const conn = ctx.config.connections.find((c) => c.name === err.conn) ?? ctx.session?.conn;
+  if (!canSeeSchema(conn)) return ctx.note(`${err.conn} is closed to Claude. /ai schema lets Claude see its names, SQL and errors (never rows).`, 'error');
+  const schema = ctx.schema && ctx.session?.conn.name === err.conn && ctx.schema.database === err.database ? ctx.schema : null;
+  const prompt = whyPrompt({ ...err, schema });
+  const first = err.message.split('\n')[0];
+  let answer = null;
+  const r = await ctx.task(
+    `ask Claude why: ${first}`,
+    async (signal) => {
+      answer = parseAnswer(await ctx.askClaude({ prompt, system: WHY_SYSTEM, signal }));
+      return answer.sql ? ['A corrected statement is in the console, with why as comments: read it, then ctrl+r runs it.', ...(answer.note ? [answer.note] : [])] : [answer.note || 'Claude gave no answer.'];
+    },
+    { label: 'Asking Claude what went wrong' },
+  );
+  if (!r.ok || !answer) return;
+  if (answer.sql) return ctx.editInConsole(whyConsoleText({ message: err.message, ...answer }));
+  if (answer.note) {
+    ctx.showText(`Claude on: ${first}`, answer.note);
+    ctx.rememberOutput(`Claude on: ${first}`, answer.note);
+  }
+}
+
+/**
+ * /watch <seconds> [sql] [--until <condition>]: runs a read again every few seconds (2 at least), in
+ * Results with what changed since the run before picked out, until esc, another run or the condition
+ * (watch.js) matching a row. Without SQL, the console's selection or the statement under its cursor.
+ * /watch stop ends it.
+ */
+export async function watch(ctx, rest) {
+  const w = parseWatch(rest);
+  if (w.stop) return ctx.watching ? ctx.stopWatch('/watch stop') : ctx.note('Nothing is being watched.');
+  if (w.empty) return ctx.prefill('/watch ');
+  if (w.error) return ctx.note(w.error, 'error');
+  await ctx.stopWatch(ctx.watching ? 'another watch' : null);
+  if (!(await liveSession(ctx))) return;
+  const sql = w.sql || consoleStatement(ctx);
+  if (!sql) return ctx.note('Nothing to watch: /watch <seconds> <sql>, or put the cursor on a statement in the console.', 'error');
+  const text = await withParameters(ctx, sql);
+  if (text == null) return;
+  const { write } = classifyScript(text, { dialect: dialectOf(ctx.session).kind });
+  if (write) return ctx.note('/watch only runs reads, and this changes data or schema: run it once with ctrl+r instead.', 'error');
+  return ctx.startWatch({ sql: text, every: w.seconds, until: w.until, title: oneLine(withoutLeadingComments(text)) });
 }
 
 /**

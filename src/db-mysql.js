@@ -12,11 +12,15 @@ const dialect = DIALECTS.mysql;
 // mysql2's column type codes for the numbers (right-aligned in the grid) and a few others.
 const TYPES = { 0: 'Decimal', 1: 'TinyInt', 2: 'SmallInt', 3: 'Int', 4: 'Real', 5: 'Float', 8: 'BigInt', 9: 'Int', 10: 'date', 12: 'datetime', 13: 'Int', 246: 'Decimal', 252: 'text', 253: 'varchar', 254: 'char', 245: 'json' };
 
-/** The mysql2 options for a connection: host:port from `server`, TLS when asked for. */
+/**
+ * The mysql2 options for a connection: host:port from `server`, TLS when asked for. FOUND_ROWS
+ * (mysql2's default, asked for here all the same) makes an UPDATE's count the rows it found, not
+ * only those whose values it changed, which saving edits relies on.
+ */
 export function mysqlConfig(conn, { database = conn.database, password } = {}) {
   const { host, port } = hostPort(conn.server, dialect.defaultPort);
   const ssl = conn.trustCert ? { rejectUnauthorized: false } : conn.ssl || conn.encrypt ? {} : undefined;
-  return { host, port, user: conn.user, password, database, ssl, timezone: 'Z', dateStrings: ['DATE'], supportBigNumbers: true, bigNumberStrings: true, connectTimeout: 20000, multipleStatements: false };
+  return { host, port, user: conn.user, password, database, ssl, timezone: 'Z', dateStrings: ['DATE'], supportBigNumbers: true, bigNumberStrings: true, connectTimeout: 20000, multipleStatements: false, flags: ['FOUND_ROWS'] };
 }
 
 export async function open(conn, { database, password, signal } = {}) {
@@ -62,6 +66,12 @@ export function collectResult([rows, fields], state, limit) {
   }
 }
 
+/**
+ * The message a statement fails with unless it affects exactly one row: what follows its
+ * `-- trawl:one row:` line (edit.js saveScript writes one above each change), or null.
+ */
+export const oneRowCheck = (text) => text.match(/^-- trawl:one row: ([^\n]*)/)?.[1].trim() ?? null;
+
 // MySQL says nothing about open transactions without a query of its own, so the session follows the
 // statements: BEGIN or START TRANSACTION opens one; COMMIT, ROLLBACK and DDL (which commits) end it.
 export function transactionAfter(open, text) {
@@ -88,9 +98,13 @@ export function mysqlSession(conn, c, { database = null, cancel = async () => {}
           const { signal, limit = 500 } = opts;
           const onAbort = () => cancel().catch(() => {});
           signal?.addEventListener('abort', onAbort, { once: true });
+          let mismatch = null;
           try {
-            collectResult(await c.query({ sql: text, rowsAsArray: true }), state, limit);
+            const result = await c.query({ sql: text, rowsAsArray: true });
+            collectResult(result, state, limit);
             open = transactionAfter(open, text);
+            const one = oneRowCheck(text);
+            if (one && result[0]?.affectedRows !== 1) mismatch = one;
             const use = text.match(/^\s*USE\s+`?([^`\s;]+)`?/i);
             if (use) session.database = use[1];
           } catch (e) {
@@ -100,6 +114,7 @@ export function mysqlSession(conn, c, { database = null, cancel = async () => {}
           } finally {
             signal?.removeEventListener('abort', onAbort);
           }
+          if (mismatch) throw new DbError(mismatch, { line });
         },
         { ...opts, split: (s) => splitScript(s, dialect) },
       ),

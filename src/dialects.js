@@ -24,7 +24,8 @@ const SQLSERVER = {
   kind: 'sqlserver',
   label: 'SQL Server',
   quote: (name) => `[${String(name).replace(/]/g, ']]')}]`,
-  selectTop: (q, limit) => `SELECT TOP (${limit}) * FROM ${q}`,
+  // The first rows of `q`, those `where` (a condition) picks when it's given.
+  selectTop: (q, limit, where) => `SELECT TOP (${limit}) * FROM ${q}${where ? ` WHERE ${where}` : ''}`,
   begin: 'BEGIN TRANSACTION;',
   commit: 'COMMIT TRANSACTION;',
   rollback: 'ROLLBACK TRANSACTION;',
@@ -82,7 +83,7 @@ const POSTGRES = {
   kind: 'postgres',
   label: 'PostgreSQL',
   quote: (name) => `"${String(name).replace(/"/g, '""')}"`,
-  selectTop: (q, limit) => `SELECT * FROM ${q} LIMIT ${limit}`,
+  selectTop: (q, limit, where) => `SELECT * FROM ${q}${where ? ` WHERE ${where}` : ''} LIMIT ${limit}`,
   begin: 'BEGIN;',
   commit: 'COMMIT;',
   rollback: 'ROLLBACK;',
@@ -103,7 +104,7 @@ WHERE p.prokind IN ('f', 'p') AND n.nspname NOT IN ${PG_SKIP} AND n.nspname NOT 
 ORDER BY 1, 2;
 SELECT n.nspname AS "schema", c.relname AS "object", a.attname AS name, format_type(a.atttypid, a.atttypmod) AS type,
   NULL AS max_length, NULL AS precision, NULL AS scale, NOT a.attnotnull AS is_nullable,
-  (a.attidentity <> '' OR COALESCE(pg_get_expr(d.adbin, d.adrelid), '') LIKE 'nextval(%') AS is_identity,
+  (a.attidentity <> '' OR COALESCE(pg_get_expr(d.adbin, d.adrelid), '') LIKE 'nextval(%') AS is_identity, a.attgenerated <> '' AS is_computed,
   CASE WHEN EXISTS (SELECT 1 FROM pg_index i WHERE i.indrelid = c.oid AND i.indisprimary AND a.attnum = ANY (i.indkey)) THEN 1 ELSE 0 END AS pk
 FROM pg_attribute a
 JOIN pg_class c ON c.oid = a.attrelid
@@ -197,7 +198,7 @@ const MYSQL = {
   kind: 'mysql',
   label: 'MySQL',
   quote: (name) => `\`${String(name).replace(/`/g, '``')}\``,
-  selectTop: (q, limit) => `SELECT * FROM ${q} LIMIT ${limit}`,
+  selectTop: (q, limit, where) => `SELECT * FROM ${q}${where ? ` WHERE ${where}` : ''} LIMIT ${limit}`,
   begin: 'START TRANSACTION;',
   commit: 'COMMIT;',
   rollback: 'ROLLBACK;',
@@ -215,7 +216,8 @@ FROM information_schema.routines WHERE routine_schema = DATABASE()
 ORDER BY 1, 2;
 SELECT table_schema AS \`schema\`, table_name AS \`object\`, column_name AS name, column_type AS type,
   NULL AS max_length, NULL AS \`precision\`, NULL AS scale, is_nullable = 'YES' AS is_nullable,
-  extra LIKE '%auto_increment%' AS is_identity, column_key = 'PRI' AS pk
+  extra LIKE '%auto_increment%' AS is_identity, (extra LIKE '%VIRTUAL%' OR extra LIKE '%STORED%' OR extra LIKE '%PERSISTENT%') AS is_computed,
+  column_key = 'PRI' AS pk
 FROM information_schema.columns WHERE table_schema = DATABASE()
 ORDER BY table_name, ordinal_position;
 SELECT constraint_name AS name, table_schema AS \`schema\`, table_name AS \`object\`, column_name AS \`column\`,

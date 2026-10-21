@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Box, useInput } from 'ink';
 import * as a from '../actions.js';
-import { canEdit, changesText, editText, emptyIsDefault, hasChanges, nextNewRow, noChanges, tsvText } from '../edit.js';
+import { changesText, editRefusal, editText, emptyIsDefault, hasChanges, nextNewRow, noChanges, tsvText } from '../edit.js';
 import { formatValue, isNumericType, viewOrder } from '../sql.js';
 import { theme } from '../theme.js';
 import { clean, fit, stringWidth } from '../text.js';
@@ -126,15 +126,14 @@ export function ResultsView({ results, changes, setIndex, view, ctx, width, heig
     if (!edit?.table) return `These rows can't be edited: ${edit?.reason ?? 'nothing to edit'}.`;
     const tc = edit.columns.get(c);
     if (!tc) return `${set.columns[c].name} isn't a column of ${edit.table.name} as it is (an expression, or renamed), so it can't be edited.`;
-    if (!canEdit(tc)) return `${tc.name} is ${tc.identity ? 'an identity column' : tc.type}; the server sets it.`;
-    return null;
+    return editRefusal(tc, edit.kind);
   };
   const stage = (row, c, value) =>
     ctx.setChanges((ch) => {
       const cells = new Map(ch.cells);
       // Typing back what was there undoes the change; in a new row, nothing typed (where a value
       // can't be empty text) leaves it to the default.
-      if (isNew(row) ? value === '' && emptyIsDefault(edit.columns.get(c).type) : value === (set.rows[row][c] == null ? null : editText(set.rows[row][c]))) cells.delete(key(row, c));
+      if (isNew(row) ? value === '' && emptyIsDefault(edit.columns.get(c).type, edit.kind) : value === (set.rows[row][c] == null ? null : editText(set.rows[row][c]))) cells.delete(key(row, c));
       else cells.set(key(row, c), value);
       return { ...ch, cells };
     });

@@ -481,14 +481,15 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
   // `keep` leaves the grid as it is (saving edits shows no rows of its own). `limit` raises the row
   // limit for this run (m in Results), and `top` says the SQL is Trawl's own TOP (n) at that limit.
   // `again` ({ id, index }) puts the rows in place of those results, keeping the cursor, sort and
-  // filter; a failed run then leaves them as they were.
-  const query = async (sql, { title, wrapped = false, lineBase = 1, stay = false, keep = false, limit: raised, top = null, again = null } = {}) => {
+  // filter; a failed run then leaves them as they were. `runner` runs the SQL in place of
+  // session.run (an actual plan sets STATISTICS PROFILE around it).
+  const query = async (sql, { title, wrapped = false, lineBase = 1, stay = false, keep = false, limit: raised, top = null, again = null, runner = null } = {}) => {
     const s = sessionRef.current;
     const limit = raised ?? configRef.current.limit;
     let res = null;
     const r = await task(title, async (signal) => {
       try {
-        res = withStatistics(await s.run(sql, { signal, limit }));
+        res = withStatistics(await (runner ? runner(s, sql, { signal, limit }) : s.run(sql, { signal, limit })));
       } catch (e) {
         if (e.partial) res = withStatistics({ ...e.partial, error: e });
         if (e.line) e.message = `Line ${Math.max(1, lineBase + e.line - 1 - (wrapped ? 1 : 0))}: ${e.message}`;

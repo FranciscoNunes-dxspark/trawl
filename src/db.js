@@ -164,7 +164,9 @@ export async function runScript(session, script, runOne, { signal, split = split
   return { sets: state.sets, messages: state.messages, stopped: state.stopped, ms: Date.now() - started };
 }
 
-function runBatch(connection, sql, line, state, { signal, limit = 500 } = {}) {
+// `drain` reads a result set to its end, keeping `limit` rows and dropping the rest, rather than
+// cancelling at the limit: an actual plan needs the statement to run to completion.
+function runBatch(connection, sql, line, state, { signal, limit = 500, drain = false } = {}) {
   return new Promise((resolve, reject) => {
     let current = null;
     const onAbort = () => connection.cancel();
@@ -184,6 +186,7 @@ function runBatch(connection, sql, line, state, { signal, limit = 500 } = {}) {
     request.on('row', (cols) => {
       if (!current) return;
       if (current.rows.length < limit) current.rows.push(cols.map((c) => c.value));
+      else if (drain) current.truncated = true;
       else if (!state.stopped) {
         state.stopped = true;
         current.truncated = true;

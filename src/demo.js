@@ -1,6 +1,7 @@
 // An in-memory stand-in for SQL Server, for `trawl --demo` and the tests. It has no SQL engine:
 // it knows the catalog query, SELECT [TOP (n)] … FROM a table, simple SELECT lists, USE,
-// transactions, WAITFOR DELAY (to try cancelling), RAISERROR/THROW, a few other sessions for the
+// transactions, WAITFOR DELAY (to try cancelling), RAISERROR/THROW, SHOWPLAN_TEXT and STATISTICS
+// PROFILE (made-up plans of a table scan), a few other sessions for the
 // Activity view (and KILL for them), and counts what writes would
 // touch without changing anything.
 import { DbError, runScript } from './db.js';
@@ -124,6 +125,19 @@ function activitySets(session) {
   return [set(['me'], [[session.spid]]), set(ACTIVITY_COLUMNS, rows)];
 }
 
+// SET STATISTICS PROFILE's columns: after each statement, a set with a row for the statement and
+// one per operator under it, the rows each produced beside the optimizer's estimate.
+const PROFILE_COLUMNS = ['Rows', 'Executes', 'StmtText', 'StmtId', 'NodeId', 'Parent', 'PhysicalOp', 'LogicalOp', 'Argument', 'DefinedValues', 'EstimateRows', 'EstimateIO', 'EstimateCPU', 'AvgRowSize', 'TotalSubtreeCost', 'OutputList', 'Warnings', 'Type', 'Parallel', 'EstimateExecutions'];
+
+// `nodes`: the statement first ({ text, rows, est, type }), then its operators, each under the one before.
+function profileSet(nodes) {
+  const rows = nodes.map((n, i) => {
+    const op = i ? n.text.match(/^\s*\|--([^(]+)/)?.[1].trim() ?? null : null;
+    return [n.rows, 1, n.text, 1, i + 1, i, op, op, null, null, n.est, i ? 0.003 : null, i ? 0.0001 : null, i ? 40 : null, 0.0033, null, null, i ? 'PLAN_ROW' : n.type, false, i ? 1 : null];
+  });
+  return set(PROFILE_COLUMNS, rows, ['BigInt', 'BigInt', 'nvarchar']);
+}
+
 const sleep = (ms, signal) =>
   new Promise((resolve, reject) => {
     const t = setTimeout(resolve, ms);
@@ -161,7 +175,7 @@ function splitList(s) {
   return out.map((x) => x.trim()).filter(Boolean);
 }
 
-async function runStatement(session, text, line, state, { signal, limit = 500 }) {
+async function runStatement(session, text, line, state, { signal, limit = 500, drain = false }) {
   const db = DATABASES[session.database];
   const fail = (message, number) => {
     throw new DbError(message, { number, line });
@@ -185,6 +199,8 @@ async function runStatement(session, text, line, state, { signal, limit = 500 })
     return;
   }
   if ((m = s.match(/^SET\s+STATISTICS\s+(IO|TIME)\s+(ON|OFF)$/i))) return void (session[`stats${m[1].toUpperCase()}`] = m[2].toUpperCase() === 'ON');
+  if ((m = s.match(/^SET\s+STATISTICS\s+PROFILE\s+(ON|OFF)$/i))) return void (session.profile = m[1].toUpperCase() === 'ON');
+  const index = (t) => `[${session.database}].[${t.schema}].[${t.name}].[PK_${t.name}]`;
   if ((m = s.match(/^KILL\s+(\d+)$/i))) {
     const id = Number(m[1]);
     if (id === session.spid) fail('Cannot use KILL to kill your own process.', 6104);
@@ -219,8 +235,16 @@ async function runStatement(session, text, line, state, { signal, limit = 500 })
       const top = s.match(/\bTOP\s*\(?\s*(\d+)/i);
       const rows = t.rows.slice(0, top ? Number(top[1]) : undefined);
       const out = set(t.columns.map((c) => c.name), rows.slice(0, limit), t.columns.map((c) => c.type));
-      if (rows.length > limit) (out.truncated = true), (state.stopped = true);
+      if (rows.length > limit) (out.truncated = true), (state.stopped = !drain);
       state.sets.push(out);
+      // The demo has no statistics: it guesses one row for any WHERE, so an actual plan shows a
+      // badly wrong estimate, as stale statistics would.
+      if (session.profile) {
+        const where = s.match(/\bWHERE\s+([\s\S]*?)(?:\bORDER\s+BY\b|$)/i)?.[1].trim();
+        const est = where ? 1 : rows.length;
+        const scan = `  |--Clustered Index Scan(OBJECT:(${index(t)})${where ? `, WHERE:(${where})` : ''})`;
+        state.sets.push(profileSet([{ text: s, rows: rows.length, est, type: 'SELECT' }, ...(top ? [{ text: `  |--Top(TOP EXPRESSION:((${top[1]})))`, rows: rows.length, est }] : []), { text: top ? `     ${scan.trim()}` : scan, rows: rows.length, est }]));
+      }
       if (session.statsIO) state.messages.push(`Table '${t.name}'. Scan count 1, logical reads ${Math.ceil(t.rows.length / 8) + 1}, physical reads 0, page server reads 0, read-ahead reads 0.`);
       if (session.statsTIME) state.messages.push(' SQL Server Execution Times:\n   CPU time = 0 ms,  elapsed time = 1 ms.');
       if (!/^SELECT\s+(TOP\s*\(?\s*\d+\s*\)?\s*)?\*\s+FROM\s+\S+$/i.test(s)) state.messages.push('The demo has no SQL engine: this shows the table as it is, without WHERE, JOIN or ORDER BY.');
@@ -233,6 +257,8 @@ async function runStatement(session, text, line, state, { signal, limit = 500 })
     const all = m[1].toUpperCase() === 'TRUNCATE' || (/^(UPDATE|DELETE)$/i.test(m[1]) && !/\bWHERE\b/i.test(s));
     const n = all ? (t?.rows.length ?? 0) : m[1].toUpperCase() === 'INSERT' ? Math.max(1, (s.match(/\)\s*,\s*\(/g) ?? []).length + 1) : 1;
     if (m[1].toUpperCase() !== 'TRUNCATE') state.messages.push(`${n} row${n === 1 ? '' : 's'} affected`);
+    const verb = { INSERT: 'Insert', UPDATE: 'Update', DELETE: 'Delete', MERGE: 'Merge' }[m[1].toUpperCase()];
+    if (session.profile && verb && t) state.sets.push(profileSet([{ text: s, rows: n, est: n, type: m[1].toUpperCase() }, { text: `  |--Clustered Index ${verb}(OBJECT:(${index(t)}))`, rows: n, est: n }]));
     state.messages.push('(Demo: nothing was changed.)');
   } else if (/^(CREATE|ALTER|DROP|EXEC|EXECUTE|DECLARE|SET|GRANT|REVOKE|DENY|DBCC)\b/i.test(s)) {
     if (/^(CREATE|ALTER|DROP)\b/i.test(s)) state.messages.push('Commands completed successfully. (Demo: nothing was changed.)');

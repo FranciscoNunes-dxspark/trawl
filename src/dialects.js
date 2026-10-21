@@ -22,8 +22,9 @@ const SQLSERVER = {
   schemaSql: SCHEMA_SQL,
   activitySql: ACTIVITY_SQL,
   kill: (id) => `KILL ${id};`,
-  // SET SHOWPLAN_TEXT, handled in actions.js showPlan.
+  // SET SHOWPLAN_TEXT and SET STATISTICS PROFILE, handled in actions.js showPlan and showActualPlan.
   explain: null,
+  explainAnalyze: null,
   defaultPort: 1433,
 };
 
@@ -92,6 +93,8 @@ WHERE backend_type = 'client backend'
 ORDER BY pid;`,
   kill: (id) => `SELECT pg_terminate_backend(${id});`,
   explain: (sql) => `EXPLAIN ${sql.replace(/;\s*$/, '')}`,
+  // The actual plan: this one runs the statement (actions.js showActualPlan rolls a write back).
+  explainAnalyze: (sql) => `EXPLAIN (ANALYZE, BUFFERS) ${sql.replace(/;\s*$/, '')}`,
   defaultPort: 5432,
 };
 
@@ -141,6 +144,8 @@ FROM information_schema.processlist
 ORDER BY id;`,
   kill: (id) => `KILL ${id};`,
   explain: (sql) => `EXPLAIN ${sql.replace(/;\s*$/, '')}`,
+  // MySQL 8.0.18 and later; MariaDB has ANALYZE instead.
+  explainAnalyze: (sql) => `EXPLAIN ANALYZE ${sql.replace(/;\s*$/, '')}`,
   defaultPort: 3306,
 };
 

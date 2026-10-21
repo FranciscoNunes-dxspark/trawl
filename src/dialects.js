@@ -1,9 +1,10 @@
 // What differs between the databases Trawl talks to: SQL Server (the default, through tedious),
 // PostgreSQL (pg) and MySQL (mysql2). A connection's `kind` picks one; everything here is pure text:
 // quoting, TOP or LIMIT, how a transaction starts, how a script splits into statements, and the
-// catalog, plan and activity queries, each shaped like SQL Server's so the same code reads them.
+// catalog, plan and activity queries (sessions, SQL Agent jobs, top queries), each shaped like SQL
+// Server's so the same code reads them.
 import { SCHEMA_SQL } from './schema.js';
-import { ACTIVITY_SQL } from './activity.js';
+import { ACTIVITY_SQL, AGENT_PROBE_SQL, JOBS_SQL, TOP_PROBE_SQL, queryStatsSql, queryStoreSql } from './activity.js';
 
 const sq = (s) => `'${String(s).replace(/'/g, "''")}'`;
 
@@ -35,6 +36,22 @@ const SQLSERVER = {
   schemaSql: SCHEMA_SQL,
   activitySql: ACTIVITY_SQL,
   kill: (id) => `KILL ${id};`,
+  // SQL Agent's jobs (activity.js): the probe says whether this kind of server has the Agent at all.
+  jobs: { probe: AGENT_PROBE_SQL, sql: JOBS_SQL },
+  // The costliest queries: Query Store when it's on for the database, else the plan cache.
+  topQueries: {
+    probe: TOP_PROBE_SQL,
+    plan: ({ database, store }, order) =>
+      store === 'READ_ONLY' || store === 'READ_WRITE'
+        ? { sql: queryStoreSql(order), source: 'query_store' }
+        : {
+            sql: queryStatsSql(order),
+            source: 'dm_exec_query_stats',
+            note: store
+              ? `Query Store is ${store.toLowerCase().replace('_', ' ')} for ${database}, so this is the plan cache, since the server last restarted. ALTER DATABASE … SET QUERY_STORE = ON turns it on.`
+              : `This server has no Query Store (SQL Server 2016 and later do), so this is the plan cache, since the last restart.`,
+          },
+  },
   // SET SHOWPLAN_TEXT and SET STATISTICS PROFILE, handled in actions.js showPlan and showActualPlan.
   explain: null,
   // /grep: the views, procedures, functions and triggers whose definition has the text in it.
@@ -141,6 +158,31 @@ FROM pg_stat_activity
 WHERE backend_type = 'client backend'
 ORDER BY pid;`,
   kill: (id) => `SELECT pg_terminate_backend(${id});`,
+  jobs: { unavailable: 'PostgreSQL has no SQL Agent, so there are no jobs to list (pg_cron does that work there).' },
+  topQueries: {
+    probe: `-- trawl:top-probe
+SELECT current_database() AS database_name, (SELECT extversion FROM pg_extension WHERE extname = 'pg_stat_statements') AS query_store;`,
+    plan: ({ database, store }, order) => {
+      if (!store) return { unavailable: `pg_stat_statements isn't installed in ${database}. To have it, add pg_stat_statements to shared_preload_libraries in postgresql.conf, restart the server, then run CREATE EXTENSION pg_stat_statements; in this database.` };
+      // Version 1.8 (PostgreSQL 13) split total_time into planning and execution.
+      const [major, minor] = store.split('.').map(Number);
+      const time = major > 1 || minor >= 8 ? 'total_exec_time' : 'total_time';
+      return {
+        source: 'pg_stat_statements',
+        sql: `-- trawl:top-queries
+SELECT * FROM (
+  SELECT 'pg_stat_statements' AS source, s.queryid::text AS query_id, MIN(s.query) AS sql_text, NULL::bigint AS plans,
+    SUM(s.calls) AS executions, SUM(s.${time}) AS total_ms, NULL::float8 AS cpu_ms,
+    SUM(s.shared_blks_hit + s.shared_blks_read) AS logical_reads, NULL::timestamptz AS last_run
+  FROM pg_stat_statements s
+  WHERE s.dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
+  GROUP BY s.queryid
+) q
+ORDER BY COALESCE(q.${order}, 0) DESC
+LIMIT 100;`,
+      };
+    },
+  },
   explain: (sql) => `EXPLAIN ${sql.replace(/;\s*$/, '')}`,
   // A trigger has no schema of its own: it's listed in its table's. Extensions' functions are left out.
   grepSql: (text) => `-- trawl:grep
@@ -241,6 +283,27 @@ SELECT id AS session_id, user AS login_name, host AS host_name, NULL AS program_
 FROM information_schema.processlist
 ORDER BY id;`,
   kill: (id) => `KILL ${id};`,
+  jobs: { unavailable: 'MySQL has no SQL Agent, so there are no jobs to list (its event scheduler does that work there).' },
+  topQueries: {
+    probe: `-- trawl:top-probe
+SELECT DATABASE() AS database_name, @@performance_schema AS query_store;`,
+    plan: ({ store }, order) =>
+      String(store) !== '1'
+        ? { unavailable: 'performance_schema is off on this server. To have it, set performance_schema = ON in my.cnf (my.ini on Windows) and restart the server.' }
+        : {
+            source: 'performance_schema',
+            sql: `-- trawl:top-queries
+SELECT * FROM (
+  SELECT 'performance_schema' AS source, DIGEST AS query_id, DIGEST_TEXT AS sql_text, NULL AS plans,
+    COUNT_STAR AS executions, SUM_TIMER_WAIT / 1000000000 AS total_ms, NULL AS cpu_ms,
+    SUM_ROWS_EXAMINED AS logical_reads, LAST_SEEN AS last_run
+  FROM performance_schema.events_statements_summary_by_digest
+  WHERE SCHEMA_NAME = DATABASE()
+) q
+ORDER BY COALESCE(q.${order}, 0) DESC
+LIMIT 100;`,
+          },
+  },
   explain: (sql) => `EXPLAIN ${sql.replace(/;\s*$/, '')}`,
   // information_schema has the bodies only (no CREATE line): a view's SELECT, a routine's BEGIN … END.
   grepSql: (text) => `-- trawl:grep

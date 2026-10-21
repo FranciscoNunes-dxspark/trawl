@@ -19,7 +19,7 @@ import { droppedPaths, findTab, freeName, tabNameFor, tabNameProblem } from './c
 import { findSnippet, snippetNameProblem, snippetsFor, withSnippet, withoutSnippet } from './snippets.js';
 import { folderNames, inFolder, inParallel, mergeResults, readOnlyScript } from './fanout.js';
 import { DIFF_SQL, buildExtras, diffText, schemaDiff, syncScript } from './diff.js';
-import { buildActivity, killSql } from './activity.js';
+import { agentProbe, buildActivity, buildJobHistory, buildJobs, buildTopQueries, jobHistorySql, jobHistoryText, killSql, sortColumn, sortQueries, startJobSql, topProbe } from './activity.js';
 import { dialectOf, definitionSqlFor, qualifiedFor, selectTopFor } from './dialects.js';
 import { buildSchema, createTableScript, definitionSql, describeObject, findObject, objectName, rowsOf } from './schema.js';
 import { grepHits, usesReport, usesSummary, usesText } from './references.js';
@@ -764,6 +764,125 @@ export async function killSession(ctx, id) {
   if (!ok) return;
   const r = await ctx.query(dialect.kind === 'sqlserver' ? sql : dialect.kill(n), { title: `KILL ${n}`, keep: true });
   if (r?.ok) await loadActivity(ctx);
+}
+
+/**
+ * J, Q (and the same key or esc back) in Activity, /jobs, /top-queries and /activity: which list the
+ * tab shows. A list already read for this connection is read again; one that isn't, the view reads.
+ */
+export function showActivityList(ctx, which) {
+  ctx.setView('activity');
+  ctx.setActivityLists({ show: which });
+  const { session } = ctx;
+  if (!session) return;
+  const read = which === 'jobs' ? ctx.activityLists.jobs : which === 'queries' ? ctx.activityLists.queries : ctx.activity;
+  if (read?.conn !== session.conn.name) return;
+  if (which === 'jobs') return loadJobs(ctx);
+  if (which === 'queries') return loadTopQueries(ctx);
+  return loadActivity(ctx);
+}
+
+/**
+ * The SQL Agent jobs, for Activity's jobs list: first whether the server has the Agent (Azure SQL
+ * Database, Express and Postgres or MySQL don't), then msdb's jobs. Errors (msdb's roles) still show.
+ */
+export async function loadJobs(ctx, { quiet = true } = {}) {
+  if (!needSession(ctx)) return;
+  const session = ctx.session;
+  const d = dialectOf(session);
+  const base = { jobs: [], at: Date.now(), conn: session.conn.name, error: null, unavailable: null };
+  if (!d.jobs.sql) return ctx.setActivityLists({ jobs: { ...base, unavailable: d.jobs.unavailable } });
+  let read = null;
+  const r = await ctx.task(
+    'read the SQL Agent jobs',
+    async (signal) => {
+      const { unavailable } = agentProbe((await session.run(d.jobs.probe, { signal, limit: 10 })).sets);
+      if (unavailable) return (read = { unavailable }), [unavailable];
+      read = { jobs: buildJobs((await session.run(d.jobs.sql, { signal, limit: 10_000 })).sets) };
+      return [`${read.jobs.length} job${read.jobs.length === 1 ? '' : 's'}`];
+    },
+    { label: 'Reading the SQL Agent jobs', quiet },
+  );
+  if (read) return ctx.setActivityLists({ jobs: { ...base, ...read, at: Date.now() } });
+  if (!r.ok && r.error?.message !== 'busy' && !r.error?.cancelled) ctx.setActivityLists({ jobs: { ...base, error: r.error.message } });
+}
+
+/** ↵ on a job: its recent runs in the viewer, with what its failed steps said. */
+export async function showJobHistory(ctx, job) {
+  if (!needSession(ctx) || !job) return;
+  const session = ctx.session;
+  let text = null;
+  await ctx.task(
+    `read the history of job ${job.name}`,
+    async (signal) => {
+      const runs = buildJobHistory((await session.run(jobHistorySql(job.id), { signal, limit: 1000 })).sets);
+      text = jobHistoryText(job, runs);
+      return [`${runs.length} run${runs.length === 1 ? '' : 's'}`];
+    },
+    { label: `Reading the history of ${job.name}`, quiet: true },
+  );
+  if (text != null) ctx.showText(`Job ${job.name}: recent runs`, text);
+}
+
+/**
+ * s on a job: starts it with msdb's sp_start_job, after asking. It's an EXEC, so a write as classify()
+ * has it: a read-only connection refuses it until /writes. Not inside an open transaction, which
+ * couldn't take it back.
+ */
+export async function startJob(ctx, job) {
+  if (!needSession(ctx) || !job) return;
+  const { conn } = ctx.session;
+  const dialect = dialectOf(ctx.session);
+  if (!dialect.jobs.sql) return ctx.note(dialect.jobs.unavailable, 'error');
+  const sql = startJobSql(job.name);
+  if (classifyScript(sql, { dialect: dialect.kind }).write && isReadOnly(conn) && !ctx.writesAllowed) {
+    return ctx.note(`${conn.name} is read-only${conn.prod ? ' (production)' : ''}, and starting a job changes things. /writes allows it until you disconnect.`, 'error');
+  }
+  if (ctx.tranCount) return ctx.note('A transaction is open, and a job started now runs outside it: /commit or /rollback first.', 'error');
+  if (job.running) return ctx.note(`${job.name} is running already.`, 'error');
+  const ok = await ctx.confirm({
+    title: `Start job ${job.name}?`,
+    detail: `On ${conn.name}${conn.prod ? ' (production)' : ''}. SQL Agent runs it from its first step, now${job.enabled ? '' : ' (it is disabled, which only stops its schedules)'}.`,
+    options: YES_NO('Yes, start it'),
+    danger: Boolean(conn.prod),
+  });
+  if (!ok) return;
+  const r = await ctx.query(sql, { title: `start job ${job.name}`, keep: true });
+  if (r?.ok) await loadJobs(ctx);
+}
+
+/**
+ * The costliest queries, for Activity's top-queries list, by `sort` (duration, cpu, reads,
+ * executions): first where to read them (Query Store, the plan cache, pg_stat_statements…), then them.
+ */
+export async function loadTopQueries(ctx, { sort, quiet = true } = {}) {
+  if (!needSession(ctx)) return;
+  const session = ctx.session;
+  const d = dialectOf(session);
+  const by = sort ?? ctx.activityLists.queries?.sort ?? 'duration';
+  const base = { queries: [], sort: by, at: Date.now(), conn: session.conn.name, database: session.database, source: null, note: null, error: null, unavailable: null };
+  let read = null;
+  const r = await ctx.task(
+    'read the top queries',
+    async (signal) => {
+      let probe;
+      try {
+        probe = topProbe((await session.run(d.topQueries.probe, { signal, limit: 10 })).sets);
+      } catch (e) {
+        // SQL Server before 2016 has no sys.database_query_store_options: the plan cache it is.
+        if (d.kind !== 'sqlserver' || e.number !== 208) throw e;
+        probe = { database: session.database, store: null };
+      }
+      const plan = d.topQueries.plan(probe, sortColumn(by));
+      if (plan.unavailable) return (read = { unavailable: plan.unavailable }), [plan.unavailable];
+      const queries = sortQueries(buildTopQueries((await session.run(plan.sql, { signal, limit: 1000 })).sets), by);
+      read = { queries, source: plan.source, note: plan.note ?? null };
+      return [`${queries.length} quer${queries.length === 1 ? 'y' : 'ies'}`];
+    },
+    { label: 'Reading the top queries', quiet },
+  );
+  if (read) return ctx.setActivityLists({ queries: { ...base, ...read, at: Date.now() } });
+  if (!r.ok && r.error?.message !== 'busy' && !r.error?.cancelled) ctx.setActivityLists({ queries: { ...base, error: r.error.message } });
 }
 
 /** The console's selection, or the statement under its cursor: what ctrl+r would run. */

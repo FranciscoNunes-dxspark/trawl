@@ -57,8 +57,16 @@ const HINTS = {
   results: 'h/l columns · o sort · f filter · ↵ record · v value · y/Y copy · F follow key · p pin · c compare · e edit · n NULL · d delete · a add · s save · x export',
   history: '↵ run again · e edit in the console · ◆ ran by Claude',
   connections: '↵ connect · n new · p password · f folder · x forget',
-  activity: 'R read again · ↵ full SQL · x kill · a idle sessions too',
+  activity: 'R read again · ↵ full SQL · x kill · a idle sessions too · J jobs · Q top queries',
 };
+// The Activity tab's other lists.
+const ACTIVITY_HINTS = {
+  jobs: 'R read again · ↵ recent runs · s start the job · J or esc back to sessions · Q top queries',
+  queries: 'R read again · ↵ full text · e edit in the console · o sort by · Q or esc back to sessions · J jobs',
+};
+// What the Activity tab lists ('sessions', 'jobs' or 'queries'), and the jobs and top queries read
+// for it ({ …, at, conn, error, unavailable }).
+const NO_LISTS = { show: 'sessions', jobs: null, queries: null };
 
 // Typed at the prompt without "!", these still run as SQL.
 const SQL_START = /^(select|with|insert|update|delete|merge|exec|execute|create|alter|drop|truncate|declare|set|begin|commit|rollback|use|print|waitfor)\b/i;
@@ -180,6 +188,8 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
   // The Activity view's sessions ({ me, sessions, at, conn, error }), read when it opens and on R.
   const [activity, setActivityState] = useState(null);
   const activityRef = useRef(null);
+  const [activityLists, setActivityListsState] = useState(NO_LISTS);
+  const activityListsRef = useRef(NO_LISTS);
   const [changes, setChangesState] = useState(NO_CHANGES);
   const [resultIndex, setResultIndexState] = useState(0);
   const [file, setFile] = useState(null);
@@ -257,6 +267,11 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
   const setActivity = (a) => {
     activityRef.current = a;
     setActivityState(a);
+  };
+  // Merges in what changed: { show }, { jobs }, { queries }.
+  const setActivityLists = (patch) => {
+    activityListsRef.current = { ...activityListsRef.current, ...patch };
+    setActivityListsState(activityListsRef.current);
   };
   const setSchemaBoth = (s) => {
     schemaRef.current = s;
@@ -408,6 +423,7 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     setTranCount(0);
     setWritesAllowed(false);
     setActivity(null);
+    setActivityLists({ jobs: null, queries: null });
   };
 
   // A login with no password to hand (or a turned-down one) asks for it, then tries again. A
@@ -702,6 +718,13 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
       get activity() {
         return activityRef.current;
       },
+      get activityLists() {
+        return activityListsRef.current;
+      },
+      // What's running with the spinner, if anything (esc cancels it).
+      get busy() {
+        return busyRef.current;
+      },
       // What useMouse registers: the component on screen takes the main area's clicks and wheel.
       mouseHandlers: [],
     };
@@ -718,6 +741,7 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     },
     setConfig,
     setActivity,
+    setActivityLists,
     setWritesAllowed,
     setResultIndex,
     // o in Results: by this column, A to Z, then Z to A, then as the server sent them.
@@ -1130,7 +1154,7 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
   } else if (view === 'results') {
     main = <ResultsView results={results} changes={changes} setIndex={resultIndex} view={resultView} ctx={ctx} width={W} height={mainH} active={viewActive || (focus === 'cell' && !confirmReq)} />;
   } else if (view === 'activity') {
-    main = <ActivityView activity={activity} session={session} ctx={ctx} width={W} height={mainH} active={viewActive} />;
+    main = <ActivityView activity={activity} lists={activityLists} session={session} ctx={ctx} width={W} height={mainH} active={viewActive} />;
   } else if (view === 'history') {
     // Claude's queries come from trawl mcp's log, read each time the tab draws (it's small).
     const ran = [...config.ran, ...loadClaudeHistory()].sort((x, y) => y.at - x.at);
@@ -1167,7 +1191,9 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
           ? 'j/k scroll · space page · esc close'
           : view === 'query' && queryMode === 'console'
             ? '↵/i type · ctrl+r run statement · R run all · /save <file> · /open <file>'
-            : HINTS[view];
+            : view === 'activity' && activityLists.show !== 'sessions'
+              ? ACTIVITY_HINTS[activityLists.show]
+              : HINTS[view];
   const right = focus === 'prompt' || focus === 'editor' || focus === 'cell' || confirmReq?.secret ? '' : '  / commands · ! SQL · ? help';
 
   return (

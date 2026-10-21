@@ -2,8 +2,8 @@
 // it knows the catalog queries (/grep's and /uses's too), SELECT [TOP (n)] … FROM a table, simple SELECT lists, USE,
 // transactions, WAITFOR DELAY (to try cancelling), RAISERROR/THROW, SHOWPLAN_TEXT and STATISTICS
 // PROFILE (made-up plans of a table scan), a few other sessions for the
-// Activity view (and KILL for them), and counts what writes would
-// touch without changing anything.
+// Activity view (and KILL for them), SQL Agent jobs (and sp_start_job), the top queries, and counts
+// what writes would touch without changing anything.
 import { DbError, runScript } from './db.js';
 import { findObject } from './schema.js';
 import { mentions } from './references.js';
@@ -178,6 +178,112 @@ function profileSet(nodes) {
   return set(PROFILE_COLUMNS, rows, ['BigInt', 'BigInt', 'nvarchar']);
 }
 
+// SQL Agent jobs on the demo's "server": a failed backup, a nightly load that went well, one running
+// now, and a disabled one that never ran. The Agent's dates are yyyymmdd and hhmmss numbers on the
+// server's clock, which for the demo is UTC. Each session has its own copy, as with `others`.
+const agentDate = (d) => d.getUTCFullYear() * 10000 + (d.getUTCMonth() + 1) * 100 + d.getUTCDate();
+const agentClock = (d) => d.getUTCHours() * 10000 + d.getUTCMinutes() * 100 + d.getUTCSeconds();
+const agentSpan = (s) => Math.floor(s / 3600) * 10000 + (Math.floor(s / 60) % 60) * 100 + (s % 60);
+
+function fakeJobs() {
+  const ago = (s) => new Date(Date.now() - s * 1000);
+  const at = (days, h) => {
+    const d = new Date();
+    d.setUTCDate(d.getUTCDate() + days);
+    d.setUTCHours(h, 0, 0, 0);
+    return d;
+  };
+  // A run: when it started (seconds ago), how it ended, how long it took, and its steps' outcomes.
+  const run = (startedAgo, status, seconds, steps, message) => ({ at: ago(startedAgo), status, seconds, steps, message });
+  const ok = (id, name, seconds) => ({ id, name, status: 1, seconds, message: 'Executed as user: NT SERVICE\\SQLSERVERAGENT. The step succeeded.' });
+  const copyFailed = { id: 2, name: 'Copy to share', status: 0, seconds: 4, message: "Cannot open backup device '\\\\nas01\\backups\\ClubA.bak'. Operating system error 53(The network path was not found.). [SQLSTATE 42000] (Error 3201). The step failed." };
+  const backupFailed = 'The job failed.  The Job was invoked by Schedule 3 (Nightly backup).  The last step to run was step 2 (Copy to share).';
+  return [
+    {
+      id: '1f0c6a52-7d1e-4b8a-9c3e-2a5b7d9e0f11',
+      name: 'Backup ClubA',
+      category: 'Database Maintenance',
+      description: 'Full backup of ClubA, copied to the NAS.',
+      enabled: true,
+      next: at(0, 23),
+      runs: [run(86_400 * 2 + 10_800, 1, 131, [ok(1, 'Back up', 121), ok(2, 'Copy to share', 10)]), run(86_400 + 10_800, 1, 127, [ok(1, 'Back up', 118), ok(2, 'Copy to share', 9)]), run(10_800, 0, 125, [ok(1, 'Back up', 121), copyFailed], backupFailed)],
+    },
+    {
+      id: '2a4e8c10-3b5d-4f6a-8b7c-9d0e1f2a3b22',
+      name: 'Nightly load',
+      category: 'Data Collector',
+      description: 'Loads the day’s matches from the league feed.',
+      enabled: true,
+      next: at(1, 2),
+      runs: [run(86_400 + 18_000, 1, 702, [ok(1, 'Fetch feed', 95), ok(2, 'Merge matches', 607)]), run(18_000, 1, 751, [ok(1, 'Fetch feed', 101), ok(2, 'Merge matches', 650)])],
+    },
+    {
+      id: '3b5f9d21-4c6e-4a7b-9c8d-0e1f2a3b4c33',
+      name: 'Stats refresh',
+      category: 'Database Maintenance',
+      description: 'No description available.',
+      enabled: true,
+      next: at(1, 6),
+      running: ago(250),
+      runs: [run(86_400 + 250, 1, 190, [ok(1, 'Update statistics', 190)])],
+    },
+    { id: '4c6a0e32-5d7f-4b8c-8d9e-1f2a3b4c5d44', name: 'Old archive', category: '[Uncategorized (Local)]', description: 'Moves seasons before 2010 to the archive.', enabled: false, next: null, runs: [] },
+  ];
+}
+
+const JOB_COLUMNS = ['job_id', 'name', 'enabled', 'category', 'description', 'running_since', 'current_step', 'server_now', 'last_status', 'last_run_date', 'last_run_time', 'last_duration', 'last_message', 'next_run_date', 'next_run_time'];
+
+function jobSets(session) {
+  const now = new Date();
+  const rows = [...session.jobs]
+    .sort((x, y) => x.name.localeCompare(y.name))
+    .map((j) => {
+      const last = j.runs.at(-1);
+      return [j.id.toUpperCase(), j.name, j.enabled ? 1 : 0, j.category, j.description, j.running ?? null, j.running ? 1 : null, now, last ? last.status : null, last ? agentDate(last.at) : null, last ? agentClock(last.at) : null, last ? agentSpan(last.seconds) : null, last ? (last.message ?? 'The job succeeded.') : null, j.next ? agentDate(j.next) : null, j.next ? agentClock(j.next) : null];
+    });
+  return [set(JOB_COLUMNS, rows)];
+}
+
+// Each run's steps, then its step-0 row, numbered as sysjobhistory's instance_id; newest first.
+function jobHistorySets(session, id) {
+  const job = session.jobs.find((j) => j.id === id.toLowerCase());
+  const rows = [];
+  let n = 1;
+  for (const r of job?.runs ?? []) {
+    let t = r.at.getTime();
+    for (const st of r.steps) {
+      const d = new Date(t);
+      rows.push([n++, st.id, st.name, st.status, agentDate(d), agentClock(d), agentSpan(st.seconds), st.message]);
+      t += st.seconds * 1000;
+    }
+    rows.push([n++, 0, '(Job outcome)', r.status, agentDate(r.at), agentClock(r.at), agentSpan(r.seconds), r.message ?? 'The job succeeded.  The Job was invoked by Schedule 1.  The last step to run was step 1.']);
+  }
+  return [set(['instance_id', 'step_id', 'step_name', 'run_status', 'run_date', 'run_time', 'run_duration', 'message'], rows.reverse())];
+}
+
+// What the demo's statistics say cost the most, the same in every database: ClubA has Query Store on
+// and ClubB has it off (so it falls back to the plan cache); the demo on Postgres hasn't
+// pg_stat_statements. [id, text, plans, executions, total ms, cpu ms, logical reads]
+const TOP_QUERIES = [
+  ['17', 'SELECT * FROM dbo.Matches m CROSS JOIN dbo.Players p', 1, 12, 151_000, 140_300, 12_400_000],
+  ['4', 'SELECT c.Name, COUNT(*) AS Players\nFROM dbo.Clubs c JOIN dbo.Players p ON p.ClubId = c.Id\nGROUP BY c.Name', 2, 4_210, 98_400, 61_200, 1_904_220],
+  ['9', '(@p0 int)UPDATE dbo.Players SET Goals = Goals + 1 WHERE Id = @p0', 1, 88_000, 44_100, 9_800, 264_000],
+  ['2', 'SELECT TOP (10) * FROM dbo.Matches ORDER BY PlayedOn DESC', 1, 230_500, 23_050, 20_100, 691_500],
+];
+
+function topProbeSets(session) {
+  const kind = session.conn.kind;
+  const store = kind === 'postgres' ? null : kind === 'mysql' ? 1 : session.database === 'ClubB' ? 'OFF' : 'READ_WRITE';
+  return [set(['database_name', 'query_store'], [[session.database, store]])];
+}
+
+function topQuerySets(batch) {
+  const source = batch.match(/'(\w+)' AS source/)?.[1] ?? 'query_store';
+  const last = new Date(Date.now() - 90_000);
+  const rows = TOP_QUERIES.map(([id, text, plans, runs, total, cpu, reads]) => [source, source === 'dm_exec_query_stats' ? `0x${Number(id).toString(16).padStart(16, '0').toUpperCase()}` : id, text, plans, runs, total, cpu, reads, last]);
+  return [set(['source', 'query_id', 'sql_text', 'plans', 'executions', 'total_ms', 'cpu_ms', 'logical_reads', 'last_run'], rows)];
+}
+
 const sleep = (ms, signal) =>
   new Promise((resolve, reject) => {
     const t = setTimeout(resolve, ms);
@@ -251,6 +357,14 @@ async function runStatement(session, text, line, state, { signal, limit = 500, d
     for (const o of session.others) if (o.blockedBy === id) Object.assign(o, { blockedBy: 0, status: 'running', wait: null, waitMs: null });
     return;
   }
+  if ((m = s.match(/^EXEC(?:UTE)?\s+msdb\.dbo\.sp_start_job\s+@job_name\s*=\s*N?'((?:[^']|'')*)'$/i))) {
+    const name = m[1].replace(/''/g, "'");
+    const job = session.jobs.find((j) => j.name === name);
+    if (!job) fail(`The specified @job_name ('${name}') does not exist.`, 14262);
+    if (job.running) fail(`SQLServerAgent Error: Request to run job ${name} (from User demo) refused because the job is already running from a request by User demo.`, 22022);
+    job.running = new Date();
+    return void state.messages.push(`Job '${name}' started successfully.`);
+  }
   if (/^SELECT\s+@@TRANCOUNT\b/i.test(s)) state.sets.push(set(['(No column name)'], [[session.tran]], ['IntN']));
   else if (/^BEGIN\s+TRAN(SACTION)?\b/i.test(s)) session.tran++;
   else if (/^COMMIT\b/i.test(s)) {
@@ -319,6 +433,7 @@ export function demoSession(conn, { database } = {}) {
     tran: 0,
     spid: 52,
     others: fakeActivity(),
+    jobs: fakeJobs(),
     run: (script, opts = {}) =>
       runScript(
         session,
@@ -333,6 +448,11 @@ export function demoSession(conn, { database } = {}) {
           if (batch.startsWith('-- trawl:activity')) return void state.sets.push(...activitySets(session));
           if (batch.startsWith('-- trawl:grep')) return void state.sets.push(grepSet(session.database, batch));
           if (batch.startsWith('-- trawl:uses')) return void state.sets.push(usesSet(session.database, batch));
+          if (batch.startsWith('-- trawl:jobs-probe')) return void state.sets.push(set(['engine_edition', 'server_now'], [[session.conn.engineEdition ?? 3, new Date()]]));
+          if (batch.startsWith('-- trawl:jobs')) return void state.sets.push(...jobSets(session));
+          if (batch.startsWith('-- trawl:job-history')) return void state.sets.push(...jobHistorySets(session, batch.match(/job_id = '([^']+)'/)[1]));
+          if (batch.startsWith('-- trawl:top-probe')) return void state.sets.push(...topProbeSets(session));
+          if (batch.startsWith('-- trawl:top-queries')) return void state.sets.push(...topQuerySets(batch));
           if (batch.startsWith('-- trawl:definition')) {
             const name = batch.match(/OBJECT_ID\(N'(.*)'\)\)/)[1].replace(/''/g, "'");
             const db = DATABASES[session.database];

@@ -89,7 +89,7 @@ Most of Trawl works the same there: the Explorer, the console and its suggestion
 - A script runs a statement at a time, split at `;` (Postgres's `$$` bodies and MySQL's backslash escapes are understood); there is no `GO`, and MySQL's `DELIMITER` isn't supported.
 - Rows past the row limit are dropped once they arrive, rather than the query being stopped there, so a huge `SELECT` still crosses the network: add a `LIMIT`.
 - Editing results in place, adding rows included, is SQL Server only (the save script is T-SQL); `e` and `a` say so. So are `/stats` and the sync script of `/diff`, which compares tables, columns and keys only (not indexes or definitions) when either side isn't SQL Server.
-- Activity on MySQL doesn't show who blocks whom.
+- Activity on MySQL doesn't show who blocks whom. There are no SQL Agent jobs on either (`J` says so), and the top queries come from `pg_stat_statements` (which has to be installed: `Q` says how) and from `performance_schema` on MySQL, where reads are rows examined and there is no CPU time.
 - `/uses` takes what views use from Postgres's catalog (`pg_depend`), and the triggers on a table from both, but neither records what a routine's or trigger's body refers to (nor, on MySQL, a view's), so those are found by the object's name in their definitions, and the report marks them "by name".
 - `P` runs the statement through `EXPLAIN ANALYZE`, which sends back the plan but not the rows, so Results stays as it was. It always runs inside a transaction that is rolled back afterwards (or back to a savepoint, when you have one open, which then stays as it was), whatever the commit mode: an actual plan is for looking at, and it would be easy to forget that it changed data. To apply a write, run it (`ctrl+r`). A table that can't roll back (MySQL's MyISAM) keeps the change. MariaDB has `ANALYZE` instead, which Trawl doesn't use.
 - `/ask` writes T-SQL, and the suggestions and `/format` know T-SQL's keywords and functions, not every other one.
@@ -136,7 +136,9 @@ Press `?` inside for every shortcut: the sections down the left, opening on the 
 | Results | `h`/`l` columns · `[`/`]` result sets · `m` more rows · `o` sort by the column · `f` filter · `y`/`Y` copy the cell/row · `↵` the row as a record · `v` the whole value of the cell · `F` follow the foreign key · `p` pin · `c` compare with the pinned · `e` edit · `n` NULL · `d` delete · `a` add a row · `u` undo · `s` save · `x` export |
 | History | `↵` run again · `e` edit in the console · `◆` marks what Claude ran |
 | Connections | `↵` connect · `n` new · `p` password · `f` folder · `x` forget |
-| Activity | `R` read again · `↵` the session in full · `x` kill · `a` idle sessions too |
+| Activity | `R` read again · `↵` the session in full · `x` kill · `a` idle sessions too · `J` SQL Agent jobs · `Q` top queries (the same key again, or `esc`, back to the sessions) |
+| Activity, jobs | `↵` recent runs · `s` start the job · `R` read again |
+| Activity, top queries | `o` sort by total duration, CPU, reads or executions · `↵` the query in full · `e` edit in the console · `R` read again |
 | Settings (`,`) | `↵` or space changes the row limit, the accent colour, the mouse, whether Trawl checks for and installs updates, and whether it notifies when a long run ends · `esc` closes |
 
 One-liners can also go straight in the prompt: SQL there runs with `!`, or without it when it starts with a SQL keyword (`select …`, `exec …`).
@@ -230,6 +232,11 @@ The Activity tab (`6`, or `/activity`) lists the server's sessions, as SSMS's Ac
 
 The list is read when the tab opens, and again on `R`. `↵` shows a session's details and its SQL in full. `x` (or `/kill <session>`) ends a session with `KILL`, after asking: what it hasn't committed is rolled back. A read-only connection refuses it until `/writes`, and so does an open transaction (KILL can't run inside one). Reading the sessions needs `VIEW SERVER STATE` (`VIEW DATABASE STATE` on Azure SQL Database, which lists that database's sessions only).
 
+The tab has two more lists, and its title says which one is on screen. The same key again, or `esc`, goes back to the sessions.
+
+- **SQL Agent jobs** (`J`, or `/jobs`): each job in `msdb`, whether it is running now (and since when), how its last run ended and how long it took, and when it runs next. Jobs whose last run failed are in red. `↵` shows a job's recent runs, each with its outcome, start and duration, and what its failed steps said. `s` starts a job with `sp_start_job`, after asking. Starting one counts as a write, so a read-only connection refuses it until `/writes`. Reading the jobs needs one of `msdb`'s SQL Agent roles (`SQLAgentReaderRole`, say) or sysadmin; without one, the list shows the server's error. Azure SQL Database and SQL Server Express have no SQL Agent, and the list says so. The times are the server's clock.
+- **Top queries** (`Q`, or `/top-queries`): the queries that cost the most in the database you're in, with how often each ran, its total and average duration, CPU and logical reads, sorted by total duration. `o` sorts by CPU, reads or executions instead. They come from Query Store, over the last 24 hours. If Query Store is off for the database, the list says so and shows the plan cache instead (`sys.dm_exec_query_stats`, since the server last restarted), and the top of the list says which one you are looking at. `↵` shows a query in full, with how many plans it has had, and `e` puts it in the console. Reading them needs `VIEW DATABASE STATE` (`VIEW SERVER STATE` for the plan cache).
+
 ### Safety
 
 - **Production is read-only.** On a connection added with `--prod`, anything that changes data is refused until `/writes`, which asks first and lasts until you disconnect.
@@ -242,7 +249,7 @@ The list is read when the tab opens, and again on `R`. `↵` shows a session's d
 
 Type `/` and the menu narrows as you type. `tab` completes, `↑`/`↓` picks, `↵` runs. `/connect` completes connection names, `/use` database names, `/describe` tables and views, and `/script` and `/uses` everything in the database.
 
-`/import datagrip [folder]` `/import-csv <file.csv> <table> [--run]` `/connect <name>` `/add …` `/forget <name>` `/folder <connection> [folder]` `/password [connection]` `/disconnect` `/use <database>` `/open <file.sql>` `/snippet [name]` `/snippets` `/console` `/tab …` `/new` `/format` `/search <text>` `/save <file.sql>` `/describe <table>` `/script <name>` `/grep <text>` `/uses <object>` `/find [text]` `/export <file>` `/filter [text]` `/cell` `/follow` `/pin` `/compare` `/copy [tsv|csv|json|md|insert]` `/limit [rows]` `/writes` `/tx [auto|manual]` `/commit` `/rollback` `/ask <question>` `/explain` `/ai [connection] [level]` `/update` `/settings` `/stats [on|off]` `/plan [actual] [sql]` `/more` `/diff <connection> [database]` `/fanout <folder> [sql]` `/activity` `/kill <session>` `/last` `/refresh` `/help` `/quit`
+`/import datagrip [folder]` `/import-csv <file.csv> <table> [--run]` `/connect <name>` `/add …` `/forget <name>` `/folder <connection> [folder]` `/password [connection]` `/disconnect` `/use <database>` `/open <file.sql>` `/snippet [name]` `/snippets` `/console` `/tab …` `/new` `/format` `/search <text>` `/save <file.sql>` `/describe <table>` `/script <name>` `/grep <text>` `/uses <object>` `/find [text]` `/export <file>` `/filter [text]` `/cell` `/follow` `/pin` `/compare` `/copy [tsv|csv|json|md|insert]` `/limit [rows]` `/writes` `/tx [auto|manual]` `/commit` `/rollback` `/ask <question>` `/explain` `/ai [connection] [level]` `/update` `/settings` `/stats [on|off]` `/plan [actual] [sql]` `/more` `/diff <connection> [database]` `/fanout <folder> [sql]` `/activity` `/jobs` `/top-queries` `/kill <session>` `/last` `/refresh` `/help` `/quit`
 
 ## Claude
 

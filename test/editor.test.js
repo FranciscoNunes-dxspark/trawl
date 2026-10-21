@@ -174,6 +174,71 @@ test('shift selects; typing or backspace replaces the selection, and moving lets
   assert.deepEqual(ed.selectedText(back), { text: 'abcd', row: 0 });
 });
 
+test('cut takes the selection, or with none the whole line', () => {
+  const e = ed.extend({ lines: ['SELECT 1', 'SELECT 2'], row: 0, col: 7 }, (x) => ed.move(x, { rows: 1 }));
+  assert.deepEqual(ed.cut(e), { editor: { lines: ['SELECT 2'], row: 0, col: 7 }, text: '1\nSELECT ' });
+  assert.deepEqual(ed.cut({ lines: ['a', 'b', 'c'], row: 1, col: 1 }), { editor: { lines: ['a', 'c'], row: 1, col: 0 }, text: 'b\n' });
+  assert.deepEqual(ed.cut({ lines: ['a', 'b'], row: 1, col: 0 }), { editor: { lines: ['a'], row: 0, col: 0 }, text: 'b\n' });
+  assert.deepEqual(ed.cut({ lines: ['a'], row: 0, col: 1 }), { editor: { lines: [''], row: 0, col: 0 }, text: 'a\n' });
+  assert.equal(ed.cut({ lines: [''], row: 0, col: 0 }), null);
+});
+
+test('selectAll selects every line, the cursor at the end', () => {
+  const all = ed.selectAll({ lines: ['SELECT 1', 'FROM t'], row: 0, col: 3 });
+  assert.deepEqual(ed.selectedText(all), { text: 'SELECT 1\nFROM t', row: 0 });
+  assert.deepEqual([all.row, all.col], [1, 6]);
+});
+
+test('toggleComment comments the line or the selected lines out at the least indent, and back in', () => {
+  const e = { lines: ['SELECT 1', '  FROM t'], row: 0, col: 2 };
+  const one = ed.toggleComment(e);
+  assert.deepEqual(one, { lines: ['-- SELECT 1', '  FROM t'], row: 0, col: 5 });
+  assert.deepEqual(ed.toggleComment(one), e);
+  // Both lines (the blank one between left alone), at the least indent; the anchor at column 0 stays.
+  const sel = { lines: ['  a', '', '    b'], row: 2, col: 5, anchor: { row: 0, col: 0 } };
+  const out = ed.toggleComment(sel);
+  assert.deepEqual(out, { lines: ['  -- a', '', '  --   b'], row: 2, col: 8, anchor: { row: 0, col: 0 } });
+  assert.deepEqual(ed.toggleComment(out).lines, sel.lines);
+  // Some lines commented, some not: all get commented. "--" without a space comes back in too.
+  assert.deepEqual(ed.toggleComment({ ...sel, lines: ['--a', 'b', 'c'] }).lines, ['-- --a', '-- b', '-- c']);
+  assert.deepEqual(ed.toggleComment({ lines: ['--a'], row: 0, col: 0 }).lines, ['a']);
+});
+
+test('indentLines adds two spaces to each line that isn\'t blank, or takes up to two away', () => {
+  const sel = { lines: ['a', '', ' b'], row: 2, col: 2, anchor: { row: 0, col: 0 } };
+  assert.deepEqual(ed.indentLines(sel, 1), { lines: ['  a', '', '   b'], row: 2, col: 4, anchor: { row: 0, col: 0 } });
+  assert.deepEqual(ed.indentLines(sel, -1), { lines: ['a', '', 'b'], row: 2, col: 1, anchor: { row: 0, col: 0 } });
+  assert.deepEqual(ed.indentLines({ lines: ['    x'], row: 0, col: 1 }, -1), { lines: ['  x'], row: 0, col: 0 });
+});
+
+test('duplicate writes the line again under it, or the selection after itself', () => {
+  assert.deepEqual(ed.duplicate({ lines: ['a', 'b'], row: 0, col: 1 }), { lines: ['a', 'a', 'b'], row: 1, col: 1 });
+  const sel = { lines: ['SELECT x'], row: 0, col: 8, anchor: { row: 0, col: 7 } };
+  const d = ed.duplicate(sel);
+  assert.deepEqual(d.lines, ['SELECT xx']);
+  assert.deepEqual(ed.selectedText(d), { text: 'x', row: 0 });
+});
+
+test('ctrl+delete deletes forward a word; ctrl+home and ctrl+end go to the ends of the text', () => {
+  assert.deepEqual(ed.deleteWordForward({ lines: ['SELECT  Name, x'], row: 0, col: 6 }), { lines: ['SELECT, x'], row: 0, col: 6 });
+  assert.deepEqual(ed.deleteWordForward({ lines: ['a', 'b'], row: 0, col: 1 }), { lines: ['ab'], row: 0, col: 1 });
+  const e = { lines: ['SELECT 1', 'FROM t'], row: 0, col: 3 };
+  assert.deepEqual([ed.textEnd(e).row, ed.textEnd(e).col], [1, 6]);
+  assert.deepEqual([ed.textStart(ed.textEnd(e)).row, ed.textStart(ed.textEnd(e)).col], [0, 0]);
+});
+
+test('moveLines moves the line, or the selected lines, up or down, and stops at the ends', () => {
+  const e = { lines: ['a', 'b', 'c'], row: 1, col: 1 };
+  assert.deepEqual(ed.moveLines(e, -1), { lines: ['b', 'a', 'c'], row: 0, col: 1 });
+  assert.deepEqual(ed.moveLines(e, 1), { lines: ['a', 'c', 'b'], row: 2, col: 1 });
+  assert.equal(ed.moveLines({ ...e, row: 0 }, -1), null);
+  assert.equal(ed.moveLines({ ...e, row: 2 }, 1), null);
+  // a and b selected (the selection ends at the start of c, so c stays).
+  const sel = { lines: ['a', 'b', 'c', 'd'], row: 2, col: 0, anchor: { row: 0, col: 0 } };
+  assert.deepEqual(ed.moveLines(sel, 1), { lines: ['c', 'a', 'b', 'd'], row: 3, col: 0, anchor: { row: 1, col: 0 } });
+  assert.equal(ed.moveLines(sel, -1), null);
+});
+
 test('find selects the next match, wraps round, and goes back', () => {
   const e = { lines: ['SELECT Name', 'FROM t WHERE name = 1'], row: 0, col: 0 };
   let f = ed.find(e, 'NAME');

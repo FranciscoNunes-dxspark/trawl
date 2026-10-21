@@ -364,6 +364,82 @@ test('backspace deletes before the cursor and the delete key after it, though In
   app.unmount();
 });
 
+test('ctrl+c copies the selection, ctrl+x cuts it (or the line), ctrl+a selects everything, and alt+↓ moves the line down', async () => {
+  mkdirSync(process.env.TRAWL_HOME, { recursive: true });
+  writeFileSync(join(process.env.TRAWL_HOME, 'console.sql'), 'SELECT 12345\nFROM x');
+  const copied = [];
+  const app = start('demo', { clipboard: async (text) => (copied.push(text), 'system') });
+  await until(() => frame().includes('Clubs'), 'the explorer');
+  app.stdin.write('2');
+  await until(() => frame().includes('SELECT 12345'), 'the console');
+  app.stdin.write('i');
+  await until(() => frame().includes('typing SQL'), 'typing');
+  // shift+→ seven times: "SELECT " selected.
+  for (let n = 0; n < 7; n++) app.stdin.write('\x1b[1;2C');
+  app.stdin.write('\x03');
+  await until(() => frame().includes('Copied 7 characters'), 'the selection copied');
+  assert.equal(copied[0], 'SELECT ');
+  assert.match(frame(), /SELECT 12345/);
+  app.stdin.write('\x18');
+  await until(() => frame().includes('Cut 7 characters'), 'the selection cut');
+  assert.equal(copied[1], 'SELECT ');
+  assert.doesNotMatch(frame(), /SELECT 12345/);
+  // alt+↓: the line goes under FROM x, the cursor with it.
+  app.stdin.write('\x1b[1;3B');
+  await until(() => /FROM x[\s\S]*12345/.test(frame()), 'the line moved down');
+  // Nothing selected: ctrl+x takes the whole line.
+  app.stdin.write('\x18');
+  await until(() => frame().includes('Cut 5 characters'), 'the line cut');
+  assert.equal(copied[2], '12345\n');
+  assert.doesNotMatch(frame(), /12345/);
+  // ctrl+a selects everything.
+  app.stdin.write('\x01');
+  app.stdin.write('\x03');
+  await until(() => frame().includes('Copied 6 characters'), 'everything copied');
+  assert.equal(copied[3], 'FROM x');
+  // Nothing selected, ctrl+c stops typing, as before.
+  app.stdin.write(KEYS.esc);
+  await until(() => !frame().includes('selected · ctrl+r'), 'the selection let go');
+  app.stdin.write('\x03');
+  await until(() => frame().includes('↵ type · ctrl+r run'), 'typing stopped');
+  app.unmount();
+});
+
+test('ctrl+/ comments, ctrl+d duplicates, tab indents a selection, and ctrl with home, end and delete', async () => {
+  mkdirSync(process.env.TRAWL_HOME, { recursive: true });
+  writeFileSync(join(process.env.TRAWL_HOME, 'console.sql'), 'SELECT 1\nFROM t');
+  const app = start();
+  await until(() => frame().includes('Clubs'), 'the explorer');
+  app.stdin.write('2');
+  await until(() => frame().includes('SELECT 1'), 'the console');
+  app.stdin.write('i');
+  await until(() => frame().includes('typing SQL'), 'typing');
+  app.stdin.write('\x1f');
+  await until(() => frame().includes('-- SELECT 1'), 'commented out');
+  app.stdin.write('\x1f');
+  await until(() => !frame().includes('-- SELECT 1'), 'back in');
+  app.stdin.write('\x04');
+  await until(() => frame().split('SELECT 1').length === 3, 'the line twice');
+  // ctrl+delete on the copy takes SELECT.
+  app.stdin.write('\x1b[3;5~');
+  await until(() => frame().split('SELECT 1').length === 2, 'a word deleted forward');
+  // ctrl+end, then alt+backspace takes the t.
+  app.stdin.write('\x1b[1;5F');
+  app.stdin.write('\x1b\x7f');
+  await until(() => !frame().includes('FROM t'), 'a word deleted back');
+  // ctrl+a and tab: every line two spaces in; shift+tab takes them out again.
+  app.stdin.write('\x01');
+  app.stdin.write('\t');
+  await until(() => frame().includes('  SELECT 1'), 'indented');
+  app.stdin.write('\x1b[Z');
+  await until(() => !frame().includes('  SELECT 1'), 'unindented');
+  // ctrl+home: to the very start, where typing goes.
+  app.stdin.write('\x1b[1;5H');
+  app.stdin.write('X');
+  await until(() => frame().includes('XSELECT 1'), 'typed at the start');
+  app.unmount();
+});
+
 test('ctrl+z undoes in the console a word at a time, ctrl+y redoes, and /new can be undone', async () => {
   mkdirSync(process.env.TRAWL_HOME, { recursive: true });
   writeFileSync(join(process.env.TRAWL_HOME, 'console.sql'), '');

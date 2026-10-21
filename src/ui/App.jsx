@@ -69,10 +69,12 @@ const firstLine = (s) => String(s ?? '').split('\n')[0];
 // Changes staged in Results: "row:col" → the text typed (null for NULL), and rows to delete.
 const NO_CHANGES = { cells: new Map(), deletes: new Set() };
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
-// What a mouse selection copied: "3 lines", "12 characters".
+// What a mouse selection copied: "3 lines", "12 characters". A whole line cut with ctrl+x ends in
+// its newline, which doesn't count.
 const copiedText = (text) => {
-  const n = text.split('\n').length;
-  return n > 1 ? `${n} lines` : plural(text.length, 'character');
+  const t = text.replace(/\n$/, '');
+  const n = t.split('\n').length;
+  return n > 1 ? `${n} lines` : plural(t.length, 'character');
 };
 
 /** The activity line under a run: "12 rows · 3 rows affected · 41 ms". */
@@ -747,10 +749,11 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
         note(`Couldn't copy: ${firstLine(e.message)}`, 'error');
       }
     },
-    // Text selected with the mouse (the console's SQL): copied, and said for a moment in the bottom line.
-    copySelection: (text) =>
+    // Text selected with the mouse (the console's SQL), or cut with ctrl+x: copied, and said for a
+    // moment in the bottom line.
+    copySelection: (text, verb = 'Copied') =>
       Promise.resolve(clipboard(text)).then(
-        () => setFlash({ text: `Copied ${copiedText(text)}` }),
+        () => setFlash({ text: `${verb} ${copiedText(text)}` }),
         (e) => note(`Couldn't copy: ${firstLine(e.message)}`, 'error'),
       ),
     prefill,

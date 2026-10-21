@@ -128,6 +128,20 @@ export function wordMove(ed, dir) {
   return { ...plain(ed), row, col, goal: undefined };
 }
 
+/** ctrl+home and ctrl+end: the start of the text, and its end. */
+export const textStart = (ed) => ({ ...plain(ed), row: 0, col: 0, goal: undefined });
+export const textEnd = (ed) => ({ ...plain(ed), row: ed.lines.length - 1, col: ed.lines.at(-1).length, goal: undefined });
+
+/** ctrl+delete: deletes forward to the end of the word (and the spaces before it). */
+export function deleteWordForward(ed) {
+  if (selection(ed)) return deleteSelection(ed);
+  if (ed.col === ed.lines[ed.row].length) return deleteForward(ed);
+  const to = wordMove(ed, 1).col;
+  const lines = [...ed.lines];
+  lines[ed.row] = lines[ed.row].slice(0, ed.col) + lines[ed.row].slice(to);
+  return { lines, row: ed.row, col: ed.col };
+}
+
 /** ctrl+w: deletes back to the start of the word (and the spaces after it), as in a shell. */
 export function deleteWordBack(ed) {
   if (selection(ed)) return deleteSelection(ed);
@@ -158,6 +172,9 @@ export function selectWord(ed) {
 
 /** A triple-click: the cursor's line selected, end to end. */
 export const selectLine = (ed) => ({ lines: ed.lines, row: ed.row, col: ed.lines[ed.row].length, anchor: { row: ed.row, col: 0 } });
+
+/** ctrl+a: all the text selected, the cursor at its end. */
+export const selectAll = (ed) => ({ lines: ed.lines, row: ed.lines.length - 1, col: ed.lines.at(-1).length, anchor: { row: 0, col: 0 } });
 
 /** Applies a movement with shift held: the selection grows from where it started. */
 export function extend(ed, moveFn) {
@@ -193,6 +210,99 @@ export function deleteSelection(ed) {
   const { start, end } = sel;
   const lines = [...ed.lines.slice(0, start.row), ed.lines[start.row].slice(0, start.col) + ed.lines[end.row].slice(end.col), ...ed.lines.slice(end.row + 1)];
   return { lines, row: start.row, col: start.col };
+}
+
+/**
+ * ctrl+x: the selection taken out, or with nothing selected the cursor's whole line, as VS Code
+ * does. { editor, text } with the text for the clipboard, or null when there's nothing to cut.
+ */
+export function cut(ed) {
+  const sel = selectedText(ed);
+  if (sel) return { editor: deleteSelection(ed), text: sel.text };
+  if (ed.lines.length === 1 && !ed.lines[0]) return null;
+  const lines = ed.lines.filter((_, i) => i !== ed.row);
+  if (!lines.length) lines.push('');
+  return { editor: { lines, row: Math.min(ed.row, lines.length - 1), col: 0 }, text: `${ed.lines[ed.row]}\n` };
+}
+
+// The first and last row a command on "the line" works on: the cursor's, or every line the selection
+// touches. A selection ending at the start of a line doesn't take that line, as editors do.
+function touchedRows(ed) {
+  const sel = selection(ed);
+  if (!sel) return [ed.row, ed.row];
+  return [sel.start.row, sel.end.col === 0 && sel.end.row > sel.start.row ? sel.end.row - 1 : sel.end.row];
+}
+
+// Applies `edits` (row → { line, at, by }: the new text, which gained `by` characters at column `at`,
+// or lost them when `by` is negative), carrying the cursor and the selection's anchor along. A point
+// at column 0 stays there, so a selection of whole lines still is one.
+function relined(ed, edits) {
+  const lines = [...ed.lines];
+  for (const [row, e] of edits) lines[row] = e.line;
+  const col = (p) => {
+    const e = edits.get(p.row);
+    return !e || p.col === 0 || p.col < e.at ? p.col : Math.max(e.at, p.col + e.by);
+  };
+  const next = { lines, row: ed.row, col: col(ed) };
+  return ed.anchor ? { ...next, anchor: { row: ed.anchor.row, col: col(ed.anchor) } } : next;
+}
+
+/**
+ * ctrl+/: the cursor's line, or the selected lines, commented out with "-- " at the least indent
+ * among them, or back in when every one that isn't blank already is.
+ */
+export function toggleComment(ed) {
+  const [from, to] = touchedRows(ed);
+  const rows = Array.from({ length: to - from + 1 }, (_, i) => from + i);
+  const filled = rows.filter((r) => ed.lines[r].trim());
+  const indent = (r) => ed.lines[r].match(/^\s*/)[0].length;
+  const edits = new Map();
+  if (filled.length && filled.every((r) => /^\s*--/.test(ed.lines[r]))) {
+    for (const r of filled) {
+      const [line, at] = [ed.lines[r], indent(r)];
+      const n = line.startsWith('-- ', at) ? 3 : 2;
+      edits.set(r, { line: line.slice(0, at) + line.slice(at + n), at, by: -n });
+    }
+  } else {
+    const targets = filled.length ? filled : rows;
+    const at = Math.min(...targets.map(indent));
+    for (const r of targets) edits.set(r, { line: `${ed.lines[r].slice(0, at)}-- ${ed.lines[r].slice(at)}`, at, by: 3 });
+  }
+  return relined(ed, edits);
+}
+
+/** tab (`dir` 1) and shift+tab (-1) over lines: two spaces more on each that isn't blank, or up to two fewer. */
+export function indentLines(ed, dir) {
+  const [from, to] = touchedRows(ed);
+  const edits = new Map();
+  for (let r = from; r <= to; r++) {
+    const line = ed.lines[r];
+    const n = dir > 0 ? (line.trim() ? 2 : 0) : Math.min(2, line.match(/^ */)[0].length);
+    if (n) edits.set(r, { line: dir > 0 ? `  ${line}` : line.slice(n), at: 0, by: dir * n });
+  }
+  return relined(ed, edits);
+}
+
+/** ctrl+d: the selection written again after itself (and the copy selected), or with none the cursor's line again under it. */
+export function duplicate(ed) {
+  const sel = selection(ed);
+  if (sel) return { ...insert({ lines: ed.lines, row: sel.end.row, col: sel.end.col }, selectedText(ed).text), anchor: sel.end };
+  const lines = [...ed.lines];
+  lines.splice(ed.row + 1, 0, ed.lines[ed.row]);
+  return { lines, row: ed.row + 1, col: ed.col };
+}
+
+/**
+ * alt+↑/↓: the cursor's line, or every line the selection touches, moved one up (`by` -1) or down,
+ * the cursor and selection going with them. Null at the top or bottom.
+ */
+export function moveLines(ed, by) {
+  const [from, to] = touchedRows(ed);
+  if (from + by < 0 || to + by >= ed.lines.length) return null;
+  const lines = [...ed.lines];
+  lines.splice(from + by, 0, ...lines.splice(from, to - from + 1));
+  const next = { lines, row: ed.row + by, col: ed.col };
+  return ed.anchor ? { ...next, anchor: { row: ed.anchor.row + by, col: ed.anchor.col } } : next;
 }
 
 /** Whether column `col` of line `row` is inside the selection. */

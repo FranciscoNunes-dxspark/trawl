@@ -2,8 +2,8 @@
 // it knows the catalog query, SELECT [TOP (n)] … FROM a table, simple SELECT lists, USE,
 // transactions, WAITFOR DELAY (to try cancelling), RAISERROR/THROW, a few other sessions for the
 // Activity view (and KILL for them), and counts what writes would
-// touch without changing anything.
-import { DbError, runScript } from './db.js';
+// touch without changing anything. `drop()` plays the server closing the connection, for the tests.
+import { DbError, ended, runScript } from './db.js';
 import { findObject } from './schema.js';
 import { splitStatements, withoutLeadingComments } from './sql.js';
 
@@ -253,8 +253,16 @@ export function demoSession(conn, { database } = {}) {
     tran: 0,
     spid: 52,
     others: fakeActivity(),
-    run: (script, opts = {}) =>
-      runScript(
+    // A run to come that loses the connection part-way (drop({ during })).
+    dropDuring: null,
+    run: (script, opts = {}) => {
+      const d = session.dropDuring;
+      if (d && !session.closed && (d === true || d.test(script))) {
+        session.dropDuring = null;
+        session.drop();
+        return Promise.reject(new DbError('Connection lost - read ECONNRESET', { lost: true, partial: { sets: [], messages: [] } }));
+      }
+      return runScript(
         session,
         script,
         async (batch, line, state) => {
@@ -284,11 +292,21 @@ export function demoSession(conn, { database } = {}) {
           }
         },
         opts,
-      ),
+      );
+    },
     tranCount: async () => session.tran,
     close() {
-      session.closed = true;
-      session.onEnd?.();
+      ended(session);
+    },
+    /**
+     * The server closing the connection, as Azure SQL does to an idle one (its transaction rolled
+     * back). With `during` (true, or a pattern the script must match), the next such run loses it
+     * part-way instead; whether a write got through then is anyone's guess, as on a real server.
+     */
+    drop({ during = null } = {}) {
+      if (during) return void (session.dropDuring = during);
+      session.tran = 0;
+      ended(session);
     },
   };
   return session;

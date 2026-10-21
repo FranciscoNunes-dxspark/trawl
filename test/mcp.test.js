@@ -132,3 +132,15 @@ test('a big schema keeps the tables the question names', () => {
   assert.match(text.split('\n')[0], /^dbo\.Translations\(ResourceKey/);
   assert.match(text, /More tables, columns not shown: .*T399/);
 });
+
+test('a read whose connection drops part-way runs once more on a new connection', async () => {
+  const opened = [];
+  const server = createServer({ log: () => {}, open: async (conn, opts) => opened[opened.push(demoSession(conn, opts)) - 1] });
+  await call(server, 'run_query', { connection: 'rows', sql: 'SELECT 1 AS x' });
+  opened[0].drop({ during: /dbo\.Clubs/ });
+  const r = await call(server, 'run_query', { connection: 'rows', sql: 'SELECT * FROM dbo.Clubs' });
+  assert.ok(!r.error, r.text);
+  assert.match(r.text, /Club A FC/);
+  assert.equal(opened.length, 2);
+  server.close();
+});

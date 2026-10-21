@@ -35,6 +35,26 @@ function needSession(ctx) {
   return false;
 }
 
+/** needSession, and when the connection dropped since (an idle one Azure SQL closed), a new one first. */
+async function liveSession(ctx) {
+  if (!needSession(ctx)) return false;
+  return ctx.session.closed ? ctx.reconnect() : true;
+}
+
+/**
+ * What to do about SQL whose connection dropped while it ran: { rerun, message }. Only a read with
+ * no transaction open runs again by itself; a write may or may not have happened, and an open
+ * transaction went with the connection (the server rolls it back). `wrapped`: Trawl began a
+ * transaction for it (manual commit), which went the same way.
+ */
+export function afterLostConnection(sql, { dialect = 'sqlserver', hadTran = false, wrapped = false } = {}) {
+  if (hadTran && /^COMMIT\b/i.test(withoutLeadingComments(sql).trim())) return { rerun: false, message: 'It dropped during the COMMIT, which may or may not have gone through: look before running anything again.' };
+  if (hadTran) return { rerun: false, message: 'The open transaction went with it: the server rolled it back, undoing everything since it began. Nothing ran again.' };
+  if (wrapped) return { rerun: false, message: 'The transaction manual commit began for it went with it: the server rolled that back, so nothing of it was kept.' };
+  if (classifyScript(sql, { dialect }).write) return { rerun: false, message: 'It dropped while this ran, so the change may or may not have been made: check before running it again.' };
+  return { rerun: true, message: 'The connection had dropped: reconnected and ran it again.' };
+}
+
 /**
  * How many rows an UPDATE or DELETE would change, counted first with a SELECT built from it (so
  * nothing is written to find out). Null when it can't be counted; 'cancelled' after esc.
@@ -106,7 +126,7 @@ async function withParameters(ctx, sql) {
 
 /** Runs SQL on the current connection, after the read-only and danger checks. */
 export async function runSql(ctx, sql, { title, prefix = '', lineBase, stay, keep } = {}) {
-  if (!needSession(ctx)) return;
+  if (!(await liveSession(ctx))) return;
   if (!sql.trim()) return;
   const text = await withParameters(ctx, sql.trim());
   if (text == null) return;
@@ -381,7 +401,7 @@ export function describe(ctx, text) {
  * is written from the catalog; a view's, procedure's or function's is the server's own text.
  */
 export async function scriptObject(ctx, text) {
-  if (!needSession(ctx)) return;
+  if (!(await liveSession(ctx))) return;
   if (!text) return ctx.prefill('/script ');
   const obj = typeof text === 'string' ? findObject(ctx.schema, text) : text;
   if (!obj) return ctx.note(`Nothing called ${text} in ${ctx.session.database}.`, 'error');
@@ -407,7 +427,7 @@ export async function scriptObject(ctx, text) {
  * read from which table and how long the server spent (as one line). With nothing, it toggles.
  */
 export async function setStats(ctx, mode) {
-  if (!needSession(ctx)) return;
+  if (!(await liveSession(ctx))) return;
   if (mode && mode !== 'on' && mode !== 'off') return ctx.note('/stats on shows the pages read and the server time after each run; /stats off stops it.', 'error');
   if (dialectOf(ctx.session).kind !== 'sqlserver') return ctx.note('/stats is SQL Server’s STATISTICS IO and TIME; there’s no such thing here.', 'error');
   const session = ctx.session;
@@ -430,7 +450,7 @@ export async function setStats(ctx, mode) {
  * happens, or the session would answer every query with a plan.
  */
 export async function showPlan(ctx, sql) {
-  if (!needSession(ctx)) return;
+  if (!(await liveSession(ctx))) return;
   const e = ctx.console;
   const text = sql?.trim() || ed.selectedText(e)?.text.trim() || statementAt(splitStatements(ed.toText(e)), e.row + 1)?.text;
   if (!text) return ctx.note('Nothing to plan: give the SQL (/plan SELECT …) or put the cursor on a statement in the console.', 'error');
@@ -496,7 +516,7 @@ export async function explainPlan(ctx) {
  * the activity log (opening the tab, R); errors (no VIEW SERVER STATE, say) still show.
  */
 export async function loadActivity(ctx, { quiet = true } = {}) {
-  if (!needSession(ctx)) return;
+  if (!(await liveSession(ctx))) return;
   const session = ctx.session;
   let act = null;
   const r = await ctx.task(

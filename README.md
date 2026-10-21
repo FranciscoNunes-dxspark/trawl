@@ -80,6 +80,18 @@ Connections live in `~/.trawl/config.json` (or `TRAWL_HOME`), along with the pro
 
 When a query (or anything else with the spinner) takes longer than 10 seconds, Trawl rings the terminal's bell and asks it for a desktop notification saying what finished and how (OSC 9, which Windows Terminal, iTerm2, WezTerm and kitty show, or OSC 777 in GNOME Terminal and other VTE terminals), for when you've switched to another window. **Notify when done** in Settings turns it off, and `"notifyAfter": 30` in `config.json` changes the seconds. A run you cancel says nothing.
 
+### When the connection drops
+
+Azure SQL closes connections that sit idle, a laptop that sleeps loses its own, and a server restarts. When a connection drops while nothing runs, the log says so and the header shows `DISCONNECTED`; the next run opens a new connection first, to the same database, with `/stats` on again if it was. Temp tables and `SET` options of your own belonged to the old connection and are gone.
+
+When it drops while something runs, Trawl reconnects straight away, and then:
+
+- A read, with no transaction open, runs again once by itself, and the log says it was run again.
+- A write doesn't run again: it may or may not have reached the server before the connection went, so the log says to check first.
+- With a transaction open, the transaction went with the connection, and the server rolls it back: the log says so, `TRANSACTION OPEN` goes from the header, and nothing runs again. A dropped `COMMIT` may or may not have gone through.
+
+`trawl mcp` does the same for Claude's queries, which only ever read: one whose connection drops runs again once on a new connection.
+
 ### PostgreSQL and MySQL
 
 Besides SQL Server, a connection can be to PostgreSQL or MySQL (MariaDB too): `/add … --kind postgres` or `--kind mysql`, with the server as `host` or `host:port` (5432 and 3306 by default) and a login (`--user`), whose password is asked for and kept as for a SQL login. TLS is off unless you add `--ssl`, or `--trust-cert` to use it without checking the server's certificate. Trawl talks to them through the `pg` and `mysql2` drivers, plain JavaScript in the same executable.

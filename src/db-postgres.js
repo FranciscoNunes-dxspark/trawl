@@ -3,7 +3,7 @@
 // splitScript), each result set cut at the row limit; pg reads a result whole, so the rows past the
 // limit still cross the network before they're dropped. esc cancels with pg_cancel_backend.
 import pg from 'pg';
-import { DbError, runScript } from './db.js';
+import { DbError, connectionLost, ended, runScript } from './db.js';
 import { DIALECTS, splitScript } from './dialects.js';
 import { hostPort } from './connections.js';
 
@@ -101,7 +101,7 @@ export function postgresSession(conn, client, { database = null, cancel = async 
             collectResult(await client.query({ text, rowMode: 'array' }), state, limit);
           } catch (e) {
             if (e.code === '57014' || signal?.aborted) throw new DbError('Cancelled', { cancelled: true });
-            throw new DbError(e.message, { number: e.code ?? null, line: errorLine(e, text, line) });
+            throw new DbError(e.message, { number: e.code ?? null, line: errorLine(e, text, line), lost: connectionLost(e) });
           } finally {
             signal?.removeEventListener('abort', onAbort);
           }
@@ -121,10 +121,8 @@ export function postgresSession(conn, client, { database = null, cancel = async 
     },
   };
   client.on('notice', (n) => messages?.push(n.message));
-  client.on('end', () => {
-    session.closed = true;
-    session.onEnd?.();
-  });
-  client.on('error', () => {});
+  client.on('end', () => ended(session));
+  // An idle client whose connection drops says so here (and then ends).
+  client.on('error', (e) => connectionLost(e) && ended(session));
   return session;
 }

@@ -3,7 +3,7 @@
 // understood), each result set cut at the row limit after it has arrived. esc cancels with KILL QUERY
 // from a second connection.
 import mysql from 'mysql2/promise';
-import { DbError, runScript } from './db.js';
+import { DbError, connectionLost, ended, runScript } from './db.js';
 import { DIALECTS, splitScript } from './dialects.js';
 import { hostPort } from './connections.js';
 
@@ -96,7 +96,7 @@ export function mysqlSession(conn, c, { database = null, cancel = async () => {}
           } catch (e) {
             if (e.errno === 1317 || signal?.aborted) throw new DbError('Cancelled', { cancelled: true });
             const at = String(e.message).match(/at line (\d+)/);
-            throw new DbError(e.sqlMessage ?? e.message, { number: e.errno ?? null, line: at ? line + Number(at[1]) - 1 : line });
+            throw new DbError(e.sqlMessage ?? e.message, { number: e.errno ?? null, line: at ? line + Number(at[1]) - 1 : line, lost: connectionLost(e) });
           } finally {
             signal?.removeEventListener('abort', onAbort);
           }
@@ -108,10 +108,8 @@ export function mysqlSession(conn, c, { database = null, cancel = async () => {}
       if (!session.closed) c.end().catch(() => c.destroy());
     },
   };
-  c.on?.('end', () => {
-    session.closed = true;
-    session.onEnd?.();
-  });
-  c.on?.('error', () => {});
+  c.on?.('end', () => ended(session));
+  // A connection that drops while idle (the server's wait_timeout) says so here.
+  c.on?.('error', (e) => connectionLost(e) && ended(session));
   return session;
 }

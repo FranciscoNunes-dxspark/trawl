@@ -13,6 +13,7 @@ export const HELP = [
       ['esc', 'Cancel the running query, or clear the activity lines'],
       ['?', 'This help'],
       [',', 'Settings (/settings): row limit, accent colour, theme, mouse, updates'],
+      ['ctrl+p', 'Command palette: every slash command (yours too) and the keys of the view you\'re in, filtered as you type; ↵ runs one (a command that takes more goes into the prompt)'],
       ['q / ctrl+c', 'Quit (asks first if a transaction is open)'],
       ['mouse', 'Click a tab, a row, a cell or the prompt · double-click does ↵ (but never runs a statement)\nthe wheel scrolls (shift+wheel: Results\' columns) · drag to select text, copied when you let go\nin the console: a click starts typing there; double-click a word, triple-click a line, click the gutter for the statement, click a suggestion to take it; a drag selects the SQL (ctrl+r runs just that)'],
     ],
@@ -229,6 +230,17 @@ export const HELP = [
       ['↑ ↓', 'Pick a suggestion, or walk history'],
       ['esc', 'Back to the view (the text is kept)'],
       ['ctrl+u ctrl+w', 'Clear the line · Delete a word'],
+      ['ctrl+p', 'The command palette, filtered by what\'s typed'],
+    ],
+  },
+  {
+    title: 'Your own commands and keys',
+    about: 'in the settings file (config.json), read when Trawl starts; what\'s wrong with them is said in the log then',
+    rows: [
+      ['"commands"', '{ "players": "!SELECT TOP (10) * FROM dbo.Players", "morning": ["/connect club-a", "/snippet morning"] }: a line as typed at the prompt, or a list run in order, stopping at the first that fails (or that you answer no); { "run": …, "desc": … } gives it a description. They show in the / menu, the palette and Slash commands below'],
+      ['$1 $2  $*', 'What\'s typed after it: a word each ("quoted words" are one), or all of it; a command with no $ gets it at the end of its line'],
+      ['"keys"', '{ "global": { "F5": "/refresh" }, "results": { "x": "e" } }: a key to another key (the view does what that one does) or to a command line, anywhere or in one view (explorer, query, results, history, connections, activity). They work while a view has the keys, never while typing; Your keys (above Slash commands) lists them'],
+      ['key names', 'a character (x, X, +), ctrl+s, alt+x, shift+tab, F1-F12, enter, esc, tab, space, backspace, delete, up, down, left, right, home, end, pageup, pagedown'],
     ],
   },
   {

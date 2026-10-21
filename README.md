@@ -152,7 +152,7 @@ Press `?` inside for every shortcut: the sections down the left, opening on the 
 
 | Where | Keys |
 | --- | --- |
-| Anywhere | `1`–`6` or `tab` switch views · `/` commands · `!` SQL · `r` reload the schema · `,` settings · `esc` cancel the running query · `q` quit |
+| Anywhere | `1`–`6` or `tab` switch views · `/` commands · `!` SQL · `ctrl+p` the command palette · `r` reload the schema · `,` settings · `esc` cancel the running query · `q` quit |
 | Lists | `j`/`k` or arrows · `g`/`G` top/bottom · `ctrl+d`/`ctrl+u` page |
 | Explorer | `↵` first rows (on a database: switch to it) · `d` describe · `s` start a query on it in the console · `c` its CREATE script, into the console · `u` what uses it, and what it uses · `/find <text>` filter · `/grep <text>` search inside the definitions |
 | Query, the console | `↵` or `i` start typing · `esc` stop · `ctrl+r` run the selection, or the statement under the cursor · `R` run it all · `f` format (`alt+shift+f` while typing) · `p` plan, `P` actual plan (then `a`: Claude explains it) · `S` save as a snippet · `[`/`]` previous/next tab · `+` new tab · `ctrl+f` find, then `n`/`N` · `ctrl+z`/`ctrl+y` undo/redo · while typing, `tab` takes a suggestion and `ctrl+n` asks for them |
@@ -333,6 +333,39 @@ On PostgreSQL it checks what has an equivalent there: tables without a primary k
 Type `/` and the menu narrows as you type. `tab` completes, `↑`/`↓` picks, `↵` runs. `/connect` completes connection names, `/use` database names, `/describe`, `/generate` and `/scaffold` tables and views, and `/script` and `/uses` everything in the database.
 
 `/import datagrip [folder]` `/import-csv <file.csv> <table> [--run]` `/connect <name>` `/add …` `/forget <name>` `/folder <connection> [folder]` `/password [connection]` `/disconnect` `/use <database>` `/open <file.sql>` `/snippet [name]` `/snippets` `/console` `/tab …` `/new` `/format` `/search <text>` `/save <file.sql>` `/describe <table>` `/script <name>` `/grep <text>` `/uses <object>` `/find [text]` `/export <file>` `/filter [text]` `/cell` `/follow` `/pin` `/compare` `/copy [tsv|csv|json|md|insert]` `/limit [rows]` `/watch <seconds> [sql] [--until <condition>]` `/writes` `/tx [auto|manual]` `/commit` `/rollback` `/undo-write` `/ask <question>` `/why` `/explain` `/ai [connection] [level]` `/update` `/settings` `/stats [on|off]` `/plan [actual] [sql]` `/more` `/diff <connection> [database]` `/health` `/sizes` `/deadlocks` `/fanout <folder> [sql]` `/activity` `/jobs` `/top-queries` `/kill <session>` `/script-all <folder>` `/migrations [run] <folder>` `/generate <table> [rows] [--seed n]` `/scaffold <table> [csharp|ef|ts|python]` `/last` `/refresh` `/help` `/quit`
+
+### The command palette
+
+`ctrl+p` opens a list of everything you can do from where you are: the keys of the view you're in (with what `?` says they do), your own keys and commands, and every slash command. Type to narrow it: the words can come in any order and needn't be whole (`cmt` finds `/commit`, and `rows first` finds `↵` in the Explorer, which shows a table's first rows), and the best matches come first. `↑`/`↓` (or `ctrl+p`/`ctrl+n`) pick, `↵` runs the one picked, and `esc` closes it. A key runs as if you'd pressed it in the view; a command runs straight away, unless it needs something typed after it, in which case it goes into the prompt for you to finish (`/describe ` waits for the table). `ctrl+p` works from any view, and from the prompt, where what you'd typed becomes the filter; while you type in the console or a cell it's the editor's, as every key is.
+
+### Your own commands and keys
+
+Commands of your own go in `~/.trawl/config.json`, under `"commands"`:
+
+```json
+{
+  "commands": {
+    "players": "!SELECT TOP (10) * FROM dbo.Players",
+    "morning": ["/connect club-a", "/snippet morning", "/activity"],
+    "club": { "run": "!SELECT * FROM dbo.Clubs WHERE Country = '$1'", "desc": "The clubs of a country" }
+  }
+}
+```
+
+Each is a line as you'd type it at the prompt (SQL after `!`, or another slash command), or a list of them, run in order: a list stops at the first line that fails, or that asks a question you answer no to, and says which. `{ "run": …, "desc": … }` gives one a description for the menu; without one, the menu shows what it runs. In the line, `$1`, `$2`… are the words typed after the command (`/club PT`; a `"quoted phrase"` counts as one word), `$*` is everything typed after it, and `$$` is a plain `$`; a command with no `$` in it gets what's typed after it at the end of its last line, so `"d": "/describe"` makes `/d dbo.Players` work. They're in the `/` menu with completion, in the palette, and in the `?` window's slash commands. A command of yours can run another of yours, but not round in a circle. One named like a built-in command (`/connect`) is left out: Trawl says so in the activity log when it starts, as it does for anything else it can't use.
+
+Keys go under `"keys"`, for every view (`"global"`) or for one (`explorer`, `query`, `results`, `history`, `connections`, `activity`):
+
+```json
+{
+  "keys": {
+    "global": { "F5": "/refresh", "ctrl+t": "/tab new" },
+    "results": { "x": "e", "E": "/export rows.csv" }
+  }
+}
+```
+
+A key can stand for another key, so the view does what that key does there (above, `x` in Results edits the cell, as `e` does), or for a command line, as you'd type it at the prompt. Keys are written as a character (`x`, `X`, `+`), `ctrl+` a letter, `alt+` a character, `shift+tab`, `F1` to `F12`, or `enter`, `esc`, `tab`, `space`, `backspace`, `delete`, `up`, `down`, `left`, `right`, `home`, `end`, `pageup` and `pagedown`. They only apply while a view has the keys: never while you type in the prompt, the console or a cell, nor while a question is open or a window (help, settings, a list) is over the view. A view's own keys come before the global ones, and `ctrl+c` always quits. The `?` window lists yours under **Your keys**, and a key name or view Trawl doesn't know (`ctrl+shift+x` is one terminals can't send) is said in the activity log when it starts. Both are read when Trawl starts.
 
 ### Theme
 

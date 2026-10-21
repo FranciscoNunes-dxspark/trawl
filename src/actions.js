@@ -8,6 +8,7 @@ import { csvInsertScript, parseCsv } from './csv.js';
 import * as ed from './editor.js';
 import { findDataSources, importPlan, planText } from './datagrip.js';
 import { formatSql } from './format.js';
+import { wrap } from './text.js';
 import { cellText } from './cell.js';
 import { changesText, hasChanges, insertScript, saveRecovery, saveScript, tsvText, withSaved } from './edit.js';
 import { AI_LABELS, AI_LEVELS, EXPLAIN_SYSTEM, aiLevel, askPrompt, canSeeSchema, consoleText, explainPrompt, parseAnswer } from './ai.js';
@@ -19,6 +20,8 @@ import { droppedPaths, findTab, freeName, tabNameFor, tabNameProblem } from './c
 import { findSnippet, snippetNameProblem, snippetsFor, withSnippet, withoutSnippet } from './snippets.js';
 import { folderNames, inFolder, inParallel, mergeResults, readOnlyScript } from './fanout.js';
 import { DIFF_SQL, buildExtras, diffText, schemaDiff, syncScript } from './diff.js';
+import { buildHealth, buildSizes, fixableGroups, healthScript, healthSummary, healthText } from './health.js';
+import { SOURCES as DEADLOCK_SOURCES, buildDeadlocks, buildInnodbDeadlocks, deadlockSummary, deadlockText, deadlockTime } from './deadlocks.js';
 import { agentProbe, buildActivity, buildJobHistory, buildJobs, buildTopQueries, jobHistorySql, jobHistoryText, killSql, sortColumn, sortQueries, startJobSql, topProbe } from './activity.js';
 import { dialectOf, definitionSqlFor, qualifiedFor, selectTopFor } from './dialects.js';
 import { buildSchema, createTableScript, definitionSql, describeObject, findObject, objectName, rowsOf } from './schema.js';
@@ -1102,6 +1105,147 @@ export async function diffSchema(ctx, rest) {
   });
   ctx.closeOverlay();
   if (open) ctx.editInConsole(syncScript(changes, { left, right, rightSchema: theirs.schema, rightDefinitions: theirs.definitions }));
+}
+
+// On Postgres a statement that fails spoils the transaction it's in, so with one open each of
+// /health's reads goes inside a savepoint of its own.
+const HEALTH_SAVEPOINT = 'trawl_health';
+
+/**
+ * /health: a check-up of the database you're in, as Splice's /cleanup is of a repository: what the
+ * server suggests or shows (missing and unused indexes, duplicates, foreign keys without an index,
+ * tables without a primary key, untrusted constraints, stale statistics, disabled triggers; the
+ * kinds have some each, health.js CHECKS), each with why, in the viewer. Then it offers the fixes,
+ * all of them or one group's, in a console tab of their own to read through; nothing runs by itself.
+ * A read that fails (a permission it needs) only says so in its group.
+ */
+export async function healthCheck(ctx) {
+  if (!needSession(ctx)) return;
+  const session = ctx.session;
+  const dialect = dialectOf(session);
+  const guarded = dialect.kind === 'postgres' && Boolean(ctx.tranCount);
+  let report = null;
+  const r = await ctx.task(
+    `health check of ${session.database}`,
+    async (signal) => {
+      const results = {};
+      for (const [id, sql] of Object.entries(dialect.health)) {
+        try {
+          if (guarded) await session.run(`SAVEPOINT ${HEALTH_SAVEPOINT};`, { signal });
+          results[id] = { sets: (await session.run(sql, { signal, limit: 100_000 })).sets };
+          if (guarded) await session.run(`RELEASE SAVEPOINT ${HEALTH_SAVEPOINT};`, { signal });
+        } catch (e) {
+          if (e.cancelled || signal.aborted) throw e;
+          if (guarded) await session.run(`ROLLBACK TO SAVEPOINT ${HEALTH_SAVEPOINT};`).catch(() => {});
+          results[id] = { error: e.message.split('\n')[0] };
+        }
+      }
+      report = buildHealth(results, { kind: dialect.kind, quote: dialect.quote });
+      return [healthSummary(report)];
+    },
+    { label: `Checking ${session.database}` },
+  );
+  if (!r.ok || !report) return;
+  const where = { database: session.database, conn: session.conn.name };
+  const title = `Health: ${session.conn.name}/${session.database}`;
+  const text = healthText(report, where);
+  ctx.rememberOutput(title, text);
+  ctx.showText(title, text);
+  const groups = fixableGroups(report);
+  if (!groups.length) return;
+  const n = (g) => g.findings.length;
+  const lower = (t) => t[0].toLowerCase() + t.slice(1);
+  const pick = await ctx.confirm({
+    title: 'Put the fixes in a console tab of their own?',
+    detail: 'The report is above (pgup/pgdn scroll it). Nothing runs; dropping an index or turning a trigger on comes commented out.',
+    scrollsOverlay: true,
+    options: [
+      { label: `Yes, all of them (${groups.reduce((s, g) => s + n(g), 0)})`, value: 'all' },
+      ...(groups.length > 1 ? groups.map((g) => ({ label: `Only ${lower(g.title)} (${n(g)})`, value: g.id })) : []),
+      { label: 'No', value: null },
+    ],
+  });
+  ctx.closeOverlay();
+  if (!pick) return;
+  const script = healthScript(report, { ...where, groups: pick === 'all' ? null : [pick] });
+  const name = freeName(ctx.consoleTabs.names.map((x) => ({ name: x })), 'health');
+  ctx.addConsoleTab(name);
+  ctx.setConsole(ed.fromText(script));
+  ctx.note(`The fixes are in the console tab ${name}: read them through, then ctrl+r runs the statement under the cursor.`, 'ok');
+}
+
+/**
+ * /sizes: every table in the database with its rows and the space it takes (reserved, data,
+ * indexes, and what each kind has besides), biggest first, as a result set in Results, where o
+ * sorts, f filters and x exports it. Postgres's row counts and all of MySQL's are estimates.
+ */
+export async function showSizes(ctx) {
+  if (!needSession(ctx)) return;
+  const session = ctx.session;
+  const dialect = dialectOf(session);
+  const title = `Table sizes: ${session.database}`;
+  const started = Date.now();
+  let set = null;
+  const r = await ctx.task(
+    title,
+    async (signal) => {
+      set = buildSizes((await session.run(dialect.sizesSql, { signal, limit: 1_000_000 })).sets);
+      return [`${set.rows.length} table${set.rows.length === 1 ? '' : 's'}, biggest first`];
+    },
+    { label: 'Reading the table sizes' },
+  );
+  if (!r.ok || !set) return;
+  ctx.present({ title, sql: dialect.sizesSql, sets: [set], messages: [dialect.sizesNote], ms: Date.now() - started, edit: { reason: 'the sizes come from the catalog' }, conn: session.conn.name, database: session.database });
+}
+
+// The most /deadlocks lists.
+const DEADLOCKS_SHOWN = 50;
+
+/**
+ * /deadlocks: the server's recent deadlocks (deadlocks.js has where each kind keeps them), newest
+ * first. One is shown in the viewer; several are a list, ↵ showing one. Each is drawn as a tree from
+ * the victim, through whose lock each one wanted, with every session's SQL and the locks under it.
+ */
+export async function showDeadlocks(ctx) {
+  if (!needSession(ctx)) return;
+  const session = ctx.session;
+  const d = dialectOf(session).deadlocks;
+  let found = null;
+  const r = await ctx.task(
+    'read the recent deadlocks',
+    async (signal) => {
+      const probe = d.probe ? (rowsOf((await session.run(d.probe, { signal, limit: 10 })).sets[0])[0] ?? {}) : {};
+      const plan = d.plan(probe);
+      if (plan.unavailable) return (found = { unavailable: plan.unavailable }), [plan.unavailable];
+      let error = null;
+      // The first place that can be read is the answer, even with none in it.
+      for (const src of plan.sources) {
+        try {
+          const sets = (await session.run(src.sql, { signal, limit: 10_000 })).sets;
+          const list = (src.parse === 'innodb' ? buildInnodbDeadlocks(sets) : buildDeadlocks(sets)).slice(0, DEADLOCKS_SHOWN);
+          found = { list, source: DEADLOCK_SOURCES[src.id] };
+          return [list.length ? `${list.length} deadlock${list.length === 1 ? '' : 's'} from ${found.source}.` : `No deadlocks in ${found.source}.`];
+        } catch (e) {
+          if (e.cancelled || signal.aborted) throw e;
+          error ??= e;
+        }
+      }
+      throw error;
+    },
+    { label: 'Reading the recent deadlocks' },
+  );
+  if (!r.ok || !found) return;
+  // Why there's nothing to read here is longer than the activity log's line.
+  if (found.unavailable) return ctx.showText('Deadlocks', wrap(found.unavailable, 96).join('\n'));
+  if (!found.list.length) return;
+  // To the minute in the list; the viewer has the seconds.
+  const items = found.list.map((x) => ({ label: deadlockTime(x).replace(/(\d\d:\d\d):\d\d/, '$1'), detail: deadlockSummary(x), text: deadlockText(x), title: `Deadlock ${deadlockTime(x)}` }));
+  const show = (it) => {
+    ctx.rememberOutput(it.title, it.text);
+    ctx.showText(it.title, it.text);
+  };
+  if (items.length === 1) return show(items[0]);
+  ctx.showPicker({ title: 'Deadlocks, newest first', hint: '↵ the deadlock in full', items, keys: { return: show } });
 }
 
 export function setLimit(ctx, value) {

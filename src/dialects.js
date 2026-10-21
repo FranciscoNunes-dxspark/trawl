@@ -1,10 +1,13 @@
 // What differs between the databases Trawl talks to: SQL Server (the default, through tedious),
 // PostgreSQL (pg) and MySQL (mysql2). A connection's `kind` picks one; everything here is pure text:
 // quoting, TOP or LIMIT, how a transaction starts, how a script splits into statements, and the
-// catalog, plan and activity queries (sessions, SQL Agent jobs, top queries), each shaped like SQL
-// Server's so the same code reads them.
+// catalog, plan and activity queries (sessions, SQL Agent jobs, top queries), and /health's, /sizes'
+// and /deadlocks' (health.js and deadlocks.js have their SQL), each shaped like SQL Server's so the
+// same code reads them.
 import { SCHEMA_SQL } from './schema.js';
 import { ACTIVITY_SQL, AGENT_PROBE_SQL, JOBS_SQL, TOP_PROBE_SQL, queryStatsSql, queryStoreSql } from './activity.js';
+import { SIZES_NOTE, SIZES_SQL, healthReads } from './health.js';
+import { DEADLOCK_PROBE_SQL, PG_DEADLOCK_PROBE_SQL, mysqlDeadlockPlan, postgresDeadlockPlan, sqlServerDeadlockPlan } from './deadlocks.js';
 
 const sq = (s) => `'${String(s).replace(/'/g, "''")}'`;
 
@@ -92,6 +95,12 @@ ORDER BY 1, 2, 3;`,
   // What /uses finds by the name in definitions, where the catalog doesn't say (none here).
   usesByName: null,
   explainAnalyze: null,
+  // /health's reads, /sizes' query and what it means, and where /deadlocks reads them (the probe
+  // says which kind of SQL Server; the plan, from its row, which sources to try).
+  health: healthReads('sqlserver'),
+  sizesSql: SIZES_SQL.sqlserver,
+  sizesNote: SIZES_NOTE.sqlserver,
+  deadlocks: { probe: DEADLOCK_PROBE_SQL, plan: sqlServerDeadlockPlan },
   defaultPort: 1433,
 };
 
@@ -236,6 +245,11 @@ ORDER BY 1, 2, 3;`;
   usesByName: { usedBy: ['procedure', 'function', 'trigger'], uses: ['procedure', 'function'], what: 'routines and triggers' },
   // The actual plan: this one runs the statement (actions.js showActualPlan rolls a write back).
   explainAnalyze: (sql) => `EXPLAIN (ANALYZE, BUFFERS) ${sql.replace(/;\s*$/, '')}`,
+  health: healthReads('postgres'),
+  sizesSql: SIZES_SQL.postgres,
+  sizesNote: SIZES_NOTE.postgres,
+  // Only counted: the deadlocks themselves are in the server's log.
+  deadlocks: { probe: PG_DEADLOCK_PROBE_SQL, plan: postgresDeadlockPlan },
   defaultPort: 5432,
 };
 
@@ -328,6 +342,10 @@ ORDER BY trigger_name;`,
   usesByName: { usedBy: ['view', 'procedure', 'function', 'trigger'], uses: ['view', 'procedure', 'function'], what: 'views, routines and triggers' },
   // MySQL 8.0.18 and later; MariaDB has ANALYZE instead.
   explainAnalyze: (sql) => `EXPLAIN ANALYZE ${sql.replace(/;\s*$/, '')}`,
+  health: healthReads('mysql'),
+  sizesSql: SIZES_SQL.mysql,
+  sizesNote: SIZES_NOTE.mysql,
+  deadlocks: { probe: null, plan: mysqlDeadlockPlan },
   defaultPort: 3306,
 };
 

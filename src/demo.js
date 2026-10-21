@@ -2,9 +2,9 @@
 // it knows the catalog queries (/grep's and /uses's too), SELECT [TOP (n)] … FROM a table, simple SELECT lists, USE,
 // transactions, WAITFOR DELAY (to try cancelling), RAISERROR/THROW, SHOWPLAN_TEXT and STATISTICS
 // PROFILE (made-up plans of a table scan), a few other sessions for the
-// Activity view (and KILL for them), SQL Agent jobs (and sp_start_job), the top queries, and counts
-// what writes would touch without changing anything. `drop()` plays the server closing the
-// connection, for the tests.
+// Activity view (and KILL for them), SQL Agent jobs (and sp_start_job), the top queries, /health's
+// findings, /sizes and a couple of deadlocks, and counts what writes would touch without changing
+// anything. `drop()` plays the server closing the connection, for the tests.
 import { DbError, ended, runScript } from './db.js';
 import { findObject } from './schema.js';
 import { mentions } from './references.js';
@@ -75,7 +75,13 @@ function makeDatabase(club, { extraLanguage = true, drifted = false } = {}) {
       ...(drifted ? [['FK_Stadiums_Clubs', 'Stadiums', 'ClubId', 'Clubs', 'Id']] : []),
     ],
     // [name, table, unique, columns], the indexes besides the primary keys.
-    indexes: [['IX_Players_ClubId', 'Players', false, '[ClubId]'], ...(drifted ? [['IX_Matches_PlayedOn', 'Matches', false, '[PlayedOn] DESC']] : [])],
+    // IX_Players_ClubId_Position overlaps IX_Players_ClubId, and nothing reads IX_Players_Name (/health).
+    indexes: [
+      ['IX_Players_ClubId', 'Players', false, '[ClubId]'],
+      ['IX_Players_ClubId_Position', 'Players', false, '[ClubId], [Position]'],
+      ['IX_Players_Name', 'Players', false, '[Name]'],
+      ...(drifted ? [['IX_Matches_PlayedOn', 'Matches', false, '[PlayedOn] DESC']] : []),
+    ],
   };
 }
 
@@ -285,6 +291,170 @@ function topQuerySets(batch) {
   return [set(['source', 'query_id', 'sql_text', 'plans', 'executions', 'total_ms', 'cpu_ms', 'logical_reads', 'last_run'], rows)];
 }
 
+// /health (health.js): each read answered with what a club's database might have gone through. The
+// indexes and foreign keys are the demo's own; usage, statistics and the rest are made up, the same
+// in every database with tables. The columns are the same on every kind, as health.js's reads give.
+function healthSets(session, id) {
+  const db = DATABASES[session.database];
+  const kind = session.conn.kind ?? 'sqlserver';
+  const ago = (days) => new Date(Date.now() - days * 86_400_000);
+  const tables = db.tables.filter((t) => t.kind === 'table');
+  const any = tables.length > 0;
+  if (id === 'restart') return [set(['started', 'stats_reset'], [[ago(3), kind === 'postgres' ? ago(20) : null]])];
+  if (id === 'missing') {
+    const rows = any ? [['dbo', 'Matches', '[PlayedOn]', null, '[HomeId], [AwayId]', 1204, 3, 91.6, 5400.2], ['dbo', 'Players', '[Position]', null, '[Name]', 310, 0, 42.1, 120.5]] : [];
+    return [set(['schema', 'table', 'equality_columns', 'inequality_columns', 'included_columns', 'seeks', 'scans', 'avg_impact', 'impact'], rows)];
+  }
+  if (id === 'unused') return [set(['schema', 'table', 'index', 'seeks', 'scans', 'lookups', 'updates', 'size_kb'], any ? [['dbo', 'Players', 'IX_Players_Name', 0, 0, 0, 1840, 16]] : [])];
+  if (id === 'indexes') {
+    const rows = [];
+    // The primary keys are clustered, except Translations', which leaves it a heap.
+    for (const t of tables) {
+      const heap = t.name === 'Translations' && kind === 'sqlserver';
+      t.columns.filter((c) => c.pk).forEach((c, i) => rows.push([t.schema, t.name, `PK_${t.name}`, true, true, true, !heap && kind !== 'postgres', false, i + 1, c.name, false, false]));
+    }
+    for (const [name, table, unique, columns] of db.indexes) {
+      [...columns.matchAll(/\[([^\]]+)\]( DESC)?/g)].forEach((m, i) => rows.push(['dbo', table, name, false, unique, false, false, false, i + 1, m[1], false, Boolean(m[2])]));
+    }
+    return [set(['schema', 'table', 'index', 'is_primary_key', 'is_unique', 'is_constraint', 'is_clustered', 'filtered', 'key_ordinal', 'column', 'is_included', 'is_descending'], rows)];
+  }
+  if (id === 'foreignKeys') return [set(['schema', 'table', 'name', 'ordinal', 'column', 'ref_schema', 'ref_table'], db.foreignKeys.map(([name, table, column, refTable]) => ['dbo', table, name, 1, column, 'dbo', refTable]))];
+  if (id === 'nopk') {
+    const t = tables.find((x) => x.name === 'Translations');
+    return [set(['schema', 'table', 'has_pk', 'is_heap', 'rows'], t && kind === 'sqlserver' ? [[t.schema, t.name, true, true, t.rows.length]] : [])];
+  }
+  if (id === 'untrusted') {
+    const rows = any ? [['dbo', 'Matches', 'FK_Matches_Away', 'FOREIGN KEY', false, true], ...(kind === 'sqlserver' ? [['dbo', 'Players', 'CK_Players_Goals', 'CHECK', true, true]] : [])] : [];
+    return [set(['schema', 'table', 'name', 'kind', 'is_disabled', 'is_not_trusted'], rows)];
+  }
+  if (id === 'stats') {
+    // Players' goals change all the time and nothing updated its statistics; Matches' were just updated.
+    const pg = kind === 'postgres';
+    const rows = any ? [['dbo', 'Players', pg ? null : '_WA_Sys_00000006_Goals', ago(45), 45, 12, 88_000, pg ? 4000 : null], ['dbo', 'Matches', pg ? null : 'PK_Matches', ago(2), 2, 8, 900, pg ? 3 : null]] : [];
+    return [set(['schema', 'table', 'name', 'last_updated', 'days_since', 'rows', 'modifications', 'dead_rows'], rows)];
+  }
+  if (id === 'triggers') return [set(['schema', 'table', 'name'], db.triggers.map((t) => [t.schema, t.parent, t.name]))];
+  return [];
+}
+
+// /sizes: rows as the demo has them, and space as if each row took a couple of hundred bytes.
+function sizeSets(session) {
+  const db = DATABASES[session.database];
+  const kind = session.conn.kind ?? 'sqlserver';
+  const extra = { postgres: 'toast_kb', mysql: 'free_kb' }[kind] ?? 'unused_kb';
+  const rows = db.tables
+    .filter((t) => t.kind === 'table')
+    .map((t) => {
+      const data = 8 * (1 + Math.ceil((t.rows.length * 220) / 8060)) + 64 * t.rows.length;
+      const index = 16 * (1 + db.indexes.filter(([, table]) => table === t.name).length);
+      const more = kind === 'sqlserver' ? 24 : 8;
+      return [t.schema, t.name, t.rows.length, data + index + more, data, index, more];
+    })
+    .sort((x, y) => y[3] - x[3]);
+  return [set(['schema', 'table', 'rows', 'reserved_kb', 'data_kb', 'index_kb', extra], rows)];
+}
+
+// Two deadlocks on the demo's "server", as system_health records them: the nightly load and the
+// website taking the same two keys in the opposite order, and an older one between the report reader
+// and an update, over a page.
+function deadlockXml({ at, victim, processes, resources, event = 'xml_deadlock_report', database = null }) {
+  const esc = (v) => String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const proc = (p) =>
+    `<process id="${p.id}" taskpriority="0" logused="${p.logused ?? 0}" waitresource="${esc(p.waitresource)}" waittime="${p.waittime}" ownerId="${p.owner}" transactionname="user_transaction" lockMode="${p.mode}" schedulerid="2" kpid="5236" status="suspended" spid="${p.spid}" sbid="0" ecid="0" priority="0" trancount="${p.trancount}" clientapp="${esc(p.app)}" hostname="${p.host}" hostpid="4120" loginname="${p.login}" isolationlevel="${p.isolation} (2)" xactid="${p.owner}" currentdb="7" currentdbname="ClubA" lockTimeout="4294967295">` +
+    `<executionStack><frame procname="${p.proc ?? 'adhoc'}" line="2" stmtstart="58" stmtend="200" sqlhandle="0x02000000d1c3a71e">${esc(p.statement ?? 'unknown')}    </frame></executionStack><inputbuf>\n${esc(p.batch)}   </inputbuf></process>`;
+  const res = (r) => `<${r.tag} ${Object.entries(r.attrs).map(([k, v]) => `${k}="${esc(v)}"`).join(' ')}><owner-list><owner id="${r.owner[0]}" mode="${r.owner[1]}"/></owner-list><waiter-list><waiter id="${r.waiter[0]}" mode="${r.waiter[1]}" requestType="wait"/></waiter-list></${r.tag}>`;
+  return `<event name="${event}" package="sqlserver" timestamp="${at.toISOString()}">${database ? `<data name="database_name"><type name="unicode_string" package="package0"/><value>${database}</value></data>` : ''}<data name="xml_report"><type name="xml" package="package0"/><value><deadlock><victim-list><victimProcess id="${victim}"/></victim-list><process-list>${processes.map(proc).join('')}</process-list><resource-list>${resources.map(res).join('')}</resource-list></deadlock></value></data></event>`;
+}
+
+function fakeDeadlocks({ event, database } = {}) {
+  const ago = (h) => new Date(Date.now() - h * 3_600_000);
+  return [
+    deadlockXml({
+      event,
+      database,
+      at: ago(5),
+      victim: 'process27f8a4e8c8',
+      processes: [
+        { id: 'process27f8a4e8c8', spid: 61, login: 'etl', host: 'BATCH02', app: 'Nightly load', mode: 'U', waittime: 2513, owner: 845361, trancount: 2, isolation: 'read committed', waitresource: 'KEY: 7:72057594043695104 (8194443284a0)', statement: 'UPDATE dbo.Clubs SET Active = 1 WHERE Id = 1;', batch: 'BEGIN TRAN;\nUPDATE dbo.Players SET Goals = Goals + 1 WHERE ClubId = 1;\nUPDATE dbo.Clubs SET Active = 1 WHERE Id = 1;' },
+        { id: 'process27f8b0d468', spid: 53, login: 'app_user', host: 'WEB01', app: 'Club website', mode: 'U', waittime: 2601, owner: 845298, trancount: 2, isolation: 'read committed', waitresource: 'KEY: 7:72057594043760640 (98ec012aa510)', batch: 'BEGIN TRAN;\nUPDATE dbo.Clubs SET Active = 0 WHERE Id = 1;\nUPDATE dbo.Players SET Shirt = NULL WHERE ClubId = 1;' },
+      ],
+      resources: [
+        { tag: 'keylock', attrs: { hobtid: '72057594043695104', dbid: 7, objectname: 'ClubA.dbo.Clubs', indexname: 'PK_Clubs', id: 'lock27f1e5c380', mode: 'X' }, owner: ['process27f8b0d468', 'X'], waiter: ['process27f8a4e8c8', 'U'] },
+        { tag: 'keylock', attrs: { hobtid: '72057594043760640', dbid: 7, objectname: 'ClubA.dbo.Players', indexname: 'IX_Players_ClubId', id: 'lock27f1e5d100', mode: 'X' }, owner: ['process27f8a4e8c8', 'X'], waiter: ['process27f8b0d468', 'U'] },
+      ],
+    }),
+    deadlockXml({
+      event,
+      database,
+      at: ago(30),
+      victim: 'process27f9c11088',
+      processes: [
+        { id: 'process27f9c11088', spid: 64, login: 'report_reader', host: 'BI01', app: 'Power BI', mode: 'S', waittime: 1210, owner: 701122, trancount: 0, isolation: 'repeatable read', waitresource: 'PAGE: 7:1:312', statement: 'SELECT c.Name, COUNT(*) AS Players FROM dbo.Clubs c JOIN dbo.Players p ON p.ClubId = c.Id GROUP BY c.Name;', batch: 'SELECT c.Name, COUNT(*) AS Players FROM dbo.Clubs c JOIN dbo.Players p ON p.ClubId = c.Id GROUP BY c.Name;' },
+        { id: 'process27f9d2a4e8', spid: 72, login: 'app_user', host: 'WEB02', app: 'Club website', mode: 'IX', waittime: 1188, owner: 701130, trancount: 1, isolation: 'read committed', proc: 'ClubA.dbo.usp_RecalculateTable', waitresource: 'OBJECT: 7:901578250:0', batch: 'EXEC dbo.usp_RecalculateTable @Season = 2026;' },
+      ],
+      resources: [
+        { tag: 'pagelock', attrs: { fileid: 1, pageid: 312, dbid: 7, subresource: 'FULL', objectname: 'ClubA.dbo.Players', id: 'lock27f2a01200', mode: 'IX', associatedObjectId: '72057594043760640' }, owner: ['process27f9d2a4e8', 'IX'], waiter: ['process27f9c11088', 'S'] },
+        { tag: 'objectlock', attrs: { lockPartition: 0, objid: 901578250, subresource: 'FULL', dbid: 7, objectname: 'ClubA.dbo.Clubs', id: 'lock27f2a01880', mode: 'S', associatedObjectId: 901578250 }, owner: ['process27f9c11088', 'S'], waiter: ['process27f9d2a4e8', 'IX'] },
+      ],
+    }),
+  ];
+}
+
+// MySQL's monitor, with its latest deadlock: two updates of the same two players, in opposite orders.
+const INNODB_STATUS = `
+=====================================
+2026-10-21 09:12:44 0x7f3c2c1f9700 INNODB MONITOR OUTPUT
+=====================================
+------------------------
+LATEST DETECTED DEADLOCK
+------------------------
+2026-10-21 08:57:13 0x7f3c2c0b7700
+*** (1) TRANSACTION:
+TRANSACTION 421937, ACTIVE 6 sec starting index read
+mysql tables in use 1, locked 1
+LOCK WAIT 3 lock struct(s), heap size 1128, 2 row lock(s)
+MySQL thread id 18, OS thread handle 139895, query id 2201 10.0.0.12 app_user updating
+UPDATE Players SET Goals = Goals + 1 WHERE Id = 2
+*** (1) HOLDS THE LOCK(S):
+RECORD LOCKS space id 12 page no 4 n bits 80 index PRIMARY of table \`ClubA\`.\`Players\` trx id 421937 lock_mode X locks rec but not gap
+Record lock, heap no 2 PHYSICAL RECORD: n_fields 8; compact format; info bits 0
+*** (1) WAITING FOR THIS LOCK TO BE GRANTED:
+RECORD LOCKS space id 12 page no 4 n bits 80 index PRIMARY of table \`ClubA\`.\`Players\` trx id 421937 lock_mode X locks rec but not gap waiting
+Record lock, heap no 3 PHYSICAL RECORD: n_fields 8; compact format; info bits 0
+*** (2) TRANSACTION:
+TRANSACTION 421938, ACTIVE 4 sec starting index read
+mysql tables in use 1, locked 1
+LOCK WAIT 3 lock struct(s), heap size 1128, 2 row lock(s)
+MySQL thread id 21, OS thread handle 139871, query id 2207 10.0.0.31 etl updating
+UPDATE Players SET Shirt = NULL WHERE Id = 1
+*** (2) HOLDS THE LOCK(S):
+RECORD LOCKS space id 12 page no 4 n bits 80 index PRIMARY of table \`ClubA\`.\`Players\` trx id 421938 lock_mode X locks rec but not gap
+Record lock, heap no 3 PHYSICAL RECORD: n_fields 8; compact format; info bits 0
+*** (2) WAITING FOR THIS LOCK TO BE GRANTED:
+RECORD LOCKS space id 12 page no 4 n bits 80 index PRIMARY of table \`ClubA\`.\`Players\` trx id 421938 lock_mode X locks rec but not gap waiting
+Record lock, heap no 2 PHYSICAL RECORD: n_fields 8; compact format; info bits 0
+*** WE ROLL BACK TRANSACTION (2)
+------------
+TRANSACTIONS
+------------
+Trx id counter 421950
+`;
+
+function deadlockSets(session, batch) {
+  const kind = session.conn.kind ?? 'sqlserver';
+  const ago = (days) => new Date(Date.now() - days * 86_400_000);
+  if (batch.startsWith('-- trawl:deadlocks-probe')) {
+    if (kind === 'postgres') return [set(['database_name', 'deadlocks', 'stats_reset'], [[session.database, 3, ago(20)]])];
+    return [set(['engine_edition', 'database_name'], [[session.conn.engineEdition ?? 3, session.database]])];
+  }
+  if (batch.startsWith('-- trawl:deadlocks innodb')) return [set(['Type', 'Name', 'Status'], [['InnoDB', '', INNODB_STATUS]])];
+  // A login without VIEW SERVER STATE can read neither of system_health's targets.
+  if (session.conn.noServerState) throw new DbError("VIEW SERVER STATE permission was denied on object 'server', database 'master'.", { number: 300, line: 1 });
+  const azure = batch.startsWith('-- trawl:deadlocks azure');
+  const events = fakeDeadlocks(azure ? { event: 'database_xml_deadlock_report', database: 'ClubA' } : {});
+  return [set(['event_xml'], events.map((x) => [x]))];
+}
+
 const sleep = (ms, signal) =>
   new Promise((resolve, reject) => {
     const t = setTimeout(resolve, ms);
@@ -462,6 +632,9 @@ export function demoSession(conn, { database } = {}) {
           if (batch.startsWith('-- trawl:job-history')) return void state.sets.push(...jobHistorySets(session, batch.match(/job_id = '([^']+)'/)[1]));
           if (batch.startsWith('-- trawl:top-probe')) return void state.sets.push(...topProbeSets(session));
           if (batch.startsWith('-- trawl:top-queries')) return void state.sets.push(...topQuerySets(batch));
+          if (batch.startsWith('-- trawl:health ')) return void state.sets.push(...healthSets(session, batch.match(/^-- trawl:health (\w+)/)[1]));
+          if (batch.startsWith('-- trawl:sizes')) return void state.sets.push(...sizeSets(session));
+          if (batch.startsWith('-- trawl:deadlocks')) return void state.sets.push(...deadlockSets(session, batch));
           if (batch.startsWith('-- trawl:definition')) {
             const name = batch.match(/OBJECT_ID\(N'(.*)'\)\)/)[1].replace(/''/g, "'");
             const db = DATABASES[session.database];

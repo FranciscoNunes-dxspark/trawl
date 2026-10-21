@@ -722,6 +722,76 @@ test('Results: edit a cell, delete a row, see the script, save', async () => {
   app.unmount();
 });
 
+test('Results: a adds a row, its cells DEFAULT until given a value, saved as an INSERT', async () => {
+  const app = start();
+  await until(() => frame().includes('Clubs'), 'the explorer');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('Club A FC'), 'the rows of Clubs');
+  app.stdin.write('a');
+  await until(() => frame().includes('1 new row not saved') && /❯ +DEFAULT │ DEFAULT/.test(frame()), 'the new row');
+  // u takes it away again; a brings another.
+  app.stdin.write('u');
+  await until(() => !frame().includes('DEFAULT') && !frame().includes('not saved'), 'the new row gone');
+  app.stdin.write('a');
+  await until(() => frame().includes('1 new row not saved'), 'another new row');
+  // The cursor starts on Name: Id is the identity, which the server sets.
+  app.stdin.write('e');
+  await until(() => frame().includes('editing the cell'), 'typing in Name');
+  await type(app.stdin, 'Club Nova');
+  app.stdin.write(KEYS.enter);
+  await until(() => /DEFAULT │ Club Nova +│ DEFAULT/.test(frame()), 'the name given');
+  app.stdin.write('h');
+  await new Promise((r) => setTimeout(r, 50));
+  app.stdin.write('e');
+  await until(() => frame().includes('Id is an identity column'), 'the refusal on the identity');
+  app.stdin.write('s');
+  await until(() => frame().includes('Save 1 new row to dbo.Clubs on demo?'), 'the question');
+  assert.match(frame(), /INSERT INTO \[dbo\]\.\[Clubs\] \(\[Name\]\) VALUES \(N'Club Nova'\);/);
+  app.stdin.write('1');
+  // Saved, and the query runs again so the grid has the rows as the server keeps them (the demo changes nothing).
+  await until(() => frame().includes('save 1 new row to dbo.Clubs') && !frame().includes('not saved') && !frame().includes('DEFAULT') && frame().includes('Club A FC'), 'saved and read again');
+  app.unmount();
+});
+
+test('Results: v shows the whole value of a cell, JSON and XML laid out', async () => {
+  const app = start();
+  await until(() => frame().includes('Clubs'), 'the explorer');
+  await type(app.stdin, `!SELECT N'{"club":"A","players":[1,2]}' AS Doc, N'<club><name>A</name></club>' AS Xml`);
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('1 row ·'), 'the results');
+  app.stdin.write('v');
+  await until(() => frame().includes('Doc · row 1 of 1 · JSON, 28 characters'), 'the viewer');
+  assert.match(frame(), /│ {2}"players": \[ +│/);
+  assert.match(frame(), /│ {4}2 +│/);
+  app.stdin.write(KEYS.esc);
+  await until(() => !frame().includes('"players": ['), 'the viewer closed');
+  app.stdin.write('l');
+  await new Promise((r) => setTimeout(r, 50));
+  await type(app.stdin, '/cell');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('Xml · row 1 of 1 · XML'), 'the XML');
+  assert.match(frame(), /│ {2}<name>A<\/name> +│/);
+  app.unmount();
+});
+
+test('/export to .md and /copy md give the result set as a Markdown table', async () => {
+  const copied = [];
+  const app = start('demo', { clipboard: async (text) => (copied.push(text), 'system') });
+  await until(() => frame().includes('Clubs'), 'the explorer');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('Club A FC'), 'the rows');
+  const out = join(base, 'clubs.md');
+  await type(app.stdin, `/export ${out}`);
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('Wrote 3 rows'), 'the export');
+  assert.match(readFileSync(out, 'utf8'), /^\| Id \| Name \| Country \| Founded \| Active \|\n\| ---: \| --- \| --- \| --- \| --- \|\n\| 1 \| Club A FC \| PT \| 1904-03-14 \| 1 \|\n/);
+  await type(app.stdin, '/copy md');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('Copied 3 rows as a Markdown table.'), 'the copy');
+  assert.equal(copied[0], readFileSync(out, 'utf8'));
+  app.unmount();
+});
+
 test('Results: rows that aren’t one table’s say why they can’t be edited', async () => {
   const app = start();
   await until(() => frame().includes('Clubs'), 'the explorer');
@@ -730,6 +800,8 @@ test('Results: rows that aren’t one table’s say why they can’t be edited',
   await until(() => frame().includes('12 rows ·'), 'the results');
   app.stdin.write('e');
   await until(() => frame().includes("These rows can't be edited: it isn’t the rows of one table"), 'the reason');
+  app.stdin.write('a');
+  await until(() => frame().includes("Rows can't be added here: it isn’t the rows of one table"), 'no new rows either');
   app.unmount();
 });
 

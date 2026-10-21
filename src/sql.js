@@ -398,6 +398,19 @@ export function toJson(set) {
   return JSON.stringify(rows, null, 2) + '\n';
 }
 
+const mdCell = (s) => s.replace(/\\/g, '\\\\').replace(/\|/g, '\\|').replace(/\r?\n|\r/g, '<br>');
+
+/**
+ * One result set as a Markdown table, header row first: values as the grid shows them (NULL as
+ * NULL), pipes escaped, line breaks as <br>, numbers aligned right.
+ */
+export function toMarkdown(set) {
+  const row = (cells) => `| ${cells.join(' | ')} |`;
+  const lines = [row(set.columns.map((c) => mdCell(c.name))), row(set.columns.map((c) => (isNumericType(c.type) ? '---:' : '---')))];
+  for (const r of set.rows) lines.push(row(r.map((v) => mdCell(formatValue(v)))));
+  return lines.join('\n') + '\n';
+}
+
 export const KEYWORDS = new Set(
   `ADD ALL ALTER AND ANY AS ASC BACKUP BEGIN BETWEEN BREAK BY CASCADE CASE CAST CATCH CHECK COLUMN COMMIT CONSTRAINT
   CONTINUE CONVERT CREATE CROSS CURSOR DATABASE DECLARE DEFAULT DELETE DESC DISTINCT DROP ELSE END ESCAPE EXCEPT EXEC

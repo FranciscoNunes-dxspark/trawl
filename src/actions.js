@@ -8,7 +8,8 @@ import { csvInsertScript, parseCsv } from './csv.js';
 import * as ed from './editor.js';
 import { findDataSources, importPlan, planText } from './datagrip.js';
 import { formatSql } from './format.js';
-import { changesText, insertScript, saveScript, tsvText, withSaved } from './edit.js';
+import { cellText } from './cell.js';
+import { changesText, hasChanges, insertScript, saveScript, tsvText, withSaved } from './edit.js';
 import { AI_LABELS, AI_LEVELS, EXPLAIN_SYSTEM, aiLevel, askPrompt, canSeeSchema, consoleText, explainPrompt, parseAnswer } from './ai.js';
 import { followTargets } from './follow.js';
 import { compareSets, comparisonSet, comparisonSummary } from './compare.js';
@@ -20,7 +21,7 @@ import { buildActivity, killSql } from './activity.js';
 import { dialectOf, definitionSqlFor, qualifiedFor, selectTopFor } from './dialects.js';
 import { buildSchema, createTableScript, definitionSql, describeObject, findObject, objectName, rowsOf } from './schema.js';
 import { grepHits, usesReport, usesSummary, usesText } from './references.js';
-import { applySqlcmd, bindVariables, classifyScript, countQuery, oneLine, scriptVariables, splitStatements, sqlcmdVariables, statementAt, toCsv, toJson, withoutLeadingComments } from './sql.js';
+import { applySqlcmd, bindVariables, classifyScript, countQuery, oneLine, scriptVariables, splitStatements, sqlcmdVariables, statementAt, toCsv, toJson, toMarkdown, withoutLeadingComments } from './sql.js';
 
 // A WHERE that still changes more rows than this is asked about too.
 const MANY_ROWS = 1000;
@@ -149,7 +150,7 @@ export async function runSql(ctx, sql, { title, prefix = '', lineBase, stay, kee
 export async function saveEdits(ctx) {
   const res = ctx.results;
   const { changes } = ctx;
-  if (!changes.cells.size && !changes.deletes.size) return ctx.note('Nothing to save: e edits a cell, n makes it NULL, d marks a row to delete.');
+  if (!hasChanges(changes)) return ctx.note('Nothing to save: e edits a cell, n makes it NULL, d marks a row to delete, a adds one.');
   const { session } = ctx;
   if (!session || session.conn.name !== res.conn || session.database !== res.database) return ctx.note(`These rows came from ${res.conn} (${res.database}); connect there again to save them.`, 'error');
   const { table } = res.edit;
@@ -163,7 +164,7 @@ export async function saveEdits(ctx) {
   ctx.showText(`Save to ${objectName(table)}`, script);
   const ok = await ctx.confirm({
     title: `Save ${what} to ${objectName(table)} on ${session.conn.name}${session.conn.prod ? ' (production)' : ''}?`,
-    detail: 'The script is above (pgup/pgdn scroll it). Each change must find exactly its row, unchanged since it was read, or nothing is saved.',
+    detail: `The script is above (pgup/pgdn scroll it). Each change must find exactly its row, unchanged since it was read${changes.inserts?.length ? ', and each new row go in as one' : ''}, or nothing is saved.`,
     scrollsOverlay: true,
     options: YES_NO('Yes, save'),
     danger: changes.deletes.size > 0 || Boolean(session.conn.prod),
@@ -172,7 +173,26 @@ export async function saveEdits(ctx) {
   if (!ok) return;
   const r = await runSql(ctx, script, { title: `save ${what} to ${objectName(table)}`, keep: true });
   // On a failure, nothing was saved: the changes stay staged to fix or undo.
-  if (r?.ok && ctx.results === res) ctx.replaceResults({ ...res, sets: [withSaved(res.sets[0], changes, res.edit)] });
+  if (!r?.ok || ctx.results !== res) return;
+  ctx.replaceResults({ ...res, sets: [withSaved(res.sets[0], changes, res.edit)] });
+  // New rows get their identity and default values from the server, so the query runs again to show them.
+  if (changes.inserts?.length) await ctx.query(res.sql, { title: res.title, stay: true });
+}
+
+/**
+ * v in Results and /cell: the whole value of the cell under the cursor in a viewer, JSON
+ * pretty-printed, XML indented, binary as hex and long text folded to the width (cell.js).
+ */
+export function showCell(ctx) {
+  const c = ctx.cellOnScreen;
+  if (!c) return ctx.note('Put the cursor on a cell in Results first: v there shows its whole value.', 'error');
+  const name = c.set.columns[c.col].name;
+  if (c.isDefault) return ctx.note(`${name} has no value in this new row: it gets the column's default when saved.`);
+  const { text, kind } = cellText(c.value, Math.max(20, c.width - 4));
+  const v = c.value;
+  const size = typeof v === 'string' ? `${v.length.toLocaleString('en-US')} character${v.length === 1 ? '' : 's'}` : Buffer.isBuffer(v) ? `${v.length.toLocaleString('en-US')} byte${v.length === 1 ? '' : 's'}` : '';
+  const about = [kind === 'json' ? 'JSON' : kind === 'xml' ? 'XML' : '', size, c.edited ? 'not saved' : ''].filter(Boolean).join(', ');
+  ctx.showText(`${name} · ${c.label}${about ? ` · ${about}` : ''}`, text);
 }
 
 /**
@@ -1129,11 +1149,12 @@ export function compareResults(ctx) {
   ctx.note(summary, 'ok');
 }
 
-const COPY_FORMATS = ['tsv', 'csv', 'json', 'insert'];
+const COPY_FORMATS = ['tsv', 'csv', 'json', 'md', 'insert'];
 
 /**
- * /copy [tsv|csv|json|insert]: the result set on screen, on the clipboard. Tab-separated (the
- * default) pastes into a spreadsheet as cells; insert gives INSERT statements for the table.
+ * /copy [tsv|csv|json|md|insert]: the result set on screen, on the clipboard. Tab-separated (the
+ * default) pastes into a spreadsheet as cells; md is a Markdown table; insert gives INSERT
+ * statements for the table.
  */
 export function copyResults(ctx, format) {
   const set = ctx.currentSet();
@@ -1144,21 +1165,23 @@ export function copyResults(ctx, format) {
   const d = dialectOf(ctx.session);
   const source = res?.edit?.table ?? res?.source?.table;
   const table = source ? qualifiedFor(d, source.schema, source.name) : d.quote('TableName');
-  const text = f === 'csv' ? toCsv(set) : f === 'json' ? toJson(set) : f === 'insert' ? insertScript(set, table, { quote: d.quote }) : tsvText(set);
+  const text = f === 'csv' ? toCsv(set) : f === 'json' ? toJson(set) : f === 'md' ? toMarkdown(set) : f === 'insert' ? insertScript(set, table, { quote: d.quote }) : tsvText(set);
   const n = `${set.rows.length} row${set.rows.length === 1 ? '' : 's'}`;
-  return ctx.copy(text, f === 'tsv' ? `${n}, tab-separated` : f === 'insert' ? `${n} as INSERT statements${source ? '' : ` (into ${table}: rename it)`}` : `${n} as ${f.toUpperCase()}`);
+  return ctx.copy(text, f === 'tsv' ? `${n}, tab-separated` : f === 'insert' ? `${n} as INSERT statements${source ? '' : ` (into ${table}: rename it)`}` : f === 'md' ? `${n} as a Markdown table` : `${n} as ${f.toUpperCase()}`);
 }
 
-/** Writes the result set on screen to a .csv or .json file. */
+const EXPORTS = { '.csv': toCsv, '.json': toJson, '.md': toMarkdown, '.markdown': toMarkdown };
+
+/** Writes the result set on screen to a .csv, .json or .md (a Markdown table) file. */
 export async function exportResults(ctx, path) {
   const set = ctx.currentSet();
   if (!set) return ctx.note('Run a query first: there is nothing to export.', 'error');
   if (!path) return ctx.prefill('/export ');
   const full = resolve(path);
-  const ext = extname(full).toLowerCase();
-  if (ext !== '.csv' && ext !== '.json') return ctx.note('Export to a .csv or .json file.', 'error');
+  const format = EXPORTS[extname(full).toLowerCase()];
+  if (!format) return ctx.note('Export to a .csv, .json or .md file.', 'error');
   try {
-    await writeFile(full, ext === '.csv' ? toCsv(set) : toJson(set), 'utf8');
+    await writeFile(full, format(set), 'utf8');
     ctx.note(`Wrote ${set.rows.length} row${set.rows.length === 1 ? '' : 's'} to ${full}${set.truncated ? ` (only the first ${set.rows.length}: raise /limit for more)` : ''}`, 'ok');
   } catch (e) {
     ctx.note(`Couldn't write ${full}: ${e.message}`, 'error');

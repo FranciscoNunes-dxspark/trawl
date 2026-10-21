@@ -88,7 +88,7 @@ Most of Trawl works the same there: the Explorer, the console and its suggestion
 
 - A script runs a statement at a time, split at `;` (Postgres's `$$` bodies and MySQL's backslash escapes are understood); there is no `GO`, and MySQL's `DELIMITER` isn't supported.
 - Rows past the row limit are dropped once they arrive, rather than the query being stopped there, so a huge `SELECT` still crosses the network: add a `LIMIT`.
-- Editing results in place is SQL Server only (the save script is T-SQL); `e` says so. So are `/stats` and the sync script of `/diff`, which compares tables, columns and keys only (not indexes or definitions) when either side isn't SQL Server.
+- Editing results in place, adding rows included, is SQL Server only (the save script is T-SQL); `e` and `a` say so. So are `/stats` and the sync script of `/diff`, which compares tables, columns and keys only (not indexes or definitions) when either side isn't SQL Server.
 - Activity on MySQL doesn't show who blocks whom.
 - `/uses` takes what views use from Postgres's catalog (`pg_depend`), and the triggers on a table from both, but neither records what a routine's or trigger's body refers to (nor, on MySQL, a view's), so those are found by the object's name in their definitions, and the report marks them "by name".
 - `/ask` writes T-SQL, and the suggestions and `/format` know T-SQL's keywords and functions, not every other one.
@@ -132,7 +132,7 @@ Press `?` inside for every shortcut: the sections down the left, opening on the 
 | Explorer | `↵` first rows (on a database: switch to it) · `d` describe · `s` start a query on it in the console · `c` its CREATE script, into the console · `u` what uses it, and what it uses · `/find <text>` filter · `/grep <text>` search inside the definitions |
 | Query, the console | `↵` or `i` start typing · `esc` stop · `ctrl+r` run the selection, or the statement under the cursor · `R` run it all · `f` format (`alt+shift+f` while typing) · `p` plan (then `a`: Claude explains it) · `S` save as a snippet · `[`/`]` previous/next tab · `+` new tab · `ctrl+f` find, then `n`/`N` · `ctrl+z`/`ctrl+y` undo/redo · while typing, `tab` takes a suggestion and `ctrl+n` asks for them |
 | Query, a file | `↵` run the statement under the cursor · `v` select several · `R` run the whole file · `e` edit in the console |
-| Results | `h`/`l` columns · `[`/`]` result sets · `o` sort by the column · `f` filter · `y`/`Y` copy the cell/row · `↵` the row as a record · `F` follow the foreign key · `p` pin · `c` compare with the pinned · `e` edit · `n` NULL · `d` delete · `u` undo · `s` save · `x` export |
+| Results | `h`/`l` columns · `[`/`]` result sets · `o` sort by the column · `f` filter · `y`/`Y` copy the cell/row · `↵` the row as a record · `v` the whole value of the cell · `F` follow the foreign key · `p` pin · `c` compare with the pinned · `e` edit · `n` NULL · `d` delete · `a` add a row · `u` undo · `s` save · `x` export |
 | History | `↵` run again · `e` edit in the console · `◆` marks what Claude ran |
 | Connections | `↵` connect · `n` new · `p` password · `f` folder · `x` forget |
 | Activity | `R` read again · `↵` the session in full · `x` kill · `a` idle sessions too |
@@ -184,11 +184,13 @@ Errors say which line of the file they're on.
 
 ### Results
 
-Each result set stops at the row limit (500 to start with; `/limit <n>` changes it). Trawl cancels the query there instead of pulling the rest of the table over the network. `NULL` is shown as `NULL`, dates as `2026-10-19 15:14:35`, and binary as `0x…` hex. `/export <file.csv>` or `/export <file.json>` saves the result set on screen.
+Each result set stops at the row limit (500 to start with; `/limit <n>` changes it). Trawl cancels the query there instead of pulling the rest of the table over the network. `NULL` is shown as `NULL`, dates as `2026-10-19 15:14:35`, and binary as `0x…` hex. `/export <file.csv>`, `/export <file.json>` or `/export <file.md>` (a Markdown table) saves the result set on screen.
+
+A long value is cut short in the grid. `v` (or `/cell`) shows the whole of the cell under the cursor, the column and row in the title: JSON laid out with each level indented, XML a tag a line, binary as a hex dump with the bytes that are text beside it, and anything else wrapped to the width of the screen. `esc` closes it.
 
 `o` sorts the rows by the column under the cursor, A to Z, then Z to A, then back to the order they came in. `f` (or `/filter <text>`) shows only the rows with a value containing the text, ignoring case; `/filter` with nothing shows them all again. Neither runs the query again, so they work on the rows Trawl has (up to the row limit), and edits stay with their rows.
 
-`y` copies the cell under the cursor and `Y` the row, tab-separated. `/copy` copies the whole result set: tab-separated by default (it pastes into a spreadsheet as cells), or `/copy csv`, `/copy json`, or `/copy insert` for `INSERT` statements into its table. Trawl uses the system clipboard (PowerShell's `Set-Clipboard`, `pbcopy`, `wl-copy`, `xclip` or `xsel`), and over SSH asks the terminal to copy instead (OSC 52, which Windows Terminal, iTerm2, kitty, WezTerm and tmux understand).
+`y` copies the cell under the cursor and `Y` the row, tab-separated. `/copy` copies the whole result set: tab-separated by default (it pastes into a spreadsheet as cells), or `/copy csv`, `/copy json`, `/copy md` for a Markdown table (to paste into a pull request or a wiki: `|` in a value is escaped, a line break becomes `<br>` and `NULL` stays `NULL`), or `/copy insert` for `INSERT` statements into its table. Trawl uses the system clipboard (PowerShell's `Set-Clipboard`, `pbcopy`, `wl-copy`, `xclip` or `xsel`), and over SSH asks the terminal to copy instead (OSC 52, which Windows Terminal, iTerm2, kitty, WezTerm and tmux understand).
 
 ### Comparing results
 
@@ -210,11 +212,12 @@ When the rows on screen are the rows of one table, with its primary key among th
 
 - `h`/`l` move between cells, and `e` (or `i`) edits the one under the cursor. `↵` keeps the new value, `tab` keeps it and moves on to the next column, and `esc` leaves the cell as it was.
 - `n` makes the cell `NULL`, and `d` marks the row to be deleted (`d` again keeps it).
-- Changes are only staged: they show in colour, with a count under the grid. `u` undoes the row's changes and `U` undoes them all.
-- `s` saves. Trawl shows the `UPDATE`/`DELETE` script and asks first. Each statement finds its row by the primary key and, for the columns it changes, by the values they had when you read them. If any row has changed or gone since then, nothing is saved. The script runs in a transaction of its own, so a failure doesn't roll back one you had open.
+- `a` adds a new row at the end. Its cells say `DEFAULT` until `e` or `n` gives them a value, and those left that way get the column's default (or `NULL`) from the server; left empty, a cell of any column but a text one is `DEFAULT` too. Identity and computed columns are always the server's.
+- Changes are only staged: they show in colour, with a count under the grid. `u` undoes the row's changes (on a new row, it takes the row away) and `U` undoes them all.
+- `s` saves. Trawl shows the `UPDATE`/`DELETE`/`INSERT` script and asks first. Each `UPDATE` and `DELETE` finds its row by the primary key and, for the columns it changes, by the values they had when you read them, and each new row is an `INSERT` of just the columns you gave it. If any row has changed or gone since then, or an `INSERT` doesn't add exactly one row, nothing is saved. The script runs in a transaction of its own, so a failure doesn't roll back one you had open. After saving new rows, Trawl runs the query again, so the grid shows them as the server has them, identity and defaults filled in (if the query's `TOP` or order leaves them out, they're saved all the same).
 - The usual rules apply: a read-only connection refuses it until `/writes`, and with manual commit the changes wait for `/commit`.
 
-Columns that are expressions or renamed in the query, identity columns and `rowversion` can't be edited. If something can't be edited, `e` says why.
+Columns that are expressions or renamed in the query, identity and computed columns and `rowversion` can't be edited. If something can't be edited, `e` says why.
 
 ### Activity
 
@@ -234,7 +237,7 @@ The list is read when the tab opens, and again on `R`. `↵` shows a session's d
 
 Type `/` and the menu narrows as you type. `tab` completes, `↑`/`↓` picks, `↵` runs. `/connect` completes connection names, `/use` database names, `/describe` tables and views, and `/script` and `/uses` everything in the database.
 
-`/import datagrip [folder]` `/import-csv <file.csv> <table> [--run]` `/connect <name>` `/add …` `/forget <name>` `/folder <connection> [folder]` `/password [connection]` `/disconnect` `/use <database>` `/open <file.sql>` `/snippet [name]` `/snippets` `/console` `/tab …` `/new` `/format` `/search <text>` `/save <file.sql>` `/describe <table>` `/script <name>` `/grep <text>` `/uses <object>` `/find [text]` `/export <file>` `/filter [text]` `/follow` `/pin` `/compare` `/copy [tsv|csv|json|insert]` `/limit [rows]` `/writes` `/tx [auto|manual]` `/commit` `/rollback` `/ask <question>` `/explain` `/ai [connection] [level]` `/update` `/settings` `/stats [on|off]` `/plan [sql]` `/diff <connection> [database]` `/fanout <folder> [sql]` `/activity` `/kill <session>` `/last` `/refresh` `/help` `/quit`
+`/import datagrip [folder]` `/import-csv <file.csv> <table> [--run]` `/connect <name>` `/add …` `/forget <name>` `/folder <connection> [folder]` `/password [connection]` `/disconnect` `/use <database>` `/open <file.sql>` `/snippet [name]` `/snippets` `/console` `/tab …` `/new` `/format` `/search <text>` `/save <file.sql>` `/describe <table>` `/script <name>` `/grep <text>` `/uses <object>` `/find [text]` `/export <file>` `/filter [text]` `/cell` `/follow` `/pin` `/compare` `/copy [tsv|csv|json|md|insert]` `/limit [rows]` `/writes` `/tx [auto|manual]` `/commit` `/rollback` `/ask <question>` `/explain` `/ai [connection] [level]` `/update` `/settings` `/stats [on|off]` `/plan [sql]` `/diff <connection> [database]` `/fanout <folder> [sql]` `/activity` `/kill <session>` `/last` `/refresh` `/help` `/quit`
 
 ## Claude
 

@@ -140,8 +140,30 @@ export function editTarget(sql, sets, schema) {
   return { table, keys, columns };
 }
 
-/** Whether a column can take a typed value at all (identity and rowversion can't). */
-export const canEdit = (tc) => !tc.identity && !READ_ONLY.has(base(tc.type));
+/** Whether a column can take a typed value at all (identity, computed and rowversion can't). */
+export const canEdit = (tc) => !tc.identity && !tc.computed && !READ_ONLY.has(base(tc.type));
+
+/** Nothing staged: `cells` "row:col" → text or null, `deletes` rows, `inserts` the new rows' numbers. */
+export const noChanges = () => ({ cells: new Map(), deletes: new Set(), inserts: [] });
+
+/** Whether anything is staged. */
+export const hasChanges = (changes) => Boolean(changes.cells.size || changes.deletes.size || changes.inserts?.length);
+
+/**
+ * The number a new row added to `set` goes by: after the rows read and the new rows staged, so its
+ * cells are "row:col" keys like any other row's. Removing one leaves the others' numbers as they are.
+ */
+export const nextNewRow = (set, changes) => Math.max(set.rows.length, ...(changes.inserts ?? []).map((r) => r + 1));
+
+/** Whether an empty value means "leave it to the default" in a new row: everything but text takes nothing typed as no value. */
+export function emptyIsDefault(type) {
+  try {
+    toLiteral('', type);
+    return false;
+  } catch {
+    return true;
+  }
+}
 
 /** A value as text to edit: like the grid, but binary in full and NULL as nothing. */
 export function editText(v) {
@@ -187,10 +209,12 @@ export function valueLiteral(v, type) {
 }
 
 /**
- * The script that saves `changes` ({ cells: Map "row:col" → text or null, deletes: Set of rows })
- * made to `set` (as `target` from editTarget). Each statement must touch exactly one row, found by
- * its key and, for the columns it changes, the values it had when read; otherwise nothing is saved.
- * It keeps to its own transaction (a savepoint), so one already open isn't rolled back with it.
+ * The script that saves `changes` ({ cells: Map "row:col" → text or null, deletes: Set of rows,
+ * inserts: the new rows' numbers }) made to `set` (as `target` from editTarget). Each UPDATE and
+ * DELETE must touch exactly one row, found by its key and, for the columns it changes, the values
+ * it had when read; each INSERT must add one, with only the columns given (the rest take their
+ * defaults); otherwise nothing is saved. It keeps to its own transaction (a savepoint), so one
+ * already open isn't rolled back with it.
  */
 export function saveScript(target, set, changes) {
   const { table, keys, columns } = target;
@@ -204,27 +228,37 @@ export function saveScript(target, set, changes) {
       })
       .join(' AND ');
   const keyText = (row) => keys.map((i) => `${columns.get(i).name} = ${editText(set.rows[row][i])}`).join(', ');
+  const inserts = changes.inserts ?? [];
   const byRow = new Map();
   for (const [at, text] of changes.cells) {
     const [row, col] = at.split(':').map(Number);
-    if (changes.deletes.has(row)) continue;
+    if (changes.deletes.has(row) || (row >= set.rows.length && !inserts.includes(row))) continue;
     if (!byRow.has(row)) byRow.set(row, []);
     byRow.get(row).push([col, text]);
   }
+  const literal = (col, text, where) => {
+    const tc = columns.get(col);
+    try {
+      return toLiteral(text, tc.type);
+    } catch (e) {
+      throw new Error(`${tc.name} (${where}): ${e.message}`);
+    }
+  };
   const statements = [];
-  for (const [row, cells] of [...byRow].sort((x, y) => x[0] - y[0])) {
-    const sets = cells.sort((x, y) => x[0] - y[0]).map(([col, text]) => {
-      const tc = columns.get(col);
-      try {
-        return `${quoteIdent(tc.name)} = ${toLiteral(text, tc.type)}`;
-      } catch (e) {
-        throw new Error(`${tc.name} (${keyText(row)}): ${e.message}`);
-      }
-    });
+  for (const [row, cells] of [...byRow].filter(([row]) => row < set.rows.length).sort((x, y) => x[0] - y[0])) {
+    const sets = cells.sort((x, y) => x[0] - y[0]).map(([col, text]) => `${quoteIdent(columns.get(col).name)} = ${literal(col, text, keyText(row))}`);
     const check = cells.map(([col]) => col).filter((col) => !keys.includes(col) && EXACT.has(base(columns.get(col).type)));
     statements.push({ sql: `UPDATE ${name} SET ${sets.join(', ')} WHERE ${where(row, check)};`, row: keyText(row) });
   }
   for (const row of [...changes.deletes].sort((x, y) => x - y)) statements.push({ sql: `DELETE FROM ${name} WHERE ${where(row)};`, row: keyText(row) });
+  const added = (k) => `The new row ${k} wasn't added as one row. Nothing was saved.`;
+  inserts.forEach((row, k) => {
+    const cells = (byRow.get(row) ?? []).sort((x, y) => x[0] - y[0]);
+    const sql = cells.length
+      ? `INSERT INTO ${name} (${cells.map(([col]) => quoteIdent(columns.get(col).name)).join(', ')}) VALUES (${cells.map(([col, text]) => literal(col, text, `new row ${k + 1}`)).join(', ')});`
+      : `INSERT INTO ${name} DEFAULT VALUES;`;
+    statements.push({ sql, message: added(k + 1) });
+  });
   if (!statements.length) return '';
   const lines = [
     `-- trawl:edit ${statements.length} change${statements.length === 1 ? '' : 's'} to ${table.schema}.${table.name}`,
@@ -234,7 +268,7 @@ export function saveScript(target, set, changes) {
   ];
   for (const st of statements) {
     lines.push(`  ${st.sql}`);
-    lines.push(`  IF @@ROWCOUNT <> 1 THROW 50000, ${quote(`The row ${st.row} changed or is gone since it was read. Nothing was saved.`, true)}, 1;`);
+    lines.push(`  IF @@ROWCOUNT <> 1 THROW 50000, ${quote(st.message ?? `The row ${st.row} changed or is gone since it was read. Nothing was saved.`, true)}, 1;`);
   }
   lines.push(
     '  COMMIT TRANSACTION;',
@@ -256,11 +290,17 @@ export function withSaved(set, changes, target) {
   return { ...set, rows };
 }
 
-/** "2 edited rows and 1 deletion", for titles. */
+/** "2 edited rows, 1 deletion and 1 new row", for titles. */
 export function changesText(changes) {
-  const edited = new Set([...changes.cells.keys()].map((k) => Number(k.split(':')[0])).filter((r) => !changes.deletes.has(r))).size;
+  const inserts = changes.inserts ?? [];
+  const edited = new Set([...changes.cells.keys()].map((k) => Number(k.split(':')[0])).filter((r) => !changes.deletes.has(r) && !inserts.includes(r))).size;
   const n = changes.deletes.size;
-  return [edited ? `${edited} edited row${edited === 1 ? '' : 's'}` : '', n ? `${n} deletion${n === 1 ? '' : 's'}` : ''].filter(Boolean).join(' and ');
+  const parts = [
+    edited ? `${edited} edited row${edited === 1 ? '' : 's'}` : '',
+    n ? `${n} deletion${n === 1 ? '' : 's'}` : '',
+    inserts.length ? `${inserts.length} new row${inserts.length === 1 ? '' : 's'}` : '',
+  ].filter(Boolean);
+  return parts.length > 1 ? `${parts.slice(0, -1).join(', ')} and ${parts.at(-1)}` : parts.join('');
 }
 
 /** The value a saved change leaves in the grid, as the server would hand it back. */

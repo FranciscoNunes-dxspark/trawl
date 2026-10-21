@@ -105,6 +105,14 @@ test('highlighting colours keywords, strings, comments, numbers and variables', 
   assert.equal(lines[1].at(-1).kind, 'keyword');
 });
 
+test('built-in functions are their own colour when called: LEFT( is one, LEFT JOIN a keyword, a column named Year neither', () => {
+  const kinds = (sql) => highlight(sql)[0].filter((r) => r.kind).map((r) => `${r.text}:${r.kind}`);
+  assert.deepEqual(kinds('SELECT GREATEST(a, b), iif (x > 1, 1, 0), CAST(y AS int)'), ['SELECT:keyword', 'GREATEST:function', 'iif:function', '1:number', '1:number', '0:number', 'CAST:function', 'AS:keyword']);
+  assert.deepEqual(kinds('SELECT LEFT(Name, 3), Year FROM t LEFT JOIN u'), ['SELECT:keyword', 'LEFT:function', '3:number', 'FROM:keyword', 'LEFT:keyword', 'JOIN:keyword']);
+  // Not as a dotted name's last part, and not in a string.
+  assert.deepEqual(kinds("SELECT x.value('a', 'int'), 'LEN(x)'"), ['SELECT:keyword', "'a':string", "'int':string", "'LEN(x)':string"]);
+});
+
 test('undo steps back a word at a time, and redo forward again', () => {
   let h = ed.newHistory();
   let e = ed.fromText('');

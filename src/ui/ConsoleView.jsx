@@ -6,6 +6,7 @@ import * as ed from '../editor.js';
 import { highlight, mask, oneLine, splitStatements, statementAt, withoutLeadingComments } from '../sql.js';
 import { fit, fitSegments, stringWidth } from '../text.js';
 import { theme } from '../theme.js';
+import { atLeast } from '../mouse.js';
 import { useMouse } from './hooks.js';
 import { Panel, Row } from './parts.jsx';
 
@@ -15,6 +16,9 @@ const MENU_ROWS = 8;
 // Typing one of these keeps the suggestions coming; anything else (a comma, a bracket) closes them.
 // A space asks too, though only "ON " has anything to offer before a word is typed.
 const WORD_CHAR = /^[\w@#$.[ *]$/;
+// ctrl+backspace arrives as \b where backspace is \x7f: everywhere but Windows's console without VT
+// input (Node before 22.17), which sends \b for backspace itself. alt+backspace works everywhere.
+const CTRL_BACKSPACE = process.platform !== 'win32' || typeof Bun !== 'undefined' || atLeast(process.version, 22, 17);
 
 /** Lays `add` over a row of segments from column `x`, padding the row when it's shorter. */
 function overlay(segs, x, add) {
@@ -233,6 +237,8 @@ export function ConsoleView({ editor, tabs = ['console'], tab = 0, editing, ctx,
       if (open) setMenu(null);
       // esc lets go of a selection first, then stops typing.
       if (key.escape && ed.selection(editor)) return set({ lines: editor.lines, row: editor.row, col: editor.col });
+      // ctrl+c copies the selection; with nothing selected it stops typing, as esc does.
+      if (key.ctrl && input === 'c' && ed.selection(editor)) return ctx.copySelection(ed.selectedText(editor).text);
       if (key.escape || (key.ctrl && input === 'c')) return ctx.setEditing(false);
       if (key.ctrl && input === 'r') return runConsole(ctx, editor);
       if (key.ctrl && input === 'z') return ctx.undoConsole();
@@ -243,10 +249,22 @@ export function ConsoleView({ editor, tabs = ['console'], tab = 0, editing, ctx,
       if (key.return) return set(ed.newline(editor));
       if (key.backspace || key.delete) {
         const forward = key.delete && rawKey.current.startsWith('\x1b[3');
-        ctx.setConsole(forward ? ed.deleteForward(editor) : ed.backspace(editor), { merge: true });
+        // A word at a time: ctrl+delete forward; ctrl+backspace or alt+backspace back.
+        const word = forward ? key.ctrl : key.meta || (CTRL_BACKSPACE && rawKey.current === '\b');
+        const next = forward ? (word ? ed.deleteWordForward : ed.deleteForward) : word ? ed.deleteWordBack : ed.backspace;
+        ctx.setConsole(next(editor), { merge: !word });
         return open ? setMenu({ index: 0, force: open.force }) : undefined;
       }
-      // shift with a movement selects; ctrl moves (or with shift, selects) a word at a time.
+      // ctrl+/ (which terminals send as \x1f) comments the line, or the selected lines, out or back in.
+      if (input === '\x1f' || (key.ctrl && input === '/')) return set(ed.toggleComment(editor));
+      if (key.ctrl && input === 'd') return set(ed.duplicate(editor));
+      // alt+↑/↓ moves the line (or the selected lines) up or down.
+      if (key.meta && !key.shift && (key.upArrow || key.downArrow)) {
+        const moved = ed.moveLines(editor, key.upArrow ? -1 : 1);
+        return moved ? set(moved) : undefined;
+      }
+      // shift with a movement selects; ctrl moves (or with shift, selects) a word at a time, and with
+      // home or end to the start or end of the text.
       const step =
         key.ctrl && (key.leftArrow || key.rightArrow)
           ? (e) => ed.wordMove(e, key.leftArrow ? -1 : 1)
@@ -255,13 +273,19 @@ export function ConsoleView({ editor, tabs = ['console'], tab = 0, editing, ctx,
             : key.upArrow || key.downArrow
               ? (e) => ed.move(e, { rows: key.upArrow ? -1 : 1 })
               : key.home
-                ? ed.lineStart
+                ? key.ctrl ? ed.textStart : ed.lineStart
                 : key.end
-                  ? ed.lineEnd
+                  ? key.ctrl ? ed.textEnd : ed.lineEnd
                   : null;
       if (step && key.shift) return set(ed.extend(editor, step));
       if (step && key.ctrl) return set(step(editor));
       if (key.ctrl && input === 'w') return set(ed.deleteWordBack(editor));
+      if (key.ctrl && input === 'x') {
+        const cut = ed.cut(editor);
+        if (!cut) return;
+        set(cut.editor);
+        return ctx.copySelection(cut.text, 'Cut');
+      }
       if (key.ctrl && input === 'f') return ctx.prefill('/search ');
       if (key.leftArrow) return set(ed.move(editor, { cols: -1 }));
       if (key.rightArrow) return set(ed.move(editor, { cols: 1 }));
@@ -269,11 +293,15 @@ export function ConsoleView({ editor, tabs = ['console'], tab = 0, editing, ctx,
       if (key.downArrow) return set(ed.move(editor, { rows: 1 }));
       if (key.pageUp) return set(ed.move(editor, { rows: -(innerH - 1) }));
       if (key.pageDown) return set(ed.move(editor, { rows: innerH - 1 }));
-      if (key.home || (key.ctrl && input === 'a')) return set(ed.lineStart(editor));
+      if (key.ctrl && input === 'a') return set(ed.selectAll(editor));
+      if (key.home) return set(ed.lineStart(editor));
       if (key.end || (key.ctrl && input === 'e')) return set(ed.lineEnd(editor));
       if (key.ctrl && input === 'u') return set(ed.killLine(editor));
       if (key.ctrl && input === 'k') return set(ed.killLine(editor, { toEnd: true }));
       if (key.tab) {
+        // tab and shift+tab indent the selected lines; shift+tab alone takes the cursor's line back.
+        const sel = ed.selection(editor);
+        if (key.shift || (sel && sel.start.row !== sel.end.row)) return set(ed.indentLines(editor, key.shift ? -1 : 1));
         // Right after SELECT *, tab writes out the columns (once the FROM is there to say which).
         const c = completeAt(editor, ctx.schema, { force: true });
         if (c?.items[0]?.kind === 'expand') return set(accept(editor, c, c.items[0]));
@@ -407,7 +435,7 @@ export function ConsoleView({ editor, tabs = ['console'], tab = 0, editing, ctx,
   const hint = items.length
     ? 'tab take it · ↑↓ pick · esc close'
     : sel
-      ? 'selected · ctrl+r runs just this · typing replaces it · esc let go'
+      ? 'selected · ctrl+r runs just this · ctrl+c/x copy/cut · esc let go'
       : editing
       ? 'typing · ctrl+n suggest · ctrl+r run · alt+shift+f format · ctrl+z undo · esc stop'
       : `${editor.lines.length} lines · ↵ type · ctrl+r run · R run all · f format · p plan · ctrl+f find`;

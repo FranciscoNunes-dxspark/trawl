@@ -422,6 +422,15 @@ test('f formats the statement under the cursor, and ctrl+z puts it back', async 
   await until(() => /1 SELECT Name\s/.test(frame()) && /2 FROM dbo\.Clubs/.test(frame()) && /4\s+AND Active = 1/.test(frame()), 'the statement formatted');
   app.stdin.write('\x1a');
   await until(() => frame().includes('select Name from'), 'undone');
+  // While typing, alt+shift+f (as VS Code) or ctrl+alt+l (as DataGrip) does it, and typing goes on.
+  app.stdin.write('i');
+  await until(() => frame().includes('typing SQL'), 'typing');
+  app.stdin.write('\x1bF');
+  await until(() => /2 FROM dbo\.Clubs/.test(frame()) && frame().includes('typing SQL'), 'formatted while typing');
+  app.stdin.write('\x1a');
+  await until(() => frame().includes('select Name from'), 'undone again');
+  app.stdin.write('\x1b\x0c');
+  await until(() => /2 FROM dbo\.Clubs/.test(frame()) && frame().includes('typing SQL'), 'formatted with ctrl+alt+l');
   app.unmount();
 });
 

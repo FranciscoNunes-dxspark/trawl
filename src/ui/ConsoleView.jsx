@@ -220,6 +220,9 @@ export function ConsoleView({ editor, tabs = ['console'], tab = 0, editing, ctx,
       if (key.ctrl && input === 'r') return runConsole(ctx, editor);
       if (key.ctrl && input === 'z') return ctx.undoConsole();
       if (key.ctrl && input === 'y') return ctx.redoConsole();
+      // Formatting while typing: alt+shift+f as in VS Code, or ctrl+alt+l as in DataGrip (f does it otherwise).
+      // Ink hands ctrl+alt+l over as a bare form feed, with neither ctrl nor meta; ctrl+l alone is ctrl and l.
+      if ((key.meta && input === 'F') || input === '\x0c') return a.formatConsole(ctx);
       if (key.return) return set(ed.newline(editor));
       if (key.backspace || key.delete) {
         ctx.setConsole(ed.backspace(editor), { merge: true });
@@ -388,7 +391,7 @@ export function ConsoleView({ editor, tabs = ['console'], tab = 0, editing, ctx,
     : sel
       ? 'selected · ctrl+r runs just this · typing replaces it · esc let go'
       : editing
-      ? 'typing · ctrl+n suggest · ctrl+r run · ctrl+z undo · esc stop'
+      ? 'typing · ctrl+n suggest · ctrl+r run · alt+shift+f format · ctrl+z undo · esc stop'
       : `${editor.lines.length} lines · ↵ type · ctrl+r run · R run all · f format · p plan · ctrl+f find`;
   return (
     <Panel title={title} hint={hint} width={width} height={height} focused={active}>

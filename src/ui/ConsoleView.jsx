@@ -1,5 +1,5 @@
-import React, { useMemo, useRef, useState } from 'react';
-import { Box, Text, useInput } from 'ink';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { Box, Text, useInput, useStdin } from 'ink';
 import * as a from '../actions.js';
 import { accept, completeAt, signatureAt } from '../complete.js';
 import * as ed from '../editor.js';
@@ -139,7 +139,7 @@ export function ConsoleView({ editor, tabs = ['console'], tab = 0, editing, ctx,
   // A click puts the cursor on the character under it, a double-click selects the word and a triple
   // the line; a click in the gutter selects the statement, and one on a suggestion takes it. A drag
   // selects the SQL it covers (and copies it), running on past the top or bottom as it scrolls.
-  // A click on a tab's name in the title brings that tab up.
+  // Clicks and drags in the text start typing. A click on a tab's name in the title brings that tab up.
   const popupRef = useRef(null);
   const dragFrom = useRef(null);
   const cellAt = (editor, x, y) => ed.clickAt(editor, top.current + y - 1, x - 1 - gutterW, { left: left.current });
@@ -154,6 +154,7 @@ export function ConsoleView({ editor, tabs = ['console'], tab = 0, editing, ctx,
       }
       if (e.drag) {
         setMenu(null);
+        ctx.setEditing(true);
         dragFrom.current ??= cellAt(editor, e.from.x, e.from.y);
         const next = { ...cellAt(editor, e.x, e.y), anchor: { row: dragFrom.current.row, col: dragFrom.current.col } };
         set(next);
@@ -178,6 +179,8 @@ export function ConsoleView({ editor, tabs = ['console'], tab = 0, editing, ctx,
         return setMenu(pick.insert.endsWith('.') ? { index: 0 } : null);
       }
       setMenu(null);
+      // A click in the text (or the gutter) starts typing there, as in any editor.
+      ctx.setEditing(true);
       const at = cellAt(editor, e.x, e.y);
       if (e.x - 1 < gutterW && top.current + e.y - 1 < editor.lines.length) {
         const st = statementAt(splitStatements(ed.toText(editor)), at.row + 1);
@@ -187,6 +190,20 @@ export function ConsoleView({ editor, tabs = ['console'], tab = 0, editing, ctx,
     },
     { drags: (e) => e.y >= 1 && e.y <= innerH },
   );
+
+  // Ink reports backspace (\x7f in most terminals) and the delete key (ESC [3~) both as key.delete, so
+  // the key's own bytes, which Ink hands its input listeners one key at a time, tell them apart. This
+  // listener comes before the one below, so it has the key first.
+  const { internal_eventEmitter: inputs } = useStdin();
+  const rawKey = useRef('');
+  useEffect(() => {
+    if (!inputs) return;
+    const note = (data) => {
+      rawKey.current = data;
+    };
+    inputs.on('input', note);
+    return () => inputs.off('input', note);
+  }, [inputs]);
 
   // Keys while typing. Ink gives a paste as one input; insert() splits its lines.
   useInput(
@@ -225,7 +242,8 @@ export function ConsoleView({ editor, tabs = ['console'], tab = 0, editing, ctx,
       if ((key.meta && input === 'F') || input === '\x0c') return a.formatConsole(ctx);
       if (key.return) return set(ed.newline(editor));
       if (key.backspace || key.delete) {
-        ctx.setConsole(ed.backspace(editor), { merge: true });
+        const forward = key.delete && rawKey.current.startsWith('\x1b[3');
+        ctx.setConsole(forward ? ed.deleteForward(editor) : ed.backspace(editor), { merge: true });
         return open ? setMenu({ index: 0, force: open.force }) : undefined;
       }
       // shift with a movement selects; ctrl moves (or with shift, selects) a word at a time.

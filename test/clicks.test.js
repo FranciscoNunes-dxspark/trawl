@@ -1,7 +1,7 @@
 // Clicks and the wheel, driven through the real UI with a stand-in for the terminal's mouse.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import React from 'react';
@@ -277,6 +277,26 @@ test('in the console a click puts the cursor on the character under it, double a
     assert.deepEqual(copied, ['SELECT 28 AS n\nSELECT 29 AS n']);
     app.stdin.write('+');
     await until(() => /28 \+ +│/.test(frame()) && frame().includes('SELECT 30 AS n'), 'the selection replaced');
+  } finally {
+    app.unmount();
+  }
+});
+
+test('a click in the console starts typing where it lands', async () => {
+  process.env.TRAWL_HOME = join(base, 'home-click-types');
+  mkdirSync(process.env.TRAWL_HOME, { recursive: true });
+  writeFileSync(join(process.env.TRAWL_HOME, 'console.sql'), 'SELECT 1 AS one');
+  const mouse = fakeMouse();
+  const app = start({ mouse });
+  try {
+    await until(() => frame().includes('Translations'), 'the explorer');
+    app.stdin.write('2');
+    await until(() => frame().includes('SELECT 1 AS one') && frame().includes('↵/i type'), 'the console, not typing');
+    const p = at('AS one');
+    mouse.click(p.x, p.y);
+    await until(() => frame().includes('typing SQL'), 'typing');
+    app.stdin.write('x');
+    await until(() => frame().includes('SELECT 1 xAS one'), 'typed where the click landed');
   } finally {
     app.unmount();
   }

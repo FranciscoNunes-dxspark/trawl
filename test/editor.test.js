@@ -32,6 +32,13 @@ test('backspace deletes, joins lines, and steps back over indent in twos', () =>
   assert.deepEqual(ed.backspace({ lines: ['x'], row: 0, col: 0 }), { lines: ['x'], row: 0, col: 0 });
 });
 
+test('delete takes the character after the cursor, joins the next line at the end, and takes a selection', () => {
+  assert.deepEqual(ed.deleteForward({ lines: ['abc'], row: 0, col: 1 }), { lines: ['ac'], row: 0, col: 1 });
+  assert.deepEqual(ed.deleteForward({ lines: ['ab', 'cd'], row: 0, col: 2 }), { lines: ['abcd'], row: 0, col: 2 });
+  assert.deepEqual(ed.deleteForward({ lines: ['ab'], row: 0, col: 2 }), { lines: ['ab'], row: 0, col: 2 });
+  assert.deepEqual(ed.deleteForward({ lines: ['abcd'], row: 0, col: 3, anchor: { row: 0, col: 1 } }), { lines: ['ad'], row: 0, col: 1 });
+});
+
 test('moving keeps the column across short lines', () => {
   let e = { lines: ['long line', 'ab', 'another long'], row: 0, col: 8 };
   e = ed.move(e, { rows: 1 });

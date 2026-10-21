@@ -53,6 +53,21 @@ export function backspace(ed) {
   return { lines, row: ed.row - 1, col: prev.length };
 }
 
+/** The delete key: the character after the cursor goes, or at a line's end the next line joins it. */
+export function deleteForward(ed) {
+  if (selection(ed)) return deleteSelection(ed);
+  const line = ed.lines[ed.row];
+  if (ed.col < line.length) {
+    const lines = [...ed.lines];
+    lines[ed.row] = line.slice(0, ed.col) + line.slice(ed.col + 1);
+    return { lines, row: ed.row, col: ed.col };
+  }
+  if (ed.row === ed.lines.length - 1) return ed;
+  const lines = [...ed.lines];
+  lines.splice(ed.row, 2, line + lines[ed.row + 1]);
+  return { lines, row: ed.row, col: ed.col };
+}
+
 /** Moves the cursor by rows or columns; up/down keep the column where they can. */
 export function move(ed, { rows = 0, cols = 0 }) {
   if (cols) {

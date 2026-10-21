@@ -13,6 +13,7 @@ export const theme = {
   table: '#afd7ff',
   view: '#5fd7d7',
   routine: '#d787ff',
+  func: '#87d7af',
   nul: '#6c6c6c',
   number: '#ffaf5f',
   bangMode: '#ff87d7',

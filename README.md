@@ -143,7 +143,7 @@ The mouse works too: click a tab, a row or the prompt, and double-click a row to
 
 ### The console
 
-The Query tab starts as a console: a SQL editor inside Trawl, with keywords, strings, comments and numbers in colour. Press `↵` or `i` to start typing and `esc` to stop. While you type, every key is text, so the digits and `q` don't switch views or quit. `ctrl+r` runs the statement under the cursor (the gutter marks which one), and its results appear under the console, so you can keep typing. `R` runs everything, and `3` shows the results full size.
+The Query tab starts as a console: a SQL editor inside Trawl, with keywords, built-in functions (`GREATEST(`, `IIF(`, `DATEADD(`…), strings, comments and numbers each in a colour of their own. Press `↵` or `i` to start typing and `esc` to stop. While you type, every key is text, so the digits and `q` don't switch views or quit. `ctrl+r` runs the statement under the cursor (the gutter marks which one), and its results appear under the console, so you can keep typing. `R` runs everything, and `3` shows the results full size.
 
 The console is saved as you type (in `~/.trawl/console.sql`) and is there again next time. `/save <file.sql>` writes it to a file, and `/new` clears it.
 

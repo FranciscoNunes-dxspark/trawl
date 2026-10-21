@@ -408,9 +408,34 @@ export const KEYWORDS = new Set(
   VIEW WAITFOR WHEN WHERE WHILE WITH`.split(/\s+/),
 );
 
+// Built-in functions, which the console's suggestions offer with their opening parenthesis (complete.js).
+// LEFT and RIGHT aren't among them: they're joins as often.
+export const FUNCTIONS = `ABS AVG CAST CEILING CHARINDEX CHOOSE COALESCE CONCAT CONCAT_WS CONVERT COUNT COUNT_BIG CUME_DIST
+  DATEADD DATEDIFF DATEDIFF_BIG DATEFROMPARTS DATENAME DATEPART DATETRUNC DAY DB_NAME DENSE_RANK EOMONTH FIRST_VALUE
+  FLOOR FORMAT GETDATE GETUTCDATE GREATEST HASHBYTES IIF ISDATE ISJSON ISNULL ISNUMERIC JSON_QUERY JSON_VALUE LAG
+  LAST_VALUE LEAD LEAST LEN LOWER LTRIM MAX MIN MONTH NEWID NTILE NULLIF OBJECT_ID OBJECT_NAME OPENJSON PATINDEX
+  POWER QUOTENAME RANK REPLACE REPLICATE REVERSE ROUND ROW_NUMBER RTRIM SCHEMA_NAME SCOPE_IDENTITY SIGN SPACE SQRT
+  STDEV STRING_AGG STRING_SPLIT STUFF SUBSTRING SUM SUSER_SNAME SWITCHOFFSET SYSDATETIME SYSDATETIMEOFFSET
+  SYSUTCDATETIME TODATETIMEOFFSET TRANSLATE TRIM TRY_CAST TRY_CONVERT TRY_PARSE UPPER VAR YEAR`.split(/\s+/);
+
+// What the console colours as a function when a parenthesis follows (so LEFT JOIN is a keyword and
+// LEFT(Name, 3) a function): those, LEFT and RIGHT, more of SQL Server's, and PostgreSQL's and MySQL's.
+const FUNCTION_NAMES = new Set([
+  ...FUNCTIONS,
+  ...`LEFT RIGHT ACOS APP_NAME APPROX_COUNT_DISTINCT ASCII ASIN ATAN ATN2 BINARY_CHECKSUM CHAR CHECKSUM COL_LENGTH COL_NAME
+  COMPRESS COS COT DATALENGTH DATE_BUCKET DATETIME2FROMPARTS DATETIMEFROMPARTS DATETIMEOFFSETFROMPARTS DB_ID DECOMPRESS
+  DEGREES DIFFERENCE ERROR_LINE ERROR_MESSAGE ERROR_NUMBER ERROR_PROCEDURE ERROR_SEVERITY ERROR_STATE EXP FORMATMESSAGE
+  GENERATE_SERIES GROUPING GROUPING_ID HOST_NAME IDENT_CURRENT JSON_ARRAY JSON_MODIFY JSON_OBJECT LOG LOG10 NCHAR
+  NEWSEQUENTIALID OBJECT_DEFINITION OBJECT_SCHEMA_NAME PARSE PERCENT_RANK PERCENTILE_CONT PERCENTILE_DISC PI RADIANS
+  RAND ROWCOUNT_BIG SESSION_CONTEXT SIN SMALLDATETIMEFROMPARTS SOUNDEX SQUARE STDEVP STR STRING_ESCAPE SUSER_NAME TAN
+  TIMEFROMPARTS TYPE_ID TYPE_NAME UNICODE USER_NAME VARP XACT_STATE
+  ARRAY_AGG CHAR_LENGTH DATE_FORMAT DATE_TRUNC EXTRACT GROUP_CONCAT IFNULL INSTR JSON_AGG JSONB_AGG LENGTH LOCATE LPAD
+  MD5 NOW RANDOM REGEXP_REPLACE RPAD SPLIT_PART STR_TO_DATE SUBSTR TO_CHAR TO_DATE TO_TIMESTAMP UNNEST`.split(/\s+/),
+]);
+
 /**
- * Splits a script into coloured runs per line: { text, kind } with kind 'keyword', 'string',
- * 'comment', 'number', 'variable' or null. Comments and strings spanning lines stay coloured.
+ * Splits a script into coloured runs per line: { text, kind } with kind 'keyword', 'function',
+ * 'string', 'comment', 'number', 'variable' or null. Comments and strings spanning lines stay coloured.
  */
 export function highlight(text) {
   const src = normalise(text);
@@ -429,7 +454,10 @@ export function highlight(text) {
   }
   for (const t of m.matchAll(/[@#]?[A-Za-z_][\w$#@]*|\b\d+(\.\d+)?\b/g)) {
     const w = t[0];
-    const kind = /^\d/.test(w) ? 'number' : w.startsWith('@') ? 'variable' : KEYWORDS.has(w.toUpperCase()) ? 'keyword' : null;
+    const upper = w.toUpperCase();
+    // A built-in's name with a parenthesis after it, but not a dotted name's last part (x.value( is XML's).
+    const called = FUNCTION_NAMES.has(upper) && m[t.index - 1] !== '.' && /^\s*\(/.test(m.slice(t.index + w.length, t.index + w.length + 20));
+    const kind = /^\d/.test(w) ? 'number' : w.startsWith('@') ? 'variable' : called ? 'function' : KEYWORDS.has(upper) ? 'keyword' : null;
     if (kind) for (let k = 0; k < w.length; k++) kinds[t.index + k] = kind;
   }
   // N'…' is a string too.

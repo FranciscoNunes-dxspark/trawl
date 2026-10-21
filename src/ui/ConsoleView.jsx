@@ -9,8 +9,8 @@ import { theme } from '../theme.js';
 import { useMouse } from './hooks.js';
 import { Panel, Row } from './parts.jsx';
 
-const COLORS = () => ({ keyword: theme.accent, string: theme.warn, comment: theme.dim, number: theme.number, variable: theme.routine });
-const KIND_COLORS = () => ({ join: theme.ok, expand: theme.ok, parameter: theme.routine, keyword: theme.accent, function: theme.routine, procedure: theme.routine, table: theme.table, view: theme.view, schema: theme.schema, database: theme.schema });
+const COLORS = () => ({ keyword: theme.accent, function: theme.func, string: theme.warn, comment: theme.dim, number: theme.number, variable: theme.routine });
+const KIND_COLORS = () => ({ join: theme.ok, expand: theme.ok, parameter: theme.routine, keyword: theme.accent, function: theme.func, procedure: theme.routine, table: theme.table, view: theme.view, schema: theme.schema, database: theme.schema });
 const MENU_ROWS = 8;
 // Typing one of these keeps the suggestions coming; anything else (a comma, a bracket) closes them.
 // A space asks too, though only "ON " has anything to offer before a word is typed.
@@ -330,7 +330,7 @@ export function ConsoleView({ editor, tabs = ['console'], tab = 0, editing, ctx,
     const sig = signatureAt(editor, ctx.schema);
     if (sig) {
       const bg = theme.selBg;
-      const segs = [{ text: ` ${sig.name}${sig.exec ? ' ' : '('}`, color: theme.routine, bg }];
+      const segs = [{ text: ` ${sig.name}${sig.exec ? ' ' : '('}`, color: sig.exec ? theme.routine : theme.func, bg }];
       const last = sig.params.length - 1;
       sig.params.forEach((p, k) => {
         const on = k === sig.index || (p.repeats && k === last && sig.index > k);
@@ -338,7 +338,7 @@ export function ConsoleView({ editor, tabs = ['console'], tab = 0, editing, ctx,
         segs.push({ text: p.optional ? `[${sep}${p.text}]` : `${sep}${p.text}`, color: on ? theme.accent : undefined, bold: on, bg });
       });
       if (sig.params[last]?.repeats) segs.push({ text: ', …', bg });
-      segs.push({ text: sig.exec ? ' ' : ') ', color: theme.routine, bg });
+      segs.push({ text: sig.exec ? ' ' : ') ', color: sig.exec ? theme.routine : theme.func, bg });
       const w = Math.min(textW, segs.reduce((n, s) => n + s.text.length, 0));
       const y = editor.row - top.current;
       popup = { y: y > 0 ? y - 1 : y + 1, x: gutterW + Math.max(0, Math.min(editor.col - left.current - 1, textW - w)), lines: [fitSegments(segs, w)] };

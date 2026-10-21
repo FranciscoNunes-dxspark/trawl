@@ -49,7 +49,7 @@ export const HELP = [
       ['R', 'Run the whole console'],
       ['j k  g G', 'Move between lines (when not typing)'],
       ['p', 'Its estimated plan, as text (/plan): nothing runs; there, a asks Claude to explain it (/explain)'],
-      ['f', 'Format the statement under the cursor (or the selection): a clause a line, keywords in capitals; while typing, alt+shift+f (as VS Code) or ctrl+alt+l (as DataGrip)'],
+      ['f', 'Format the statement under the cursor (or the selection): a clause a line, the columns one a line, joins indented with their ON under them, keywords in capitals; while typing, alt+shift+f (as VS Code) or ctrl+alt+l (as DataGrip)'],
       ['ctrl+f  n N', 'Find (/search <text>) · the next match · the previous one (n N when not typing)'],
       ['Typing', 'arrows · backspace, delete · home/end or ctrl+a/ctrl+e · ctrl+u/ctrl+k cut to start/end · tab two spaces\nctrl+←/→ a word at a time · ctrl+w delete a word · shift+movement selects (esc lets go)'],
       ['ctrl+z  ctrl+y', 'Undo · Redo (a word at a time; also when not typing, and /new can be undone too)'],

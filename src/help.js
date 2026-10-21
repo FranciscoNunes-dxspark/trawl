@@ -128,6 +128,15 @@ export const HELP = [
     ],
   },
   {
+    title: 'Health, sizes, deadlocks',
+    about: 'the database you\'re in, and its server',
+    rows: [
+      ['/health', 'A check-up, in the viewer: missing indexes the server suggests, unused and duplicate indexes, foreign keys without an index, tables without a primary key (and heaps), untrusted or disabled constraints, stale statistics (dead rows on Postgres), disabled triggers, each with why it matters. Then it offers the fixes, all of them or one group\'s, in a console tab of their own (health); dropping an index or turning a trigger on comes commented out, and nothing runs. Postgres and MySQL get the checks they have an equivalent for; the report lists the others.'],
+      ['/sizes', 'Every table\'s rows and space (reserved, data, indexes, and the rest), biggest first, as a result set in Results to sort, filter and export. Postgres\'s row counts and all of MySQL\'s numbers are estimates.'],
+      ['/deadlocks', 'The recent deadlocks, from system_health (SQL Server; Azure SQL Database: from master), or the latest from SHOW ENGINE INNODB STATUS (MySQL): when, the victim, who waited for whose lock as a tree, each session\'s SQL and the locks. Several are a list: ↵ shows one. Postgres only logs them.'],
+    ],
+  },
+  {
     title: 'CSV import',
     rows: [
       ['/import-csv <file.csv> <table> [--run]', 'The file\'s rows as INSERTs into the table, columns matched to its header (case, spaces and _ ignored; identity columns left out); comma, semicolon or tab, quotes and line breaks inside them. They open in a console tab to read; --run runs them (the usual checks apply).'],

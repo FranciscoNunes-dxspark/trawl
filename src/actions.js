@@ -11,6 +11,7 @@ import { formatSql } from './format.js';
 import { changesText, insertScript, saveScript, tsvText, withSaved } from './edit.js';
 import { AI_LABELS, AI_LEVELS, EXPLAIN_SYSTEM, aiLevel, askPrompt, canSeeSchema, consoleText, explainPrompt, parseAnswer } from './ai.js';
 import { followTargets } from './follow.js';
+import { moreQuery, raiseTop } from './more.js';
 import { compareSets, comparisonSet, comparisonSummary } from './compare.js';
 import { droppedPaths, findTab, freeName, tabNameFor, tabNameProblem } from './consoles.js';
 import { findSnippet, snippetNameProblem, snippetsFor, withSnippet, withoutSnippet } from './snippets.js';
@@ -104,8 +105,11 @@ async function withParameters(ctx, sql) {
   return bindVariables(text, values);
 }
 
-/** Runs SQL on the current connection, after the read-only and danger checks. */
-export async function runSql(ctx, sql, { title, prefix = '', lineBase, stay, keep } = {}) {
+/**
+ * Runs SQL on the current connection, after the read-only and danger checks. `top`: the SQL is
+ * Trawl's own TOP (n) at the row limit, so m in Results can raise it.
+ */
+export async function runSql(ctx, sql, { title, prefix = '', lineBase, stay, keep, top } = {}) {
   if (!needSession(ctx)) return;
   if (!sql.trim()) return;
   const text = await withParameters(ctx, sql.trim());
@@ -138,7 +142,27 @@ export async function runSql(ctx, sql, { title, prefix = '', lineBase, stay, kee
   }
   // With manual commit (production's default), a write starts a transaction, so nothing sticks until /commit.
   const wrap = write && commitMode(conn) === 'manual' && !ctx.tranCount;
-  return ctx.query(wrap ? `${dialect.begin}\n${text}` : text, { title: title ?? `${prefix}${oneLine(withoutLeadingComments(text))}`, wrapped: wrap, lineBase, stay, keep });
+  const heading = title ?? `${prefix}${oneLine(withoutLeadingComments(text))}`;
+  return ctx.query(wrap ? `${dialect.begin}\n${text}` : text, { title: heading, wrapped: wrap, lineBase, stay, keep, top });
+}
+
+/**
+ * m in Results and /more: the query behind the result set on screen again, when the row limit cut
+ * it off, with the limit raised by another limit's worth (500, 1000, 1500…), in place of the rows on
+ * screen so the cursor, the sort and the filter stay. Only reads run again (more.js moreQuery).
+ */
+export async function moreRows(ctx) {
+  const res = ctx.results;
+  if (!needSession(ctx)) return;
+  const index = ctx.resultIndex ?? 0;
+  const m = moreQuery(res, index, { step: ctx.config.limit, dialect: dialectOf(ctx.session).kind });
+  if (m.reason) return ctx.note(m.reason, 'error');
+  if (res.conn !== ctx.session.conn.name || res.database !== ctx.session.database) return ctx.note(`These rows came from ${res.conn} (${res.database}); connect there again to fetch more.`, 'error');
+  const { changes } = ctx;
+  if (changes.cells.size || changes.deletes.size) return ctx.note(`Save (s) or undo (U) the ${changesText(changes)} first: the rows are read again.`, 'error');
+  // A title with Trawl's TOP in it says the new one.
+  const title = (m.top && raiseTop(res.title ?? '', res.top, m.top)) || res.title;
+  return ctx.query(m.sql, { title, limit: m.limit, top: m.top ?? null, again: { id: res.id, index } });
 }
 
 /**
@@ -191,7 +215,7 @@ export async function followKey(ctx, cell = ctx.resultCell) {
     pick = await ctx.confirm({ title: 'Follow which foreign key?', options: [...r.targets.map((t) => ({ label: `${t.label} (${t.fk})`, value: t })), { label: 'Neither', value: null }] });
     if (!pick) return;
   }
-  return runSql(ctx, pick.sql);
+  return runSql(ctx, pick.sql, { top: ctx.config.limit });
 }
 
 export async function connect(ctx, name, { database } = {}) {
@@ -365,7 +389,7 @@ export async function rollback(ctx) {
 export function browse(ctx, obj) {
   if (!needSession(ctx) || !obj) return;
   if (obj.kind !== 'table' && obj.kind !== 'view') return ctx.note(`${objectName(obj)} is a ${obj.kind}; only tables and views have rows to show.`, 'error');
-  return runSql(ctx, selectTopFor(dialectOf(ctx.session), obj.schema, obj.name, ctx.config.limit));
+  return runSql(ctx, selectTopFor(dialectOf(ctx.session), obj.schema, obj.name, ctx.config.limit), { top: ctx.config.limit });
 }
 
 export function describe(ctx, text) {

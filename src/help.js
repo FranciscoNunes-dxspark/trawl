@@ -92,6 +92,7 @@ export const HELP = [
       ['[ ]', 'Previous, next result set'],
       ['↵', 'The row as a record, one column per line'],
       ['x', 'Export (/export <file.csv|file.json>)'],
+      ['m', 'More rows: when the row limit cut the result off, run it again for another limit\'s worth (/more); the cursor, sort and filter stay'],
       ['o', 'Sort by the column: A to Z, then Z to A, then as it came (the query doesn\'t run again)'],
       ['f', 'Filter: only rows with a value containing the text (/filter <text>; empty shows them all)'],
       ['y  Y', 'Copy the cell · the row (tab-separated); /copy [tsv|csv|json|insert] copies the whole set'],

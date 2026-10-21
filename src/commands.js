@@ -33,6 +33,7 @@ export const COMMANDS = [
   { name: 'compare', desc: 'What changed between the pinned result and the one on screen (c in Results)', run: (ctx) => a.compareResults(ctx) },
   { name: 'copy', args: '[tsv|csv|json|insert]', desc: 'Copy the result set on screen (tab-separated pastes into a spreadsheet)', run: (ctx, s) => a.copyResults(ctx, s.trim()) },
   { name: 'export', args: '<file.csv|file.json>', desc: 'Save the result set on screen', run: (ctx, s) => a.exportResults(ctx, s) },
+  { name: 'more', desc: 'Fetch another row limit\'s worth of the result set the limit cut off (m in Results)', run: (ctx) => a.moreRows(ctx) },
   { name: 'limit', args: '[rows]', desc: 'Rows kept per result set (the query stops there)', run: (ctx, s) => a.setLimit(ctx, s) },
   { name: 'writes', desc: 'Allow writes on a read-only connection until you disconnect', run: (ctx) => a.allowWrites(ctx) },
   { name: 'tx', args: '[auto|manual]', desc: 'Commit each statement as it runs, or only on /commit', run: (ctx, s) => a.setCommitMode(ctx, s.trim().toLowerCase()) },

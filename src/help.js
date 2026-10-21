@@ -14,7 +14,7 @@ export const HELP = [
       ['?', 'This help'],
       [',', 'Settings (/settings): row limit, accent colour, mouse, updates'],
       ['q / ctrl+c', 'Quit (asks first if a transaction is open)'],
-      ['mouse', 'Click a tab, a row, a cell or the prompt · double-click does ↵ (but never runs a statement)\nthe wheel scrolls (shift+wheel: Results\' columns) · drag to select text, copied when you let go\nin the console: double-click a word, triple-click a line, click the gutter for the statement, click a suggestion to take it; a drag selects the SQL (ctrl+r runs just that)'],
+      ['mouse', 'Click a tab, a row, a cell or the prompt · double-click does ↵ (but never runs a statement)\nthe wheel scrolls (shift+wheel: Results\' columns) · drag to select text, copied when you let go\nin the console: a click starts typing there; double-click a word, triple-click a line, click the gutter for the statement, click a suggestion to take it; a drag selects the SQL (ctrl+r runs just that)'],
     ],
   },
   {
@@ -51,7 +51,7 @@ export const HELP = [
       ['p', 'Its estimated plan, as text (/plan): nothing runs; there, a asks Claude to explain it (/explain)'],
       ['f', 'Format the statement under the cursor (or the selection): a clause a line, keywords in capitals; while typing, alt+shift+f (as VS Code) or ctrl+alt+l (as DataGrip)'],
       ['ctrl+f  n N', 'Find (/search <text>) · the next match · the previous one (n N when not typing)'],
-      ['Typing', 'arrows · home/end or ctrl+a/ctrl+e · ctrl+u/ctrl+k cut to start/end · tab two spaces\nctrl+←/→ a word at a time · ctrl+w delete a word · shift+movement selects (esc lets go)'],
+      ['Typing', 'arrows · backspace, delete · home/end or ctrl+a/ctrl+e · ctrl+u/ctrl+k cut to start/end · tab two spaces\nctrl+←/→ a word at a time · ctrl+w delete a word · shift+movement selects (esc lets go)'],
       ['ctrl+z  ctrl+y', 'Undo · Redo (a word at a time; also when not typing, and /new can be undone too)'],
       ['Suggestions', 'tables, columns, keywords, JOIN … ON from foreign keys · tab take one · ↑↓ pick (then ↵ takes it)\nthey open by themselves after FROM, JOIN, ON, EXEC, USE · inside a call, its syntax shows above\nesc close · ctrl+n (or ctrl+space) ask for them anywhere · tab after SELECT * writes out the columns'],
       ['/new  /save <file.sql>', 'Clear it · Write it to a file'],

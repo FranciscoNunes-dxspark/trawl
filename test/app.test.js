@@ -342,6 +342,28 @@ test('the console suggests tables and columns as you type; tab takes one, esc on
   app.unmount();
 });
 
+test('backspace deletes before the cursor and the delete key after it, though Ink calls both delete', async () => {
+  mkdirSync(process.env.TRAWL_HOME, { recursive: true });
+  writeFileSync(join(process.env.TRAWL_HOME, 'console.sql'), 'SELECT 12345\nFROM x');
+  const app = start();
+  await until(() => frame().includes('Clubs'), 'the explorer');
+  app.stdin.write('2');
+  await until(() => frame().includes('SELECT 12345'), 'the console');
+  app.stdin.write('i');
+  await until(() => frame().includes('typing SQL'), 'typing');
+  // The cursor starts at the top: to between 2 and 3.
+  for (let n = 0; n < 9; n++) app.stdin.write('\x1b[C');
+  app.stdin.write('\x1b[3~');
+  await until(() => frame().includes('SELECT 1245'), 'the delete key took the 3');
+  app.stdin.write('\x7f');
+  await until(() => frame().includes('SELECT 145'), 'backspace took the 2');
+  // At the end of a line, the delete key joins the next one.
+  app.stdin.write('\x1b[F');
+  app.stdin.write('\x1b[3~');
+  await until(() => frame().includes('SELECT 145FROM x'), 'the next line joined');
+  app.unmount();
+});
+
 test('ctrl+z undoes in the console a word at a time, ctrl+y redoes, and /new can be undone', async () => {
   mkdirSync(process.env.TRAWL_HOME, { recursive: true });
   writeFileSync(join(process.env.TRAWL_HOME, 'console.sql'), '');

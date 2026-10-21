@@ -1,7 +1,8 @@
 // Every operation the UI offers, written once. Keys and slash commands both call these.
 // `ctx` is the app's handle: session, schema, query, confirm, note, prefill, and so on (see App.jsx).
+import { readFileSync, statSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
-import { extname, resolve } from 'node:path';
+import { basename, extname, resolve } from 'node:path';
 import { ADD_USAGE, cleanFolder, commitMode, describeConn, isReadOnly, parseAddArgs, splitArgs } from './connections.js';
 import { csvInsertScript, parseCsv } from './csv.js';
 import * as ed from './editor.js';
@@ -11,7 +12,7 @@ import { changesText, insertScript, saveScript, tsvText, withSaved } from './edi
 import { AI_LABELS, AI_LEVELS, EXPLAIN_SYSTEM, aiLevel, askPrompt, canSeeSchema, consoleText, explainPrompt, parseAnswer } from './ai.js';
 import { followTargets } from './follow.js';
 import { compareSets, comparisonSet, comparisonSummary } from './compare.js';
-import { findTab, freeName, tabNameProblem } from './consoles.js';
+import { droppedPaths, findTab, freeName, tabNameFor, tabNameProblem } from './consoles.js';
 import { findSnippet, snippetNameProblem, snippetsFor, withSnippet, withoutSnippet } from './snippets.js';
 import { folderNames, inFolder, inParallel, mergeResults, readOnlyScript } from './fanout.js';
 import { DIFF_SQL, buildExtras, diffText, schemaDiff, syncScript } from './diff.js';
@@ -904,6 +905,44 @@ export async function importCsv(ctx, rest) {
   ctx.addConsoleTab(freeName(tabs, 'import'));
   ctx.setConsole(ed.fromText(script));
   ctx.note(`The INSERT script for ${what} is in a console tab of its own: R runs it.`, 'ok');
+}
+
+// Bigger than this, a dropped file is better read through /open, which doesn't load it into the editor.
+const DROP_LIMIT = 1024 * 1024;
+
+/**
+ * Files dropped on the terminal, which types their paths: each .sql or .txt opens in a console tab
+ * of its own, named after it. False when `text` isn't the paths of such files, so it's taken as typing.
+ */
+export function openDropped(ctx, text) {
+  const paths = droppedPaths(text);
+  const sizes = paths?.map((p) => {
+    try {
+      const st = statSync(p);
+      return st.isFile() ? st.size : -1;
+    } catch {
+      return -1;
+    }
+  });
+  if (!sizes || sizes.some((n) => n < 0)) return false;
+  const opened = [];
+  paths.forEach((path, i) => {
+    const name = basename(path);
+    if (sizes[i] > DROP_LIMIT) return ctx.note(`${name} is over 1 MB: /open ${path} works through it a statement at a time.`, 'error');
+    let text;
+    try {
+      const buf = readFileSync(path);
+      // SSMS can save as UTF-16; either way a byte order mark isn't SQL.
+      text = (buf[0] === 0xff && buf[1] === 0xfe ? buf.toString('utf16le') : buf.toString('utf8')).replace(/^\uFEFF/, '');
+    } catch (e) {
+      return ctx.note(`${path}: ${e.message.split('\n')[0]}`, 'error');
+    }
+    ctx.addConsoleTab(freeName(ctx.consoleTabs.names.map((n) => ({ name: n })), tabNameFor(path)));
+    ctx.setConsole(ed.fromText(text), { record: false });
+    opened.push(name);
+  });
+  if (opened.length) ctx.note(`${opened.join(', ')} ${opened.length === 1 ? 'is' : 'are'} in a console tab of ${opened.length === 1 ? 'its' : 'their'} own: R runs it all.`, 'ok');
+  return true;
 }
 
 /** Empties the console, asking first when there's something in it. */

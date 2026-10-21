@@ -76,7 +76,7 @@ export function afterLostConnection(sql, { dialect = 'sqlserver', hadTran = fals
  */
 async function countChanges(ctx, text) {
   const d = dialectOf(ctx.session);
-  const q = countQuery(text)?.replace(/^SELECT COUNT_BIG\(\*\)/, `SELECT ${d.count}`);
+  const q = countQuery(text, { dialect: d.kind })?.replace(/^SELECT COUNT_BIG\(\*\)/, `SELECT ${d.count}`);
   if (!q || classifyScript(q, { dialect: d.kind }).write) return null;
   let n = null;
   const r = await ctx.task(

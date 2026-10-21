@@ -39,3 +39,22 @@ test('a value that does not fit its column, or a row of the wrong length, says w
   assert.throws(() => csvInsertScript(parseCsv('ClubId,Name\n1\n'), players), /Row 2 has 1 value; the header has 2/);
   assert.throws(() => csvInsertScript(parseCsv('Colour\nred\n'), players), /None of the file's columns/);
 });
+
+test("Postgres: generated columns are left out, and arrays and intervals go in as the text the file has", () => {
+  const gadgets = {
+    schema: 'sales',
+    name: 'gadgets',
+    columns: [
+      { name: 'id', type: 'integer', identity: true, pk: true },
+      { name: 'price', type: 'numeric(10,2)', nullable: true },
+      { name: 'doubled', type: 'numeric', computed: true },
+      { name: 'tags', type: 'text[]', nullable: true },
+      { name: 'dur', type: 'interval', nullable: true },
+    ],
+  };
+  const quote = (n) => `"${n}"`;
+  const r = csvInsertScript(parseCsv('id,price,doubled,tags,dur\n1,2.5,5,"{a,""b c""}",1 day\n'), gadgets, { quote, kind: 'postgres' });
+  assert.deepEqual(r.columns, ['price', 'tags', 'dur']);
+  assert.deepEqual(r.skipped, ['id: an identity column, which the server fills', 'doubled: a generated column, which the server fills']);
+  assert.match(r.script, /INSERT INTO "sales"\."gadgets" \("price", "tags", "dur"\) VALUES\n {2}\(2\.5, '\{a,"b c"\}', '1 day'\);/);
+});

@@ -117,7 +117,7 @@ Most of Trawl works the same there: the Explorer, the console and its suggestion
 - `/health` has the checks each kind has an equivalent for (see [Health, sizes and deadlocks](#health-sizes-and-deadlocks)), `/sizes`' numbers are estimates (all of MySQL's, Postgres's row counts), and `/deadlocks` reads MySQL's latest deadlock from `SHOW ENGINE INNODB STATUS`, while Postgres only writes them to its log.
 - `/ask` writes T-SQL, and the suggestions and `/format` know T-SQL's keywords and functions, not every other one.
 - `/import datagrip` still leaves Postgres and MySQL data sources out.
-- `/script-all` writes MySQL's objects as `SHOW CREATE` gives them (tables included, without the `AUTO_INCREMENT=` counter), and Postgres's tables from the catalog, with the defaults, checks and indexes as the server words them.
+- `/script-all` writes MySQL's objects as `SHOW CREATE` gives them (tables included, without the `AUTO_INCREMENT=` counter), and Postgres's tables from the catalog, with the defaults, checks, indexes and foreign keys (their `ON DELETE` too) as the server words them. Postgres's own types (an enum), sequences, schemas and extensions aren't scripted: make those first when building a database from the files.
 
 ### Folders
 
@@ -242,7 +242,7 @@ When the rows on screen are one table's (as for editing, below, though the prima
 
 ### Importing a CSV file
 
-`/import-csv <file.csv> <table>` turns a CSV file into `INSERT` statements for a table of the database you're in. The file's header names the columns, matched to the table's ignoring case, spaces and underscores (`club_id` is `ClubId`); identity columns and headers the table hasn't are left out, and the script says which, and which `NOT NULL` columns the file doesn't have. Values can be separated by commas, semicolons or tabs (whichever the header uses), quoted with `"` (with `""` inside, and line breaks), and the file can have Windows line endings and a byte-order mark. An empty value is `NULL` where the column allows it. Each value is checked against its column's type first, and a bad one says its row and column (`Row 3, Goals: int takes a whole number ("x")`).
+`/import-csv <file.csv> <table>` turns a CSV file into `INSERT` statements for a table of the database you're in. The file's header names the columns, matched to the table's ignoring case, spaces and underscores (`club_id` is `ClubId`); identity and computed (generated) columns and headers the table hasn't are left out, and the script says which, and which `NOT NULL` columns the file doesn't have. Values can be separated by commas, semicolons or tabs (whichever the header uses), quoted with `"` (with `""` inside, and line breaks), and the file can have Windows line endings and a byte-order mark. An empty value is `NULL` where the column allows it. Each value is checked against its column's type first, and a bad one says its row and column (`Row 3, Goals: int takes a whole number ("x")`); a Postgres array, interval or geometric value goes in as the file has it, for the server to read.
 
 The script opens in a console tab of its own (`import`), to read through and then run with `R`. `/import-csv <file.csv> <table> --run` runs it straight away instead. Either way it goes through the usual checks: a read-only connection refuses it, and with manual commit it waits for `/commit`.
 

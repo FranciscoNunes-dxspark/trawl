@@ -13,11 +13,28 @@ const dialect = DIALECTS.postgres;
 const TYPES = { 16: 'bit', 17: 'bytea', 20: 'BigInt', 21: 'SmallInt', 23: 'Int', 25: 'text', 114: 'json', 700: 'Real', 701: 'Float', 790: 'Money', 1042: 'char', 1043: 'varchar', 1082: 'date', 1083: 'time', 1114: 'timestamp', 1184: 'timestamptz', 1700: 'Numeric', 2950: 'uuid', 3802: 'jsonb' };
 
 // Timestamps without a zone are read as UTC (as tedious's useUTC does), and dates kept as written.
-const types = {
+// A timestamp a JavaScript date can't hold (infinity, BC) stays as the server wrote it, as do
+// intervals, points and circles, which pg would make into objects that print as JSON.
+const asText = (s) => s;
+const textArray = pg.types.getTypeParser(1009);
+const stamp = (parse) => (s) => {
+  const d = parse(s);
+  return d instanceof Date && !Number.isNaN(d.getTime()) ? d : s;
+};
+const PARSERS = {
+  1082: asText,
+  1114: stamp((s) => new Date(`${s.replace(' ', 'T')}Z`)),
+  1184: stamp(pg.types.getTypeParser(1184)),
+  1186: asText,
+  1187: textArray,
+  600: asText,
+  1017: textArray,
+  718: asText,
+  719: textArray,
+};
+export const types = {
   getTypeParser(oid, format) {
-    if (oid === 1114) return (s) => new Date(`${s.replace(' ', 'T')}Z`);
-    if (oid === 1082) return (s) => s;
-    return pg.types.getTypeParser(oid, format);
+    return (format ?? 'text') === 'text' && PARSERS[oid] ? PARSERS[oid] : pg.types.getTypeParser(oid, format);
   },
 };
 
@@ -80,6 +97,16 @@ export function collectResult(result, state, limit) {
   }
 }
 
+/**
+ * A Postgres error's message as psql shows it: with the server's DETAIL (which key was a duplicate),
+ * HINT and CONTEXT (the line of the function it failed in), each on a line of its own. A DO block's
+ * own RAISE (saving edits raises one) says all it means in its message.
+ */
+export function errorText(e) {
+  const where = /^PL\/pgSQL function inline_code_block line \d+ at RAISE$/.test(e.where ?? '') ? null : e.where;
+  return [e.message, ...[['DETAIL', e.detail], ['HINT', e.hint], ['CONTEXT', where]].filter(([, v]) => v).map(([k, v]) => `${k}: ${v}`)].join('\n');
+}
+
 /** The line a Postgres error points at (its character `position`), counted in the whole script. */
 const errorLine = (e, text, line) => (e.position ? line + text.slice(0, Number(e.position) - 1).split('\n').length - 1 : line);
 
@@ -107,7 +134,7 @@ export function postgresSession(conn, client, { database = null, cancel = async 
             collectResult(await client.query({ text, rowMode: 'array' }), state, limit);
           } catch (e) {
             if (e.code === '57014' || signal?.aborted) throw new DbError('Cancelled', { cancelled: true });
-            throw new DbError(e.message, { number: e.code ?? null, line: errorLine(e, text, line), lost: connectionLost(e) });
+            throw new DbError(errorText(e), { number: e.code ?? null, line: errorLine(e, text, line), lost: connectionLost(e) });
           } finally {
             signal?.removeEventListener('abort', onAbort);
           }

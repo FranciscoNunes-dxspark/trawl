@@ -131,6 +131,13 @@ test('countQuery counts what an UPDATE or DELETE would change, reading only', ()
   assert.equal(countQuery('DELETE p FROM dbo.Players p JOIN dbo.Clubs c ON c.Id = p.ClubId WHERE c.Active = 0'), 'SELECT COUNT_BIG(*) FROM dbo.Players p JOIN dbo.Clubs c ON c.Id = p.ClubId WHERE c.Active = 0;');
   assert.equal(countQuery("UPDATE dbo.Clubs SET Name = 'x' WHERE Id = 1"), 'SELECT COUNT_BIG(*) FROM dbo.Clubs WHERE Id = 1;');
   assert.equal(countQuery('UPDATE dbo.Clubs SET Active = 0'), 'SELECT COUNT_BIG(*) FROM dbo.Clubs;');
+  // Postgres: UPDATE … FROM and DELETE … USING read other tables besides the one they change; RETURNING isn't counted.
+  const pg = (sql) => countQuery(sql, { dialect: 'postgres' });
+  assert.equal(pg("UPDATE sales.orders o SET note = 'x' FROM public.customers c WHERE c.id = o.customer_id AND c.vip"), 'SELECT COUNT_BIG(*) FROM sales.orders o, public.customers c WHERE c.id = o.customer_id AND c.vip;');
+  assert.equal(pg('DELETE FROM ONLY sales.lines l USING sales.orders o WHERE o.id = l.order_id'), 'SELECT COUNT_BIG(*) FROM sales.lines l, sales.orders o WHERE o.id = l.order_id;');
+  assert.equal(pg('UPDATE t SET x = 1 WHERE id < 5 RETURNING *'), 'SELECT COUNT_BIG(*) FROM t WHERE id < 5;');
+  assert.equal(pg('DELETE FROM t WHERE id < 5 RETURNING id'), 'SELECT COUNT_BIG(*) FROM t WHERE id < 5;');
+  assert.equal(pg("UPDATE t SET x = (SELECT y FROM u WHERE u.id = t.id) WHERE id < 5"), 'SELECT COUNT_BIG(*) FROM t WHERE id < 5;');
   // A subquery's FROM and WHERE are its own.
   assert.equal(countQuery('UPDATE p SET Goals = (SELECT MAX(Goals) FROM dbo.Players WHERE 1 = 1) FROM dbo.Players p WHERE p.Id = 3'), 'SELECT COUNT_BIG(*) FROM dbo.Players p WHERE p.Id = 3;');
   assert.equal(countQuery('DELETE TOP (5) FROM dbo.Players'), null);

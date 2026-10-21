@@ -49,13 +49,18 @@ export function rowsOf(set) {
   return set.rows.map((row) => Object.fromEntries(set.columns.map((c, i) => [c.name, row[i]])));
 }
 
-/** A column's type the way it's declared: nvarchar(50), decimal(10,2), varbinary(max). */
+/**
+ * A column's type the way it's declared: nvarchar(50), decimal(10,2), varbinary(max). Postgres and
+ * MySQL give the whole type already (numeric(12,2), and a plain numeric has no size), so a size
+ * the catalog didn't give is left off; a quoted name ("Odd Name"."Status") keeps its case.
+ */
 export function typeLabel(type, maxLength, precision, scale) {
   const t = String(type).toLowerCase();
   const len = (n) => (n === -1 ? 'max' : n);
-  if (t === 'nvarchar' || t === 'nchar') return `${t}(${maxLength === -1 ? 'max' : maxLength / 2})`;
-  if (t === 'varchar' || t === 'char' || t === 'varbinary' || t === 'binary') return `${t}(${len(maxLength)})`;
-  if (t === 'decimal' || t === 'numeric') return `${t}(${precision},${scale})`;
+  if (t.includes('"')) return String(type);
+  if ((t === 'nvarchar' || t === 'nchar') && maxLength != null) return `${t}(${maxLength === -1 ? 'max' : maxLength / 2})`;
+  if ((t === 'varchar' || t === 'char' || t === 'varbinary' || t === 'binary') && maxLength != null) return `${t}(${len(maxLength)})`;
+  if ((t === 'decimal' || t === 'numeric') && precision != null) return `${t}(${precision},${scale ?? 0})`;
   if ((t === 'datetime2' || t === 'time' || t === 'datetimeoffset') && scale !== 7 && scale != null) return `${t}(${scale})`;
   return t;
 }
@@ -78,7 +83,10 @@ export function buildSchema(sets) {
   }));
   // Grouped by schema whatever order the catalog came in (the Explorer draws one header per schema).
   objects.sort((x, y) => (x.schema === y.schema ? 0 : x.schema.toLowerCase() < y.schema.toLowerCase() ? -1 : 1));
-  const byKey = new Map(objects.map((o) => [`${o.schema}.${o.name}`, o]));
+  // A table or view and a routine can share a name on Postgres (an extension's view and function),
+  // so columns go to the one and parameters to the other.
+  const byKey = new Map(objects.filter((o) => !o.params).map((o) => [`${o.schema}.${o.name}`, o]));
+  const routines = new Map(objects.filter((o) => o.params).map((o) => [`${o.schema}.${o.name}`, o]));
   for (const c of rowsOf(colSet)) {
     byKey.get(`${c.schema}.${c.object}`)?.columns.push({
       name: c.name,
@@ -91,7 +99,7 @@ export function buildSchema(sets) {
     });
   }
   for (const p of rowsOf(paramSet)) {
-    byKey.get(`${p.schema}.${p.object}`)?.params?.push({ name: p.name, type: typeLabel(p.type, p.max_length, p.precision, p.scale), output: Boolean(p.is_output) });
+    routines.get(`${p.schema}.${p.object}`)?.params.push({ name: p.name, type: typeLabel(p.type, p.max_length, p.precision, p.scale), output: Boolean(p.is_output) });
   }
   const foreignKeys = new Map();
   for (const f of rowsOf(fkSet)) {
@@ -109,14 +117,16 @@ export function buildSchema(sets) {
 
 const unquote = (part) => part.trim().replace(/^\[(.*)\]$/, '$1').replace(/]]/g, ']').replace(/^"(.*)"$/, '$1');
 
-/** Finds "schema.name", "[schema].[name]" or a bare name (dbo first) in the schema. */
+/** Finds "schema.name", "[schema].[name]" or a bare name (dbo first, tables and views before routines) in the schema. */
 export function findObject(schema, text) {
   if (!schema || !text) return null;
   const parts = text.split('.').map(unquote);
   const name = parts.at(-1).toLowerCase();
   const owner = parts.length > 1 ? parts.at(-2).toLowerCase() : null;
   const hits = schema.objects.filter((o) => o.name.toLowerCase() === name && (!owner || o.schema.toLowerCase() === owner));
-  return hits.find((o) => o.schema === 'dbo') ?? hits[0] ?? null;
+  // A table or view before a routine of the same name (Postgres lets them share one).
+  const rank = (o) => (o.schema === 'dbo' ? 0 : 2) + (o.params ? 1 : 0);
+  return hits.reduce((best, o) => (best && rank(best) <= rank(o) ? best : o), null);
 }
 
 /** "dbo.Clubs" for completion and titles. */
@@ -156,7 +166,9 @@ const fullName = (o) => `${bracket(o.schema)}.${bracket(o.name)}`;
  * reads them) adds what the catalog query leaves out, and the comment goes: { defaults, computed,
  * identity } (Maps by lower-case column name: { name, definition }, the text after the column's
  * name, an IDENTITY(…) clause), `primaryKey` ({ name, columns, type }), `constraints` (lines of
- * UNIQUE and CHECK) and `after` (statements after the foreign keys: the indexes).
+ * UNIQUE and CHECK), `foreignKeys` (a Map by lower-case name: the server's own wording of one, from
+ * FOREIGN KEY on, with its ON DELETE and the like) and `after` (statements after the foreign keys:
+ * the indexes).
  */
 export function createTableScript(o, schema, { quote = bracket, identity = 'IDENTITY(1,1)', extras = null } = {}) {
   const fullName = (x) => `${quote(x.schema)}.${quote(x.name)}`;
@@ -178,6 +190,8 @@ export function createTableScript(o, schema, { quote = bracket, identity = 'IDEN
     .map((f) => {
       const [toSchema, ...toName] = f.to.split('.');
       const list = (i) => f.columns.map((c) => quote(c[i])).join(', ');
+      const worded = extras?.foreignKeys?.get(f.name.toLowerCase());
+      if (worded) return `ALTER TABLE ${fullName(o)} ADD CONSTRAINT ${quote(f.name)}\n  ${worded};`;
       return `ALTER TABLE ${fullName(o)} ADD CONSTRAINT ${quote(f.name)}\n  FOREIGN KEY (${list(0)}) REFERENCES ${quote(toSchema)}.${quote(toName.join('.'))} (${list(1)});`;
     });
   return [

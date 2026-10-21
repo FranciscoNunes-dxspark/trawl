@@ -312,15 +312,31 @@ export function classify(statement, { dialect = 'sqlserver' } = {}) {
 /**
  * A read-only count of the rows an UPDATE or DELETE would change: SELECT COUNT_BIG(*) over its FROM
  * and WHERE. Null when that can't be worked out safely (TOP, OUTPUT, WHERE CURRENT OF, a CTE, or more
- * than one statement).
+ * than one statement). On Postgres (`dialect`), UPDATE … FROM and DELETE … USING name the tables
+ * they read besides the one they change, which the count reads too, and RETURNING is left off.
  */
-export function countQuery(sql) {
-  const src = normalise(sql).trim().replace(/;\s*$/, '');
+export function countQuery(sql, { dialect } = {}) {
+  let src = normalise(sql).trim().replace(/;\s*$/, '');
   if (splitStatements(src).length !== 1) return null;
-  const toks = tokens(src);
+  let toks = tokens(src);
   const first = toks[0]?.w;
   if ((first !== 'UPDATE' && first !== 'DELETE') || toks.some((t) => ['TOP', 'OUTPUT', 'CURRENT', 'OPENQUERY'].includes(t.w))) return null;
   const at = (word, after = 0) => toks.find((t) => t.w === word && t.depth === 0 && t.at >= after)?.at ?? -1;
+  if (dialect === 'postgres') {
+    const returning = at('RETURNING');
+    if (returning >= 0) (src = src.slice(0, returning).trim()), (toks = tokens(src));
+    const set = first === 'UPDATE' ? at('SET') : -1;
+    const from = first === 'UPDATE' ? (set >= 0 ? at('FROM', set) : -1) : at('FROM');
+    const using = first === 'DELETE' ? at('USING') : -1;
+    if (first === 'UPDATE' && set >= 0 && from >= 0) {
+      const target = src.slice(toks[0].at + 6, set).trim().replace(/^ONLY\s+/i, '');
+      return `SELECT COUNT_BIG(*) FROM ${target}, ${src.slice(from + 4).trim()};`;
+    }
+    if (using >= 0) {
+      const target = src.slice(from >= 0 ? from + 4 : toks[0].at + 6, using).trim().replace(/^ONLY\s+/i, '');
+      return `SELECT COUNT_BIG(*) FROM ${target}, ${src.slice(using + 5).trim()};`;
+    }
+  }
   let body;
   if (first === 'DELETE') {
     // DELETE [FROM] t [WHERE …], or DELETE t FROM t JOIN … WHERE … (a second FROM says what's read).

@@ -52,12 +52,25 @@ function grid(w, h, ox, oy, bx, by) {
   );
 }
 
-// The dark square: 40 half-pixels across, the 32 × 20 fish centred with a margin.
-const SQUARE = grid(40, 40, 4, 10, 23, 29);
+// Glim and its badge as one drawing, laid out as in all the family's logos: the badge's
+// bottom-right corner PAD half-pixels right of and below the fish's, so the badges sit alike.
+const BW = SQL[0].length;
+const BH = SQL.length;
+const PAD = 4;
+const GW = px2[0].length + PAD;
+const GH = px2.length + PAD;
+/** The fish and badge centred on a size × size square; wider than the square, the badge keeps to its edge. */
+function square(size) {
+  const ox = Math.max(0, Math.floor((size - GW) / 2));
+  const oy = Math.max(0, Math.floor((size - GH) / 2));
+  return grid(size, size, ox, oy, Math.min(ox + GW, size) - BW, Math.min(oy + GH, size) - BH);
+}
+// The dark square: 40 half-pixels across.
+const SQUARE = square(40);
 // The transparent icon: 32 across, so the usual icon sizes (16, 32, 48 … 256) keep Glim's pixels whole.
-const ICON = grid(32, 32, 0, 6, 17, 23);
+const ICON = square(32);
 // The fish cropped to the drawing, with room right and below for the badge to sit on.
-const CROPPED = grid(px2[0].length + 4, px2.length + 6, 0, 0, px2[0].length - 11, px2.length - 3);
+const CROPPED = grid(GW, GH, 0, 0, GW - BW, GH - BH);
 
 /** A grid drawn at `scale` image pixels per cell, as RGBA rows; `inside(x, y)` limits it to a shape. */
 function paint(cells, scale, bg = [0, 0, 0, 0], inside = () => true) {

@@ -2,7 +2,7 @@
 // A connection's `ai` level decides: 'off' (nothing), 'schema' (table and column names, SQL text
 // and error messages) or 'results' (rows too). Rows are data that leaves this machine, so a
 // connection only sends them once you've said so.
-import { execFile } from 'node:child_process';
+import { runClaude } from './claude-cli.js';
 import { objectName } from './schema.js';
 import { wrap } from './text.js';
 
@@ -125,21 +125,16 @@ export function whyConsoleText({ message, sql, note, width = 100 }) {
  * Asks the claude CLI, signed in as you, with no tools and none of your MCP servers: it can
  * only answer. The prompt goes in on stdin, so its length and contents never reach a shell.
  */
-export function askClaude({ prompt, system = ASK_SYSTEM, signal, execImpl = execFile }) {
+export async function askClaude({ prompt, system = ASK_SYSTEM, signal, execImpl }) {
   const args = ['-p', '--output-format', 'json', '--tools', '', '--strict-mcp-config', '--no-session-persistence', '--system-prompt', system];
-  return new Promise((resolve, reject) => {
-    const child = execImpl('claude', args, { signal, windowsHide: true, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
-      if (err?.name === 'AbortError') return reject(Object.assign(new Error('Cancelled'), { cancelled: true }));
-      if (err?.code === 'ENOENT') return reject(new Error('The Claude Code CLI (claude) is not installed or not on the PATH. Get it from https://claude.com/claude-code'));
-      let out;
-      try {
-        out = JSON.parse(stdout);
-      } catch {
-        return reject(new Error((stderr || stdout || err?.message || 'claude gave no answer').trim().split('\n').slice(-3).join('\n')));
-      }
-      if (out.is_error) return reject(new Error(String(out.result ?? 'Claude could not answer.').trim()));
-      resolve(String(out.result ?? ''));
-    });
-    child.stdin?.end(prompt);
-  });
+  // The prompt goes on stdin (the family's shared claude-cli.js), out of reach of argv's limits.
+  const r = await runClaude(args, { input: prompt, signal, execImpl });
+  let out;
+  try {
+    out = JSON.parse(r.stdout);
+  } catch {
+    throw new Error(r.message);
+  }
+  if (out.is_error) throw new Error(String(out.result ?? 'Claude could not answer.').trim());
+  return String(out.result ?? '');
 }

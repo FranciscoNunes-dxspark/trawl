@@ -1,7 +1,7 @@
 // Checks the files shared between the sibling apps (Trawl, Splice) for drift: they were copied
 // between the apps and should stay the same apart from the apps' names.
-//   node scripts/shared-check.js ../splice           which shared files differ, and by how much
-//   node scripts/shared-check.js ../splice --diff    and the lines that differ
+//   node scripts/shared-check.js ../sibling         which shared files differ, and by how much
+//   node scripts/shared-check.js ../sibling --diff  and the lines that differ
 // The apps' own names (Trawl, Splice, TRAWL_VERSION…) don't count as differences. Exits with 1 when
 // a file differs, so it can run in CI; files only one app has are listed, not counted. This file is
 // one of them, so it imports nothing from the app.
@@ -10,7 +10,7 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 // The files copied between the apps (CLAUDE.md lists them), as paths from each checkout's root.
-export const SHARED = ['src/text.js', 'src/ui/parts.jsx', 'src/ui/hooks.js', 'src/mouse.js', 'src/selection.js', 'src/clipboard.js', 'src/jsx-hooks.js', 'src/register.js', 'src/version.js', 'src/help-layout.js', 'src/ui/HelpView.jsx', 'src/keymap.js', 'src/usercommands.js', 'src/palette.js', 'src/ui/Palette.jsx', 'scripts/build.js', 'scripts/shared-check.js'];
+export const SHARED = ['src/text.js', 'src/ui/parts.jsx', 'src/ui/hooks.js', 'src/mouse.js', 'src/selection.js', 'src/clipboard.js', 'src/jsx-hooks.js', 'src/register.js', 'src/version.js', 'src/help-layout.js', 'src/ui/HelpView.jsx', 'src/keymap.js', 'src/usercommands.js', 'src/palette.js', 'src/ui/Palette.jsx', 'src/run.js', 'src/credentials.js', 'src/claude-cli.js', 'scripts/build.js', 'scripts/shared-check.js'];
 
 /**
  * The lines of `a` and `b` as a diff: [' ', line] kept, ['-', line] only in a, ['+', line] only in b.
@@ -47,7 +47,9 @@ export function appName(dir) {
 /** The text with each app's name, in any case (Trawl, trawl, TRAWL_VERSION), made the same, and line endings LF. */
 export function normalise(text, names) {
   let out = String(text).replace(/\r\n?/g, '\n');
-  for (const name of names) out = out.replace(new RegExp(`\\b${name}(?=\\b|_)`, 'gi'), (m) => (m === m.toUpperCase() ? 'APP' : m[0] === m[0].toUpperCase() ? 'App' : 'app'));
+  // A method call (`parts.splice(`) is the array's, never the app's name.
+  const method = (m, at, text) => text[at - 1] === '.' && text[at + m.length] === '(';
+  for (const name of names) out = out.replace(new RegExp(`\\b${name}(?=\\b|_)`, 'gi'), (m, at, text) => (method(m, at, text) ? m : m === m.toUpperCase() ? 'APP' : m[0] === m[0].toUpperCase() ? 'App' : 'app'));
   return out;
 }
 
@@ -83,7 +85,7 @@ export function diffLines(diff, around = 2) {
 function main(args) {
   const there = args.find((a) => !a.startsWith('--'));
   if (!there) {
-    console.error('Usage: node scripts/shared-check.js <path to a sibling checkout, e.g. ../splice> [--diff]');
+    console.error('Usage: node scripts/shared-check.js <path to a sibling checkout, e.g. ../sibling> [--diff]');
     process.exit(2);
   }
   if (!existsSync(there)) {

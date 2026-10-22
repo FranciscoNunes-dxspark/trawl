@@ -20,6 +20,8 @@ function run(file, args, { input, signal } = {}) {
       err.stdout = stdout;
       reject(err);
     });
+    // A tool that exits without reading its input (a keyring that refuses at once) closes the pipe first.
+    child.stdin.on('error', () => {});
     child.stdin.end(input ?? '');
   });
 }
@@ -74,6 +76,8 @@ function windows(op, name, { user, password, signal } = {}) {
       if (op === 'get' && err.code === 3) return resolve(null);
       reject(new Error(`${STORE_NAME} refused it: ${(stderr || err.message).trim().split('\n')[0]}`));
     });
+    // A tool that exits without reading its input (a keyring that refuses at once) closes the pipe first.
+    child.stdin.on('error', () => {});
     child.stdin.end(op === 'set' ? b64(password) : '');
   });
 }

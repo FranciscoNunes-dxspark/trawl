@@ -64,6 +64,28 @@ export function removeConsole(file) {
   }
 }
 
+// The rows kept to undo writes (undo.js), a file per connection under undo/: they're data, so they
+// never go into config.json, and only this user can read them. The name is the connection's,
+// escaped so any name makes a file name Windows takes too (the prefix keeps clear of CON and NUL).
+const undoPath = (conn) => join(configDir(), 'undo', `conn-${encodeURIComponent(conn).replace(/[!'()*.]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`)}.json`);
+
+/** The copies kept for a connection, newest first. */
+export function loadUndo(conn) {
+  try {
+    const list = JSON.parse(readFileSync(undoPath(conn), 'utf8'));
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Keeps a connection's copies (big numbers as text). Throws when it can't, so the run can say so. */
+export function saveUndo(conn, list) {
+  const path = undoPath(conn);
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  writeFileSync(path, JSON.stringify(list, (_, v) => (typeof v === 'bigint' ? String(v) : v)), { mode: 0o600 });
+}
+
 /**
  * What Claude ran through `trawl mcp` (a separate process, so it appends to its own file rather
  * than racing the app for config.json), newest first.

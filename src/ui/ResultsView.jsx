@@ -1,7 +1,9 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Box, useInput } from 'ink';
 import * as a from '../actions.js';
-import { canEdit, changesText, editText, tsvText } from '../edit.js';
+import { dialectOf } from '../dialects.js';
+import { changesText, editRefusal, editText, emptyIsDefault, hasChanges, nextNewRow, noChanges, tsvText } from '../edit.js';
+import { cutOff, moreQuery } from '../more.js';
 import { formatValue, isNumericType, viewOrder } from '../sql.js';
 import { theme } from '../theme.js';
 import { clean, fit, stringWidth } from '../text.js';
@@ -41,8 +43,8 @@ function editingSegments({ text, cursor }, w) {
 
 /**
  * The grid of the result set on screen. When it is the rows of one table with its key (see
- * edit.js), cells can be edited and rows deleted: changes are staged (`changes`, kept by App) and
- * `s` saves them all at once.
+ * edit.js), cells can be edited, rows deleted and new ones added (at the end, numbered after the
+ * rows read): changes are staged (`changes`, kept by App) and `s` saves them all at once.
  */
 export function ResultsView({ results, changes, setIndex, view, ctx, width, height, top = 0, active }) {
   const sets = results?.sets ?? [];
@@ -52,10 +54,11 @@ export function ResultsView({ results, changes, setIndex, view, ctx, width, heig
   const sort = view?.sort ?? null;
   const filter = view?.filter ?? '';
   const order = useMemo(() => (set ? viewOrder(set, { sort, filter }) : []), [set, sort, filter]);
-  // The sorted column keeps room for its ▲ or ▼.
+  // The sorted column keeps room for its ▲ or ▼, and with new rows every column has room for DEFAULT.
+  const adding = Boolean(changes?.inserts?.length && results?.edit?.table) && setIndex === 0;
   const widths = useMemo(
-    () => (set ? columnWidths(set).map((w, i) => (sort?.col === i ? Math.max(w, Math.min(MAX_COL, stringWidth(set.columns[i].name) + 2)) : w)) : []),
-    [set, sort],
+    () => (set ? columnWidths(set).map((w, i) => Math.max(sort?.col === i ? Math.max(w, Math.min(MAX_COL, stringWidth(set.columns[i].name) + 2)) : w, adding ? 7 : 0)) : []),
+    [set, sort, adding],
   );
   const [colOffset, setColOffset] = useState(0);
   const [col, setColState] = useState(0);
@@ -75,14 +78,25 @@ export function ResultsView({ results, changes, setIndex, view, ctx, width, heig
   const editable = Boolean(edit?.table) && setIndex === 0;
   // A cell cursor where a cell means something: rows that can be edited, or whose foreign keys F follows.
   const hasCursor = editable || (Boolean(results?.source?.table) && setIndex === 0);
-  const pending = changes ?? { cells: new Map(), deletes: new Set() };
+  const pending = changes ?? noChanges();
+  // New rows come after the rows read, whatever the sort or filter.
+  const inserts = editable ? (pending.inserts ?? []) : [];
+  const shownRows = inserts.length ? [...order, ...inserts] : order;
+  const isNew = (row) => Boolean(set) && row >= set.rows.length;
   // Under the grid: unsaved changes first, then the error and the server's messages.
   const notes = (results?.messages ?? []).map((text) => ({ text, color: theme.dim }));
-  if (results?.error) notes.unshift({ text: results.error, color: theme.del });
-  if (editable && (pending.cells.size || pending.deletes.size)) notes.unshift({ text: `${changesText(pending)} not saved · s saves · u undoes the row · U all`, color: theme.warn });
+  // An error of several lines (Postgres's DETAIL and HINT, SQL Server's messages) is a note per line.
+  if (results?.error) notes.unshift(...String(results.error).split('\n').map((text) => ({ text, color: theme.del })));
+  // Cut off at the row limit: say so, and how to fetch more when the query can run again.
+  if (cutOff(results, setIndex)) {
+    const step = ctx.config.limit;
+    const more = !moreQuery(results, setIndex, { step, dialect: dialectOf(ctx.session).kind }).reason;
+    notes.unshift({ text: `The row limit stopped it at ${set.rows.length.toLocaleString('en')} rows${more ? ` · m fetches ${step.toLocaleString('en')} more` : ''}`, color: theme.warn });
+  }
+  if (editable && hasChanges(pending)) notes.unshift({ text: `${changesText(pending)} not saved · s saves · u undoes the row · U all`, color: theme.warn });
   const noteLines = Math.min(3, notes.length);
   const gridH = Math.max(1, innerH - 2 - noteLines);
-  const nav = useListNav(order.length, gridH, { resetKey: `${results?.id}:${setIndex}:${sort?.col}:${sort?.dir}:${filter}` });
+  const nav = useListNav(shownRows.length, gridH, { resetKey: `${results?.id}:${setIndex}:${sort?.col}:${sort?.dir}:${filter}` });
   // Editable rows have a cell cursor; other results just scroll, the first column shown standing in for it.
   const cur = Math.min(hasCursor ? col : colOffset, Math.max(0, widths.length - 1));
 
@@ -121,23 +135,49 @@ export function ResultsView({ results, changes, setIndex, view, ctx, width, heig
     if (!edit?.table) return `These rows can't be edited: ${edit?.reason ?? 'nothing to edit'}.`;
     const tc = edit.columns.get(c);
     if (!tc) return `${set.columns[c].name} isn't a column of ${edit.table.name} as it is (an expression, or renamed), so it can't be edited.`;
-    if (!canEdit(tc)) return `${tc.name} is ${tc.identity ? 'an identity column' : tc.type}; the server sets it.`;
-    return null;
+    return editRefusal(tc, edit.kind);
   };
   const stage = (row, c, value) =>
     ctx.setChanges((ch) => {
       const cells = new Map(ch.cells);
-      // Typing back what was there undoes the change.
-      if (value === (set.rows[row][c] == null ? null : editText(set.rows[row][c]))) cells.delete(key(row, c));
+      // Typing back what was there undoes the change; in a new row, nothing typed (where a value
+      // can't be empty text) leaves it to the default.
+      if (isNew(row) ? value === '' && emptyIsDefault(edit.columns.get(c).type, edit.kind) : value === (set.rows[row][c] == null ? null : editText(set.rows[row][c]))) cells.delete(key(row, c));
       else cells.set(key(row, c), value);
       return { ...ch, cells };
     });
+  const dropNewRow = (row) =>
+    ctx.setChanges((ch) => ({ ...ch, cells: new Map([...ch.cells].filter(([at]) => !at.startsWith(`${row}:`))), inserts: (ch.inserts ?? []).filter((r) => r !== row) }));
+  // a: a blank row at the end, every cell DEFAULT until it's given a value, the cursor on it.
+  const addRow = () => {
+    if (!edit?.table) return ctx.note(`Rows can't be added here: ${edit?.reason ?? 'nothing to edit'}.`, 'error');
+    ctx.setChanges((ch) => ({ ...ch, inserts: [...(ch.inserts ?? []), nextNewRow(set, ch)] }));
+    nav.setIndex(order.length + ctx.changes.inserts.length - 1);
+    const first = set.columns.findIndex((_, i) => !cellRefusal(i));
+    if (first >= 0) setCol(first);
+  };
+  // The cell as the viewer (v, /cell) shows it: what's staged there, if anything, else what was read.
+  const cellAt = (row, c) => {
+    if (!set || row == null || !set.columns[c]) return null;
+    const staged = editable && ctx.changes.cells.has(key(row, c));
+    const added = isNew(row);
+    return {
+      set,
+      row,
+      col: c,
+      width,
+      label: added ? `new row ${(ctx.changes.inserts ?? []).indexOf(row) + 1}` : `row ${row + 1} of ${set.rows.length}`,
+      value: staged ? ctx.changes.cells.get(key(row, c)) : set.rows[row]?.[c],
+      edited: staged,
+      isDefault: added && !staged,
+    };
+  };
   const startEditing = (row, c) => {
     const refusal = cellRefusal(c);
     if (refusal) return ctx.note(refusal, 'error');
     if (pending.deletes.has(row)) return ctx.note('This row is marked for deletion; u keeps it.', 'error');
     const staged = pending.cells.get(key(row, c));
-    const text = staged !== undefined ? (staged ?? '') : editText(set.rows[row][c]);
+    const text = staged !== undefined ? (staged ?? '') : isNew(row) ? '' : editText(set.rows[row][c]);
     setEditing({ row, col: c, text, cursor: text.length });
     ctx.setCellEditing(true);
   };
@@ -181,13 +221,14 @@ export function ResultsView({ results, changes, setIndex, view, ctx, width, heig
     if (ctx.cellHasKeys()) return cellKeys(input, k);
     if (!ctx.viewHasKeys()) return;
     if (nav.handle(input, k)) return;
-    const row = order[nav.current()];
+    const row = shownRows[nav.current()];
     const cur = Math.min(hasCursor ? colRef.current : colOffset, Math.max(0, widths.length - 1));
     if (k.leftArrow || input === 'h') setCol(cur - 1);
     else if (k.rightArrow || input === 'l') setCol(cur + 1);
     else if (input === '[' && setIndex > 0) (ctx.setResultIndex(setIndex - 1), setColOffset(0), setCol(0));
     else if (input === ']' && setIndex < sets.length - 1) (ctx.setResultIndex(setIndex + 1), setColOffset(0), setCol(0));
     else if (input === 'x') ctx.prefill('/export ');
+    else if (input === 'm') a.moreRows(ctx);
     else if (input === 'o' && set) ctx.sortResults(cur);
     else if (input === 'p') a.pinResult(ctx);
     else if (input === 'c') a.compareResults(ctx);
@@ -195,8 +236,12 @@ export function ResultsView({ results, changes, setIndex, view, ctx, width, heig
     else if (input === 'y' && set?.rows[row]) ctx.copy(editText(set.rows[row][cur]), `${set.columns[cur].name}'s value`);
     else if (input === 'Y' && set?.rows[row]) ctx.copy(tsvText(set, { header: false, rows: [set.rows[row]] }), `row ${row + 1}, tab-separated`);
     else if (k.return && set?.rows[row]) ctx.showText(`Row ${row + 1} of ${set.rows.length}`, recordText(set, set.rows[row]));
-    else if (!set?.rows[row]) return;
-    else if (input === 'F') a.followKey(ctx, { row, col: cur });
+    else if (input === 'a' && set) addRow();
+    else if (row == null || !set) return;
+    else if (input === 'v') {
+      ctx.cellOnScreen = cellAt(row, cur);
+      a.showCell(ctx);
+    } else if (input === 'F') isNew(row) ? ctx.note('This row is new: it refers to nothing until it is saved.', 'error') : a.followKey(ctx, { row, col: cur });
     else if (input === 'e' || input === 'i') startEditing(row, cur);
     else if (input === 'n') {
       const refusal = cellRefusal(cur);
@@ -206,14 +251,16 @@ export function ResultsView({ results, changes, setIndex, view, ctx, width, heig
       stage(row, cur, null);
     } else if (input === 'd') {
       if (!edit?.table) return ctx.note(`These rows can't be deleted from here: ${edit?.reason ?? 'nothing to edit'}.`, 'error');
+      if (isNew(row)) return dropNewRow(row);
       ctx.setChanges((ch) => {
         const deletes = new Set(ch.deletes);
         deletes.has(row) ? deletes.delete(row) : deletes.add(row);
         return { ...ch, deletes };
       });
     } else if (input === 'u') {
-      ctx.setChanges((ch) => ({ cells: new Map([...ch.cells].filter(([at]) => !at.startsWith(`${row}:`))), deletes: new Set([...ch.deletes].filter((r) => r !== row)) }));
-    } else if (input === 'U') ctx.setChanges({ cells: new Map(), deletes: new Set() });
+      if (isNew(row)) return dropNewRow(row);
+      ctx.setChanges((ch) => ({ ...ch, cells: new Map([...ch.cells].filter(([at]) => !at.startsWith(`${row}:`))), deletes: new Set([...ch.deletes].filter((r) => r !== row)) }));
+    } else if (input === 'U') ctx.setChanges(noChanges());
     else if (input === 's') a.saveEdits(ctx);
   };
   useInput(keys, { isActive: active });
@@ -224,7 +271,16 @@ export function ResultsView({ results, changes, setIndex, view, ctx, width, heig
   useEffect(() => {
     if (!active) leaveCell.current();
   }, [active]);
-  useEffect(() => () => leaveCell.current(), []);
+  // The cell under the cursor, for /cell; forgotten when the grid goes, unless another grid has taken over.
+  const shownCell = useRef(null);
+  shownCell.current = ctx.cellOnScreen = cellAt(shownRows[nav.index], cur);
+  useEffect(
+    () => () => {
+      leaveCell.current();
+      if (ctx.cellOnScreen === shownCell.current) ctx.cellOnScreen = null;
+    },
+    [],
+  );
 
   const scrollCols = (n) => {
     colFree.current = hasCursor;
@@ -280,9 +336,13 @@ export function ResultsView({ results, changes, setIndex, view, ctx, width, heig
     const at = `${r}:${i}`;
     const staged = pending.cells.has(at);
     const value = staged ? pending.cells.get(at) : v;
-    const here = hasCursor && active && r === order[nav.index] && i === cur;
+    const here = hasCursor && active && r === shownRows[nav.index] && i === cur;
+    // A new row's cells are DEFAULT until given a value.
+    if (isNew(r)) return staged ? { text: value === null ? 'NULL' : value, color: theme.ok, bold: true, italic: value === null, underline: here } : { text: 'DEFAULT', color: theme.dim, italic: true, underline: here };
     if (deleted) return { text: formatValue(v), color: theme.del, strike: true, underline: here };
     if (staged) return { text: value === null ? 'NULL' : value, color: theme.warn, bold: true, italic: value === null, underline: here };
+    // A /watch picks out what changed since its run before.
+    if (setIndex === 0 && results.changed?.has(at)) return { text: formatValue(v), color: theme.ink, bg: theme.info, italic: v == null, underline: here };
     return { text: formatValue(v), color: v == null ? theme.nul : numeric[i] ? theme.number : undefined, italic: v == null, underline: here };
   };
 
@@ -292,10 +352,13 @@ export function ResultsView({ results, changes, setIndex, view, ctx, width, heig
   else if (set) parts.push(`${set.rows.length}${set.truncated ? '+' : ''} row${set.rows.length === 1 ? '' : 's'}`);
   if (set && sort) parts.push(`by ${set.columns[sort.col]?.name} ${sort.dir > 0 ? '▲' : '▼'}`);
   if (set && widths.length > shown.length) parts.push(`cols ${firstCol + 1}–${firstCol + shown.length}/${widths.length}`);
+  if (results.changed?.size && setIndex === 0) parts.push(`${results.changed.size} changed`);
   if (results.ms != null) parts.push(`${results.ms} ms`);
+  // First, so a long statement can't push it out of sight.
+  const title = results.watch ? `watching every ${results.watch.every}s · run ${results.watch.run} · ${results.title}` : results.title;
 
   return (
-    <Panel title={results.title} hint={parts.join(' · ')} width={width} height={height} focused={active}>
+    <Panel title={title} hint={parts.join(' · ')} width={width} height={height} focused={active}>
       {set ? (
         <Box flexDirection="column">
           <Row
@@ -304,11 +367,11 @@ export function ResultsView({ results, changes, setIndex, view, ctx, width, heig
             segments={[{ text: '  ' }, ...cells(set.columns.map((c, i) => (sort?.col === i ? `${c.name} ${sort.dir > 0 ? '▲' : '▼'}` : c.name)), (i, v) => ({ text: v, bold: true, color: theme.accent, underline: hasCursor && i === cur }))]}
           />
           <Row pointer={false} width={innerW} segments={[{ text: '  ' }, ...shown.flatMap(({ w }, k) => [...(k ? [{ text: '─┼─', color: theme.border }] : []), { text: '─'.repeat(w), color: theme.border }])]} />
-          {order.slice(nav.offset, nav.offset + gridH).map((r, k) => (
-            <Row key={r} width={innerW} selected={nav.offset + k === nav.index} focused={active} segments={cells(set.rows[r], rowCells(set.rows[r], r))} />
+          {shownRows.slice(nav.offset, nav.offset + gridH).map((r, k) => (
+            <Row key={r} width={innerW} selected={nav.offset + k === nav.index} focused={active} segments={cells(set.rows[r] ?? [], rowCells(set.rows[r], r))} />
           ))}
-          {order.length === 0 ? <Row pointer={false} width={innerW} segments={[{ text: set.rows.length ? `  (no rows contain "${filter}": /filter with nothing shows them all)` : '  (no rows)', color: theme.dim }]} /> : null}
-          {Array.from({ length: Math.max(0, gridH - Math.max(1, order.length - nav.offset)) }, (_, k) => (
+          {shownRows.length === 0 ? <Row pointer={false} width={innerW} segments={[{ text: set.rows.length ? `  (no rows contain "${filter}": /filter with nothing shows them all)` : '  (no rows)', color: theme.dim }]} /> : null}
+          {Array.from({ length: Math.max(0, gridH - Math.max(1, shownRows.length - nav.offset)) }, (_, k) => (
             <Row key={`pad${k}`} pointer={false} width={innerW} segments={[]} />
           ))}
         </Box>

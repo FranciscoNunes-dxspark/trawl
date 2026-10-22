@@ -1,11 +1,17 @@
 // An in-memory stand-in for SQL Server, for `trawl --demo` and the tests. It has no SQL engine:
-// it knows the catalog query, SELECT [TOP (n)] … FROM a table, simple SELECT lists, USE,
-// transactions, WAITFOR DELAY (to try cancelling), RAISERROR/THROW, a few other sessions for the
-// Activity view (and KILL for them), and counts what writes would
-// touch without changing anything.
-import { DbError, runScript } from './db.js';
+// it knows the catalog queries (/grep's, /uses's and /script-all's too), a Flyway history for
+// /migrations, SELECT [TOP (n)] … FROM a table, simple SELECT lists, USE,
+// the copies of rows kept for undo and the locks an open transaction holds,
+// transactions, WAITFOR DELAY (to try cancelling), RAISERROR/THROW, SHOWPLAN_TEXT and STATISTICS
+// PROFILE (made-up plans of a table scan), a few other sessions for the
+// Activity view (and KILL for them), SQL Agent jobs (and sp_start_job), the top queries, /health's
+// findings, /sizes and a couple of deadlocks, and counts what writes would touch without changing
+// anything. `drop()` plays the server closing the connection, for the tests.
+import { DbError, ended, runScript } from './db.js';
 import { findObject } from './schema.js';
+import { mentions } from './references.js';
 import { splitStatements, withoutLeadingComments } from './sql.js';
+import { flywayChecksum } from './migrations.js';
 
 const col = (name, type, extra = {}) => ({ name, type, nullable: false, identity: false, pk: false, ...extra });
 const d = (s) => new Date(`${s}T00:00:00Z`);
@@ -48,11 +54,21 @@ function makeDatabase(club, { extraLanguage = true, drifted = false } = {}) {
         columns: [],
         rows: [],
         params: [col('@Season', 'int'), col('@DryRun', 'bit')],
-        definition: 'CREATE PROCEDURE dbo.usp_RecalculateTable @Season int, @DryRun bit = 0 AS\nBEGIN\n  SET NOCOUNT ON;\n  -- The demo has no body to run.\n  SELECT @Season AS Season, @DryRun AS DryRun;\nEND',
+        definition: 'CREATE PROCEDURE dbo.usp_RecalculateTable @Season int, @DryRun bit = 0 AS\nBEGIN\n  SET NOCOUNT ON;\n  -- The demo has no engine to run this.\n  SELECT c.Name, COUNT(*) AS Played\n  FROM dbo.Matches m\n  JOIN dbo.Clubs c ON c.Id IN (m.HomeId, m.AwayId)\n  WHERE YEAR(m.PlayedOn) = @Season\n  GROUP BY c.Name;\nEND',
       },
       ...(drifted
         ? [{ schema: 'dbo', name: 'Stadiums', kind: 'table', columns: [col('Id', 'int', { pk: true, identity: true }), col('ClubId', 'int'), col('Name', 'nvarchar(100)'), col('Capacity', 'int', { nullable: true })], rows: [[1, 1, 'Estádio Norte', 30000]] }]
         : []),
+    ],
+    // Triggers aren't in the Explorer; /grep and /uses find them.
+    triggers: [
+      {
+        schema: 'dbo',
+        name: 'trg_Players_Goals',
+        kind: 'trigger',
+        parent: 'Players',
+        definition: "CREATE TRIGGER dbo.trg_Players_Goals ON dbo.Players AFTER UPDATE AS\nBEGIN\n  SET NOCOUNT ON;\n  IF UPDATE(Goals) PRINT 'Goals changed: the top scorers are different now.';\nEND",
+      },
     ],
     // [name, table, column, referenced table, its column]
     foreignKeys: [
@@ -62,12 +78,21 @@ function makeDatabase(club, { extraLanguage = true, drifted = false } = {}) {
       ...(drifted ? [['FK_Stadiums_Clubs', 'Stadiums', 'ClubId', 'Clubs', 'Id']] : []),
     ],
     // [name, table, unique, columns], the indexes besides the primary keys.
-    indexes: [['IX_Players_ClubId', 'Players', false, '[ClubId]'], ...(drifted ? [['IX_Matches_PlayedOn', 'Matches', false, '[PlayedOn] DESC']] : [])],
+    // IX_Players_ClubId_Position overlaps IX_Players_ClubId, and nothing reads IX_Players_Name (/health).
+    indexes: [
+      ['IX_Players_ClubId', 'Players', false, '[ClubId]'],
+      ['IX_Players_ClubId_Position', 'Players', false, '[ClubId], [Position]'],
+      ['IX_Players_Name', 'Players', false, '[Name]'],
+      ...(drifted ? [['IX_Matches_PlayedOn', 'Matches', false, '[PlayedOn] DESC']] : []),
+    ],
+    // [table, column, constraint, definition] and [table, constraint, definition], for /script-all.
+    defaults: [['Clubs', 'Active', 'DF_Clubs_Active', '((1))'], ['Players', 'Goals', 'DF_Players_Goals', '((0))']],
+    checks: [['Players', 'CK_Players_Goals', '([Goals]>=(0))']],
   };
 }
 
 // ClubB is one language short, so comparing the two shows a difference.
-const DATABASES = { master: { tables: [], foreignKeys: [], indexes: [] }, ClubA: makeDatabase('Club A'), ClubB: makeDatabase('Club B', { extraLanguage: false, drifted: true }) };
+const DATABASES = { master: { tables: [], triggers: [], foreignKeys: [], indexes: [], defaults: [], checks: [] }, ClubA: makeDatabase('Club A'), ClubB: makeDatabase('Club B', { extraLanguage: false, drifted: true }) };
 
 const set = (names, rows, types = []) => ({ columns: names.map((name, i) => ({ name, type: types[i] ?? '' })), rows, truncated: false });
 
@@ -79,13 +104,13 @@ function schemaSets(dbName) {
     set(['name'], Object.keys(DATABASES).map((n) => [n])),
     set(['schema', 'name', 'type', 'rows'], db.tables.map((t) => [t.schema, t.name, kinds[t.kind], t.kind === 'table' ? t.rows.length : null])),
     set(
-      ['schema', 'object', 'name', 'type', 'max_length', 'precision', 'scale', 'is_nullable', 'is_identity', 'pk'],
+      ['schema', 'object', 'name', 'type', 'max_length', 'precision', 'scale', 'is_nullable', 'is_identity', 'is_computed', 'pk'],
       db.tables.flatMap((t) =>
         t.columns.map((c) => {
           // Split "nvarchar(100)" back into the catalog's pieces so typeLabel() rebuilds it.
           const [, type, size] = c.type.match(/^(\w+)(?:\((\w+)\))?/);
           const max = size === 'max' ? -1 : type.startsWith('n') && size ? Number(size) * 2 : Number(size ?? 0);
-          return [t.schema, t.name, c.name, type, max, 0, 0, c.nullable, c.identity, c.pk ? 1 : 0];
+          return [t.schema, t.name, c.name, type, max, 0, 0, c.nullable, c.identity, Boolean(c.computed), c.pk ? 1 : 0];
         }),
       ),
     ),
@@ -98,6 +123,106 @@ function schemaSets(dbName) {
       db.tables.flatMap((t) => (t.params ?? []).map((p) => [t.schema, t.name, p.name, p.type, 0, 0, 0, false])),
     ),
   ];
+}
+
+// What /script-all reads besides the catalog (scriptall.js EXTRAS_SQL): defaults, checks, the
+// indexes with each table's primary key, identity seeds and computed columns (none).
+function scriptExtrasSets(dbName) {
+  const db = DATABASES[dbName];
+  const quoted = (cols) => cols.map((c) => `[${c}]`).join(', ');
+  const tables = db.tables.filter((t) => t.kind === 'table');
+  const keys = tables.filter((t) => t.columns.some((c) => c.pk)).map((t) => [t.schema, t.name, `PK_${t.name}`, true, false, true, 'CLUSTERED', null, quoted(t.columns.filter((c) => c.pk).map((c) => c.name)), null, null]);
+  const indexes = db.indexes.map(([name, table, unique, columns]) => ['dbo', table, name, unique, false, false, 'NONCLUSTERED', null, columns, null, null]);
+  return [
+    set(['schema', 'object', 'column', 'name', 'definition'], db.defaults.map(([table, column, name, def]) => ['dbo', table, column, name, def])),
+    set(['schema', 'object', 'name', 'definition'], db.checks.map(([table, name, def]) => ['dbo', table, name, def])),
+    set(['schema', 'object', 'name', 'is_unique', 'is_unique_constraint', 'is_primary_key', 'type_desc', 'filter_definition', 'columns', 'included', 'definition'], [...keys, ...indexes].sort((x, y) => `${x[0]}.${x[1]}.${x[2]}`.localeCompare(`${y[0]}.${y[1]}.${y[2]}`))),
+    set(['schema', 'object', 'column', 'seed', 'increment'], tables.flatMap((t) => t.columns.filter((c) => c.identity).map((c) => [t.schema, t.name, c.name, '1', '1']))),
+    set(['schema', 'object', 'column', 'definition', 'is_persisted'], []),
+  ];
+}
+
+// ClubA's migrations, as Flyway ran them: /migrations compares a folder with this history. A test
+// (or you) writes these files, changes one, adds a V3, and sees which is which.
+export const DEMO_MIGRATIONS = [
+  { script: 'V1__Create_clubs.sql', version: '1', description: 'Create clubs', text: 'CREATE TABLE dbo.Clubs (\n  Id int IDENTITY(1,1) PRIMARY KEY,\n  Name nvarchar(100) NOT NULL\n);\n' },
+  { script: 'V2__Add_players.sql', version: '2', description: 'Add players', text: 'CREATE TABLE dbo.Players (\n  Id int IDENTITY(1,1) PRIMARY KEY,\n  ClubId int NOT NULL REFERENCES dbo.Clubs (Id),\n  Name nvarchar(100) NOT NULL\n);\n' },
+];
+const FLYWAY_COLUMNS = ['installed_rank', 'version', 'description', 'type', 'script', 'checksum', 'installed_by', 'installed_on', 'execution_time', 'success'];
+
+// Each session's own history tables, so what a test records stays in its session.
+function demoHistory() {
+  const rows = DEMO_MIGRATIONS.map((m, i) => [i + 1, m.version, m.description, 'SQL', m.script, flywayChecksum(m.text), 'demo', d(`2026-01-1${i}`), 30 + i, true]);
+  return { ClubA: [{ schema: 'dbo', table: 'flyway_schema_history', columns: FLYWAY_COLUMNS, rows }], ClubB: [] };
+}
+
+// One value of an INSERT's VALUES list: a literal, NULL, or a function the demo makes up.
+function insertValue(text) {
+  const v = text.trim();
+  if (/^NULL$/i.test(v)) return null;
+  if (/^-?\d+(\.\d+)?$/.test(v)) return Number(v);
+  if (/^N?'(.*)'$/s.test(v)) return v.replace(/^N?'(.*)'$/s, '$1').replace(/''/g, "'");
+  if (/^(TRUE|FALSE)$/i.test(v)) return /^TRUE$/i.test(v);
+  if (/^(GETDATE|SYSDATETIME|NOW)\(\)$/i.test(v)) return new Date();
+  return 'demo';
+}
+
+// /migrations (migrations.js): the probe, reading a history, making Trawl's own, and recording a run.
+function migrationBatch(session, batch, state) {
+  const tables = (session.history[session.database] ??= []);
+  const find = (name) => tables.find((t) => `[${t.schema}].[${t.table}]`.toLowerCase() === name.toLowerCase());
+  if (batch.includes('-- trawl:migrations-probe')) return void state.sets.push(set(['schema', 'name'], tables.map((t) => [t.schema, t.table])));
+  if (batch.includes('-- trawl:migrations-history')) {
+    const name = batch.match(/FROM\s+(\[[^\]]+\]\.\[[^\]]+\])/i)?.[1] ?? '';
+    const t = find(name);
+    if (!t) throw new DbError(`Invalid object name '${name.replace(/[[\]]/g, '')}'.`, { number: 208 });
+    return void state.sets.push(set(t.columns, t.rows.map((r) => [...r])));
+  }
+  if (/^\s*BEGIN\s+TRAN/i.test(batch)) session.tran++;
+  if (batch.includes('-- trawl:migrations-create')) {
+    const [, schema, table] = batch.match(/CREATE TABLE \[([^\]]+)\]\.\[([^\]]+)\]/i);
+    if (!tables.some((t) => t.table === table)) tables.push({ schema, table, columns: ['script', 'checksum', 'applied_by', 'applied_on', 'execution_ms'], rows: [] });
+    return void state.messages.push('Commands completed successfully.');
+  }
+  const m = batch.match(/INSERT INTO\s+(\S+)\s*\(([^)]*)\)\s*VALUES\s*\(([\s\S]*)\);?\s*$/i);
+  const t = m && find(m[1]);
+  if (!t) throw new DbError(`Invalid object name '${(m?.[1] ?? '').replace(/[[\]]/g, '')}'.`, { number: 208 });
+  const cols = m[2].split(',').map((c) => c.trim().replace(/^\[|\]$/g, '').toLowerCase());
+  const values = splitList(m[3]).map(insertValue);
+  t.rows.push(t.columns.map((c) => {
+    const i = cols.indexOf(c.toLowerCase());
+    return i >= 0 ? values[i] : /^(installed_on|applied_on|applied)$/i.test(c) ? new Date() : c === 'installed_by' || c === 'applied_by' ? 'demo' : null;
+  }));
+  state.messages.push('1 row affected');
+}
+
+const TYPES = { table: 'U', view: 'V', procedure: 'P', function: 'FN', trigger: 'TR' };
+const modulesOf = (db) => [...db.tables.filter((t) => t.definition), ...db.triggers];
+const literal = (sql, re) => sql.match(re)?.[1].replace(/''/g, "'") ?? '';
+
+// /grep (dialects.js grepSql): the definitions with the text in them, ignoring case, as LIKE would.
+function grepSet(dbName, sql) {
+  const text = literal(sql, /LIKE LOWER\(N'%((?:[^']|'')*)%'\)/).replace(/!(.)/g, '$1');
+  const rows = modulesOf(DATABASES[dbName])
+    .filter((m) => m.definition.toLowerCase().includes(text))
+    .map((m) => [m.schema, m.name, TYPES[m.kind], m.parent ?? null, m.definition]);
+  return set(['schema', 'name', 'type', 'parent', 'definition'], rows);
+}
+
+// /uses (dialects.js usesSql): what SQL Server's sys.sql_expression_dependencies would say, worked out
+// from the names in the demo's definitions, and the triggers on the object.
+function usesSet(dbName, sql) {
+  const db = DATABASES[dbName];
+  const [schema, name] = [literal(sql, /@schema sysname = N'((?:[^']|'')*)'/), literal(sql, /@name sysname = N'((?:[^']|'')*)'/)];
+  const all = [...db.tables, ...db.triggers];
+  const self = all.find((o) => o.schema === schema && o.name.toLowerCase() === name.toLowerCase());
+  const rows = [];
+  if (self) {
+    for (const m of modulesOf(db)) if (m !== self && mentions(m.definition, self.name)) rows.push(['used_by', m.schema, m.name, TYPES[m.kind], m.parent ?? null, null]);
+    for (const o of all) if (o !== self && self.definition && mentions(self.definition, o.name)) rows.push(['uses', o.schema, o.name, TYPES[o.kind], null, null]);
+    for (const t of db.triggers) if (t.parent === self.name) rows.push(['trigger', t.schema, t.name, 'TR', t.parent, null]);
+  }
+  return set(['rel', 'schema', 'name', 'type', 'parent', 'database'], rows);
 }
 
 // Other sessions on the demo's "server", for the Activity view: a blocking chain (an idle session
@@ -122,6 +247,317 @@ function activitySets(session) {
     .sort((x, y) => x.id - y.id)
     .map((s) => [s.id, s.login, s.host, s.program, s.database, s.status, s.command || null, s.wait, s.waitMs, s.elapsedMs, s.blockedBy, s.openTran, s.cpuMs, s.reads, s.started, s.sql]);
   return [set(['me'], [[session.spid]]), set(ACTIVITY_COLUMNS, rows)];
+}
+
+// SET STATISTICS PROFILE's columns: after each statement, a set with a row for the statement and
+// one per operator under it, the rows each produced beside the optimizer's estimate.
+const PROFILE_COLUMNS = ['Rows', 'Executes', 'StmtText', 'StmtId', 'NodeId', 'Parent', 'PhysicalOp', 'LogicalOp', 'Argument', 'DefinedValues', 'EstimateRows', 'EstimateIO', 'EstimateCPU', 'AvgRowSize', 'TotalSubtreeCost', 'OutputList', 'Warnings', 'Type', 'Parallel', 'EstimateExecutions'];
+
+// `nodes`: the statement first ({ text, rows, est, type }), then its operators, each under the one before.
+function profileSet(nodes) {
+  const rows = nodes.map((n, i) => {
+    const op = i ? n.text.match(/^\s*\|--([^(]+)/)?.[1].trim() ?? null : null;
+    return [n.rows, 1, n.text, 1, i + 1, i, op, op, null, null, n.est, i ? 0.003 : null, i ? 0.0001 : null, i ? 40 : null, 0.0033, null, null, i ? 'PLAN_ROW' : n.type, false, i ? 1 : null];
+  });
+  return set(PROFILE_COLUMNS, rows, ['BigInt', 'BigInt', 'nvarchar']);
+}
+
+// SQL Agent jobs on the demo's "server": a failed backup, a nightly load that went well, one running
+// now, and a disabled one that never ran. The Agent's dates are yyyymmdd and hhmmss numbers on the
+// server's clock, which for the demo is UTC. Each session has its own copy, as with `others`.
+const agentDate = (d) => d.getUTCFullYear() * 10000 + (d.getUTCMonth() + 1) * 100 + d.getUTCDate();
+const agentClock = (d) => d.getUTCHours() * 10000 + d.getUTCMinutes() * 100 + d.getUTCSeconds();
+const agentSpan = (s) => Math.floor(s / 3600) * 10000 + (Math.floor(s / 60) % 60) * 100 + (s % 60);
+
+function fakeJobs() {
+  const ago = (s) => new Date(Date.now() - s * 1000);
+  const at = (days, h) => {
+    const d = new Date();
+    d.setUTCDate(d.getUTCDate() + days);
+    d.setUTCHours(h, 0, 0, 0);
+    return d;
+  };
+  // A run: when it started (seconds ago), how it ended, how long it took, and its steps' outcomes.
+  const run = (startedAgo, status, seconds, steps, message) => ({ at: ago(startedAgo), status, seconds, steps, message });
+  const ok = (id, name, seconds) => ({ id, name, status: 1, seconds, message: 'Executed as user: NT SERVICE\\SQLSERVERAGENT. The step succeeded.' });
+  const copyFailed = { id: 2, name: 'Copy to share', status: 0, seconds: 4, message: "Cannot open backup device '\\\\nas01\\backups\\ClubA.bak'. Operating system error 53(The network path was not found.). [SQLSTATE 42000] (Error 3201). The step failed." };
+  const backupFailed = 'The job failed.  The Job was invoked by Schedule 3 (Nightly backup).  The last step to run was step 2 (Copy to share).';
+  return [
+    {
+      id: '1f0c6a52-7d1e-4b8a-9c3e-2a5b7d9e0f11',
+      name: 'Backup ClubA',
+      category: 'Database Maintenance',
+      description: 'Full backup of ClubA, copied to the NAS.',
+      enabled: true,
+      next: at(0, 23),
+      runs: [run(86_400 * 2 + 10_800, 1, 131, [ok(1, 'Back up', 121), ok(2, 'Copy to share', 10)]), run(86_400 + 10_800, 1, 127, [ok(1, 'Back up', 118), ok(2, 'Copy to share', 9)]), run(10_800, 0, 125, [ok(1, 'Back up', 121), copyFailed], backupFailed)],
+    },
+    {
+      id: '2a4e8c10-3b5d-4f6a-8b7c-9d0e1f2a3b22',
+      name: 'Nightly load',
+      category: 'Data Collector',
+      description: 'Loads the day’s matches from the league feed.',
+      enabled: true,
+      next: at(1, 2),
+      runs: [run(86_400 + 18_000, 1, 702, [ok(1, 'Fetch feed', 95), ok(2, 'Merge matches', 607)]), run(18_000, 1, 751, [ok(1, 'Fetch feed', 101), ok(2, 'Merge matches', 650)])],
+    },
+    {
+      id: '3b5f9d21-4c6e-4a7b-9c8d-0e1f2a3b4c33',
+      name: 'Stats refresh',
+      category: 'Database Maintenance',
+      description: 'No description available.',
+      enabled: true,
+      next: at(1, 6),
+      running: ago(250),
+      runs: [run(86_400 + 250, 1, 190, [ok(1, 'Update statistics', 190)])],
+    },
+    { id: '4c6a0e32-5d7f-4b8c-8d9e-1f2a3b4c5d44', name: 'Old archive', category: '[Uncategorized (Local)]', description: 'Moves seasons before 2010 to the archive.', enabled: false, next: null, runs: [] },
+  ];
+}
+
+const JOB_COLUMNS = ['job_id', 'name', 'enabled', 'category', 'description', 'running_since', 'current_step', 'server_now', 'last_status', 'last_run_date', 'last_run_time', 'last_duration', 'last_message', 'next_run_date', 'next_run_time'];
+
+function jobSets(session) {
+  const now = new Date();
+  const rows = [...session.jobs]
+    .sort((x, y) => x.name.localeCompare(y.name))
+    .map((j) => {
+      const last = j.runs.at(-1);
+      return [j.id.toUpperCase(), j.name, j.enabled ? 1 : 0, j.category, j.description, j.running ?? null, j.running ? 1 : null, now, last ? last.status : null, last ? agentDate(last.at) : null, last ? agentClock(last.at) : null, last ? agentSpan(last.seconds) : null, last ? (last.message ?? 'The job succeeded.') : null, j.next ? agentDate(j.next) : null, j.next ? agentClock(j.next) : null];
+    });
+  return [set(JOB_COLUMNS, rows)];
+}
+
+// Each run's steps, then its step-0 row, numbered as sysjobhistory's instance_id; newest first.
+function jobHistorySets(session, id) {
+  const job = session.jobs.find((j) => j.id === id.toLowerCase());
+  const rows = [];
+  let n = 1;
+  for (const r of job?.runs ?? []) {
+    let t = r.at.getTime();
+    for (const st of r.steps) {
+      const d = new Date(t);
+      rows.push([n++, st.id, st.name, st.status, agentDate(d), agentClock(d), agentSpan(st.seconds), st.message]);
+      t += st.seconds * 1000;
+    }
+    rows.push([n++, 0, '(Job outcome)', r.status, agentDate(r.at), agentClock(r.at), agentSpan(r.seconds), r.message ?? 'The job succeeded.  The Job was invoked by Schedule 1.  The last step to run was step 1.']);
+  }
+  return [set(['instance_id', 'step_id', 'step_name', 'run_status', 'run_date', 'run_time', 'run_duration', 'message'], rows.reverse())];
+}
+
+// What the demo's statistics say cost the most, the same in every database: ClubA has Query Store on
+// and ClubB has it off (so it falls back to the plan cache); the demo on Postgres hasn't
+// pg_stat_statements. [id, text, plans, executions, total ms, cpu ms, logical reads]
+const TOP_QUERIES = [
+  ['17', 'SELECT * FROM dbo.Matches m CROSS JOIN dbo.Players p', 1, 12, 151_000, 140_300, 12_400_000],
+  ['4', 'SELECT c.Name, COUNT(*) AS Players\nFROM dbo.Clubs c JOIN dbo.Players p ON p.ClubId = c.Id\nGROUP BY c.Name', 2, 4_210, 98_400, 61_200, 1_904_220],
+  ['9', '(@p0 int)UPDATE dbo.Players SET Goals = Goals + 1 WHERE Id = @p0', 1, 88_000, 44_100, 9_800, 264_000],
+  ['2', 'SELECT TOP (10) * FROM dbo.Matches ORDER BY PlayedOn DESC', 1, 230_500, 23_050, 20_100, 691_500],
+];
+
+function topProbeSets(session) {
+  const kind = session.conn.kind;
+  const store = kind === 'postgres' ? null : kind === 'mysql' ? 1 : session.database === 'ClubB' ? 'OFF' : 'READ_WRITE';
+  return [set(['database_name', 'query_store'], [[session.database, store]])];
+}
+
+function topQuerySets(batch) {
+  const source = batch.match(/'(\w+)' AS source/)?.[1] ?? 'query_store';
+  const last = new Date(Date.now() - 90_000);
+  const rows = TOP_QUERIES.map(([id, text, plans, runs, total, cpu, reads]) => [source, source === 'dm_exec_query_stats' ? `0x${Number(id).toString(16).padStart(16, '0').toUpperCase()}` : id, text, plans, runs, total, cpu, reads, last]);
+  return [set(['source', 'query_id', 'sql_text', 'plans', 'executions', 'total_ms', 'cpu_ms', 'logical_reads', 'last_run'], rows)];
+}
+
+// /health (health.js): each read answered with what a club's database might have gone through. The
+// indexes and foreign keys are the demo's own; usage, statistics and the rest are made up, the same
+// in every database with tables. The columns are the same on every kind, as health.js's reads give.
+function healthSets(session, id) {
+  const db = DATABASES[session.database];
+  const kind = session.conn.kind ?? 'sqlserver';
+  const ago = (days) => new Date(Date.now() - days * 86_400_000);
+  const tables = db.tables.filter((t) => t.kind === 'table');
+  const any = tables.length > 0;
+  if (id === 'restart') return [set(['started', 'stats_reset'], [[ago(3), kind === 'postgres' ? ago(20) : null]])];
+  if (id === 'missing') {
+    const rows = any ? [['dbo', 'Matches', '[PlayedOn]', null, '[HomeId], [AwayId]', 1204, 3, 91.6, 5400.2], ['dbo', 'Players', '[Position]', null, '[Name]', 310, 0, 42.1, 120.5]] : [];
+    return [set(['schema', 'table', 'equality_columns', 'inequality_columns', 'included_columns', 'seeks', 'scans', 'avg_impact', 'impact'], rows)];
+  }
+  if (id === 'unused') return [set(['schema', 'table', 'index', 'seeks', 'scans', 'lookups', 'updates', 'size_kb'], any ? [['dbo', 'Players', 'IX_Players_Name', 0, 0, 0, 1840, 16]] : [])];
+  if (id === 'indexes') {
+    const rows = [];
+    // The primary keys are clustered, except Translations', which leaves it a heap.
+    for (const t of tables) {
+      const heap = t.name === 'Translations' && kind === 'sqlserver';
+      t.columns.filter((c) => c.pk).forEach((c, i) => rows.push([t.schema, t.name, `PK_${t.name}`, true, true, true, !heap && kind !== 'postgres', false, i + 1, c.name, false, false]));
+    }
+    for (const [name, table, unique, columns] of db.indexes) {
+      [...columns.matchAll(/\[([^\]]+)\]( DESC)?/g)].forEach((m, i) => rows.push(['dbo', table, name, false, unique, false, false, false, i + 1, m[1], false, Boolean(m[2])]));
+    }
+    return [set(['schema', 'table', 'index', 'is_primary_key', 'is_unique', 'is_constraint', 'is_clustered', 'filtered', 'key_ordinal', 'column', 'is_included', 'is_descending'], rows)];
+  }
+  if (id === 'foreignKeys') return [set(['schema', 'table', 'name', 'ordinal', 'column', 'ref_schema', 'ref_table'], db.foreignKeys.map(([name, table, column, refTable]) => ['dbo', table, name, 1, column, 'dbo', refTable]))];
+  if (id === 'nopk') {
+    const t = tables.find((x) => x.name === 'Translations');
+    return [set(['schema', 'table', 'has_pk', 'is_heap', 'rows'], t && kind === 'sqlserver' ? [[t.schema, t.name, true, true, t.rows.length]] : [])];
+  }
+  if (id === 'untrusted') {
+    const rows = any ? [['dbo', 'Matches', 'FK_Matches_Away', 'FOREIGN KEY', false, true], ...(kind === 'sqlserver' ? [['dbo', 'Players', 'CK_Players_Goals', 'CHECK', true, true]] : [])] : [];
+    return [set(['schema', 'table', 'name', 'kind', 'is_disabled', 'is_not_trusted'], rows)];
+  }
+  if (id === 'stats') {
+    // Players' goals change all the time and nothing updated its statistics; Matches' were just updated.
+    const pg = kind === 'postgres';
+    const rows = any ? [['dbo', 'Players', pg ? null : '_WA_Sys_00000006_Goals', ago(45), 45, 12, 88_000, pg ? 4000 : null], ['dbo', 'Matches', pg ? null : 'PK_Matches', ago(2), 2, 8, 900, pg ? 3 : null]] : [];
+    return [set(['schema', 'table', 'name', 'last_updated', 'days_since', 'rows', 'modifications', 'dead_rows'], rows)];
+  }
+  if (id === 'triggers') return [set(['schema', 'table', 'name'], db.triggers.map((t) => [t.schema, t.parent, t.name]))];
+  return [];
+}
+
+// /sizes: rows as the demo has them, and space as if each row took a couple of hundred bytes.
+function sizeSets(session) {
+  const db = DATABASES[session.database];
+  const kind = session.conn.kind ?? 'sqlserver';
+  const extra = { postgres: 'toast_kb', mysql: 'free_kb' }[kind] ?? 'unused_kb';
+  const rows = db.tables
+    .filter((t) => t.kind === 'table')
+    .map((t) => {
+      const data = 8 * (1 + Math.ceil((t.rows.length * 220) / 8060)) + 64 * t.rows.length;
+      const index = 16 * (1 + db.indexes.filter(([, table]) => table === t.name).length);
+      const more = kind === 'sqlserver' ? 24 : 8;
+      return [t.schema, t.name, t.rows.length, data + index + more, data, index, more];
+    })
+    .sort((x, y) => y[3] - x[3]);
+  return [set(['schema', 'table', 'rows', 'reserved_kb', 'data_kb', 'index_kb', extra], rows)];
+}
+
+// Two deadlocks on the demo's "server", as system_health records them: the nightly load and the
+// website taking the same two keys in the opposite order, and an older one between the report reader
+// and an update, over a page.
+function deadlockXml({ at, victim, processes, resources, event = 'xml_deadlock_report', database = null }) {
+  const esc = (v) => String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const proc = (p) =>
+    `<process id="${p.id}" taskpriority="0" logused="${p.logused ?? 0}" waitresource="${esc(p.waitresource)}" waittime="${p.waittime}" ownerId="${p.owner}" transactionname="user_transaction" lockMode="${p.mode}" schedulerid="2" kpid="5236" status="suspended" spid="${p.spid}" sbid="0" ecid="0" priority="0" trancount="${p.trancount}" clientapp="${esc(p.app)}" hostname="${p.host}" hostpid="4120" loginname="${p.login}" isolationlevel="${p.isolation} (2)" xactid="${p.owner}" currentdb="7" currentdbname="ClubA" lockTimeout="4294967295">` +
+    `<executionStack><frame procname="${p.proc ?? 'adhoc'}" line="2" stmtstart="58" stmtend="200" sqlhandle="0x02000000d1c3a71e">${esc(p.statement ?? 'unknown')}    </frame></executionStack><inputbuf>\n${esc(p.batch)}   </inputbuf></process>`;
+  const res = (r) => `<${r.tag} ${Object.entries(r.attrs).map(([k, v]) => `${k}="${esc(v)}"`).join(' ')}><owner-list><owner id="${r.owner[0]}" mode="${r.owner[1]}"/></owner-list><waiter-list><waiter id="${r.waiter[0]}" mode="${r.waiter[1]}" requestType="wait"/></waiter-list></${r.tag}>`;
+  return `<event name="${event}" package="sqlserver" timestamp="${at.toISOString()}">${database ? `<data name="database_name"><type name="unicode_string" package="package0"/><value>${database}</value></data>` : ''}<data name="xml_report"><type name="xml" package="package0"/><value><deadlock><victim-list><victimProcess id="${victim}"/></victim-list><process-list>${processes.map(proc).join('')}</process-list><resource-list>${resources.map(res).join('')}</resource-list></deadlock></value></data></event>`;
+}
+
+function fakeDeadlocks({ event, database } = {}) {
+  const ago = (h) => new Date(Date.now() - h * 3_600_000);
+  return [
+    deadlockXml({
+      event,
+      database,
+      at: ago(5),
+      victim: 'process27f8a4e8c8',
+      processes: [
+        { id: 'process27f8a4e8c8', spid: 61, login: 'etl', host: 'BATCH02', app: 'Nightly load', mode: 'U', waittime: 2513, owner: 845361, trancount: 2, isolation: 'read committed', waitresource: 'KEY: 7:72057594043695104 (8194443284a0)', statement: 'UPDATE dbo.Clubs SET Active = 1 WHERE Id = 1;', batch: 'BEGIN TRAN;\nUPDATE dbo.Players SET Goals = Goals + 1 WHERE ClubId = 1;\nUPDATE dbo.Clubs SET Active = 1 WHERE Id = 1;' },
+        { id: 'process27f8b0d468', spid: 53, login: 'app_user', host: 'WEB01', app: 'Club website', mode: 'U', waittime: 2601, owner: 845298, trancount: 2, isolation: 'read committed', waitresource: 'KEY: 7:72057594043760640 (98ec012aa510)', batch: 'BEGIN TRAN;\nUPDATE dbo.Clubs SET Active = 0 WHERE Id = 1;\nUPDATE dbo.Players SET Shirt = NULL WHERE ClubId = 1;' },
+      ],
+      resources: [
+        { tag: 'keylock', attrs: { hobtid: '72057594043695104', dbid: 7, objectname: 'ClubA.dbo.Clubs', indexname: 'PK_Clubs', id: 'lock27f1e5c380', mode: 'X' }, owner: ['process27f8b0d468', 'X'], waiter: ['process27f8a4e8c8', 'U'] },
+        { tag: 'keylock', attrs: { hobtid: '72057594043760640', dbid: 7, objectname: 'ClubA.dbo.Players', indexname: 'IX_Players_ClubId', id: 'lock27f1e5d100', mode: 'X' }, owner: ['process27f8a4e8c8', 'X'], waiter: ['process27f8b0d468', 'U'] },
+      ],
+    }),
+    deadlockXml({
+      event,
+      database,
+      at: ago(30),
+      victim: 'process27f9c11088',
+      processes: [
+        { id: 'process27f9c11088', spid: 64, login: 'report_reader', host: 'BI01', app: 'Power BI', mode: 'S', waittime: 1210, owner: 701122, trancount: 0, isolation: 'repeatable read', waitresource: 'PAGE: 7:1:312', statement: 'SELECT c.Name, COUNT(*) AS Players FROM dbo.Clubs c JOIN dbo.Players p ON p.ClubId = c.Id GROUP BY c.Name;', batch: 'SELECT c.Name, COUNT(*) AS Players FROM dbo.Clubs c JOIN dbo.Players p ON p.ClubId = c.Id GROUP BY c.Name;' },
+        { id: 'process27f9d2a4e8', spid: 72, login: 'app_user', host: 'WEB02', app: 'Club website', mode: 'IX', waittime: 1188, owner: 701130, trancount: 1, isolation: 'read committed', proc: 'ClubA.dbo.usp_RecalculateTable', waitresource: 'OBJECT: 7:901578250:0', batch: 'EXEC dbo.usp_RecalculateTable @Season = 2026;' },
+      ],
+      resources: [
+        { tag: 'pagelock', attrs: { fileid: 1, pageid: 312, dbid: 7, subresource: 'FULL', objectname: 'ClubA.dbo.Players', id: 'lock27f2a01200', mode: 'IX', associatedObjectId: '72057594043760640' }, owner: ['process27f9d2a4e8', 'IX'], waiter: ['process27f9c11088', 'S'] },
+        { tag: 'objectlock', attrs: { lockPartition: 0, objid: 901578250, subresource: 'FULL', dbid: 7, objectname: 'ClubA.dbo.Clubs', id: 'lock27f2a01880', mode: 'S', associatedObjectId: 901578250 }, owner: ['process27f9c11088', 'S'], waiter: ['process27f9d2a4e8', 'IX'] },
+      ],
+    }),
+  ];
+}
+
+// MySQL's monitor, with its latest deadlock: two updates of the same two players, in opposite orders.
+const INNODB_STATUS = `
+=====================================
+2026-10-21 09:12:44 0x7f3c2c1f9700 INNODB MONITOR OUTPUT
+=====================================
+------------------------
+LATEST DETECTED DEADLOCK
+------------------------
+2026-10-21 08:57:13 0x7f3c2c0b7700
+*** (1) TRANSACTION:
+TRANSACTION 421937, ACTIVE 6 sec starting index read
+mysql tables in use 1, locked 1
+LOCK WAIT 3 lock struct(s), heap size 1128, 2 row lock(s)
+MySQL thread id 18, OS thread handle 139895, query id 2201 10.0.0.12 app_user updating
+UPDATE Players SET Goals = Goals + 1 WHERE Id = 2
+*** (1) HOLDS THE LOCK(S):
+RECORD LOCKS space id 12 page no 4 n bits 80 index PRIMARY of table \`ClubA\`.\`Players\` trx id 421937 lock_mode X locks rec but not gap
+Record lock, heap no 2 PHYSICAL RECORD: n_fields 8; compact format; info bits 0
+*** (1) WAITING FOR THIS LOCK TO BE GRANTED:
+RECORD LOCKS space id 12 page no 4 n bits 80 index PRIMARY of table \`ClubA\`.\`Players\` trx id 421937 lock_mode X locks rec but not gap waiting
+Record lock, heap no 3 PHYSICAL RECORD: n_fields 8; compact format; info bits 0
+*** (2) TRANSACTION:
+TRANSACTION 421938, ACTIVE 4 sec starting index read
+mysql tables in use 1, locked 1
+LOCK WAIT 3 lock struct(s), heap size 1128, 2 row lock(s)
+MySQL thread id 21, OS thread handle 139871, query id 2207 10.0.0.31 etl updating
+UPDATE Players SET Shirt = NULL WHERE Id = 1
+*** (2) HOLDS THE LOCK(S):
+RECORD LOCKS space id 12 page no 4 n bits 80 index PRIMARY of table \`ClubA\`.\`Players\` trx id 421938 lock_mode X locks rec but not gap
+Record lock, heap no 3 PHYSICAL RECORD: n_fields 8; compact format; info bits 0
+*** (2) WAITING FOR THIS LOCK TO BE GRANTED:
+RECORD LOCKS space id 12 page no 4 n bits 80 index PRIMARY of table \`ClubA\`.\`Players\` trx id 421938 lock_mode X locks rec but not gap waiting
+Record lock, heap no 2 PHYSICAL RECORD: n_fields 8; compact format; info bits 0
+*** WE ROLL BACK TRANSACTION (2)
+------------
+TRANSACTIONS
+------------
+Trx id counter 421950
+`;
+
+function deadlockSets(session, batch) {
+  const kind = session.conn.kind ?? 'sqlserver';
+  const ago = (days) => new Date(Date.now() - days * 86_400_000);
+  if (batch.startsWith('-- trawl:deadlocks-probe')) {
+    if (kind === 'postgres') return [set(['database_name', 'deadlocks', 'stats_reset'], [[session.database, 3, ago(20)]])];
+    return [set(['engine_edition', 'database_name'], [[session.conn.engineEdition ?? 3, session.database]])];
+  }
+  if (batch.startsWith('-- trawl:deadlocks innodb')) return [set(['Type', 'Name', 'Status'], [['InnoDB', '', INNODB_STATUS]])];
+  // A login without VIEW SERVER STATE can read neither of system_health's targets.
+  if (session.conn.noServerState) throw new DbError("VIEW SERVER STATE permission was denied on object 'server', database 'master'.", { number: 300, line: 1 });
+  const azure = batch.startsWith('-- trawl:deadlocks azure');
+  const events = fakeDeadlocks(azure ? { event: 'database_xml_deadlock_report', database: 'ClubA' } : {});
+  return [set(['event_xml'], events.map((x) => [x]))];
+}
+
+// The copy of the rows a write is about to change (undo.js): the table's rows its WHERE picks, when
+// it's only `column = value` or `column IN (…)` joined by AND; any other WHERE picks the first row,
+// as the demo's counts take any WHERE to match one.
+function snapshotSet(db, batch) {
+  const m = batch.match(/SELECT\s+(?:TOP\s*\((\d+)\)\s*)?\*\s+FROM\s+((?:\[[^\]]+\]|[\w#]+)(?:\.(?:\[[^\]]+\]|\w+))?)(?:\s+(?:AS\s+)?(?!WHERE\b|LIMIT\b)\w+)?([\s\S]*?)(?:\s+LIMIT\s+(\d+))?;?\s*$/i);
+  const t = m && findObject({ objects: db.tables }, m[2]);
+  if (!t) throw new DbError(`Invalid object name '${m?.[2] ?? '?'}'.`, { number: 208 });
+  const where = m[3].trim().replace(/^WHERE\s+/i, '');
+  const value = (v) => (/^N?'/.test(v) ? v.replace(/^N?'(.*)'$/s, '$1').replace(/''/g, "'") : Number(v));
+  const conds = where
+    ? where.split(/\s+AND\s+/i).map((c) => {
+        const x = c.trim().match(/^(?:\w+\.)?\[?(\w+)\]?\s*(?:=\s*(N?'(?:[^']|'')*'|-?\d+)|IN\s*\(([^)]*)\))$/i);
+        const at = x ? t.columns.findIndex((col) => col.name.toLowerCase() === x[1].toLowerCase()) : -1;
+        return at < 0 ? null : { at, values: x[2] ? [value(x[2])] : x[3].split(',').map((v) => value(v.trim())) };
+      })
+    : [];
+  const rows = conds.includes(null) ? t.rows.slice(0, 1) : t.rows.filter((r) => conds.every((c) => c.values.some((v) => v === r[c.at] || String(v) === String(r[c.at]))));
+  return set(t.columns.map((c) => c.name), rows.slice(0, Number(m[1] ?? m[4] ?? rows.length)), t.columns.map((c) => c.type));
+}
+
+// What the demo session's open transaction holds (sys.dm_tran_locks, grouped): the locks a write
+// to the table it last wrote would take, and nothing with no transaction open.
+function lockSet(session) {
+  const t = session.wrote;
+  const rows = session.tran && t ? [[`${t.schema}.${t.name}`, 'KEY', 'X', 3], [`${t.schema}.${t.name}`, 'OBJECT', 'IX', 1], [`${t.schema}.${t.name}`, 'PAGE', 'IX', 1]] : [];
+  return set(['object_name', 'resource_type', 'request_mode', 'locks'], rows);
 }
 
 const sleep = (ms, signal) =>
@@ -161,7 +597,7 @@ function splitList(s) {
   return out.map((x) => x.trim()).filter(Boolean);
 }
 
-async function runStatement(session, text, line, state, { signal, limit = 500 }) {
+async function runStatement(session, text, line, state, { signal, limit = 500, drain = false }) {
   const db = DATABASES[session.database];
   const fail = (message, number) => {
     throw new DbError(message, { number, line });
@@ -185,6 +621,8 @@ async function runStatement(session, text, line, state, { signal, limit = 500 })
     return;
   }
   if ((m = s.match(/^SET\s+STATISTICS\s+(IO|TIME)\s+(ON|OFF)$/i))) return void (session[`stats${m[1].toUpperCase()}`] = m[2].toUpperCase() === 'ON');
+  if ((m = s.match(/^SET\s+STATISTICS\s+PROFILE\s+(ON|OFF)$/i))) return void (session.profile = m[1].toUpperCase() === 'ON');
+  const index = (t) => `[${session.database}].[${t.schema}].[${t.name}].[PK_${t.name}]`;
   if ((m = s.match(/^KILL\s+(\d+)$/i))) {
     const id = Number(m[1]);
     if (id === session.spid) fail('Cannot use KILL to kill your own process.', 6104);
@@ -194,6 +632,14 @@ async function runStatement(session, text, line, state, { signal, limit = 500 })
     // Whatever it was blocking can go on.
     for (const o of session.others) if (o.blockedBy === id) Object.assign(o, { blockedBy: 0, status: 'running', wait: null, waitMs: null });
     return;
+  }
+  if ((m = s.match(/^EXEC(?:UTE)?\s+msdb\.dbo\.sp_start_job\s+@job_name\s*=\s*N?'((?:[^']|'')*)'$/i))) {
+    const name = m[1].replace(/''/g, "'");
+    const job = session.jobs.find((j) => j.name === name);
+    if (!job) fail(`The specified @job_name ('${name}') does not exist.`, 14262);
+    if (job.running) fail(`SQLServerAgent Error: Request to run job ${name} (from User demo) refused because the job is already running from a request by User demo.`, 22022);
+    job.running = new Date();
+    return void state.messages.push(`Job '${name}' started successfully.`);
   }
   if (/^SELECT\s+@@TRANCOUNT\b/i.test(s)) state.sets.push(set(['(No column name)'], [[session.tran]], ['IntN']));
   else if (/^BEGIN\s+TRAN(SACTION)?\b/i.test(s)) session.tran++;
@@ -219,8 +665,16 @@ async function runStatement(session, text, line, state, { signal, limit = 500 })
       const top = s.match(/\bTOP\s*\(?\s*(\d+)/i);
       const rows = t.rows.slice(0, top ? Number(top[1]) : undefined);
       const out = set(t.columns.map((c) => c.name), rows.slice(0, limit), t.columns.map((c) => c.type));
-      if (rows.length > limit) (out.truncated = true), (state.stopped = true);
+      if (rows.length > limit) (out.truncated = true), (state.stopped = !drain);
       state.sets.push(out);
+      // The demo has no statistics: it guesses one row for any WHERE, so an actual plan shows a
+      // badly wrong estimate, as stale statistics would.
+      if (session.profile) {
+        const where = s.match(/\bWHERE\s+([\s\S]*?)(?:\bORDER\s+BY\b|$)/i)?.[1].trim();
+        const est = where ? 1 : rows.length;
+        const scan = `  |--Clustered Index Scan(OBJECT:(${index(t)})${where ? `, WHERE:(${where})` : ''})`;
+        state.sets.push(profileSet([{ text: s, rows: rows.length, est, type: 'SELECT' }, ...(top ? [{ text: `  |--Top(TOP EXPRESSION:((${top[1]})))`, rows: rows.length, est }] : []), { text: top ? `     ${scan.trim()}` : scan, rows: rows.length, est }]));
+      }
       if (session.statsIO) state.messages.push(`Table '${t.name}'. Scan count 1, logical reads ${Math.ceil(t.rows.length / 8) + 1}, physical reads 0, page server reads 0, read-ahead reads 0.`);
       if (session.statsTIME) state.messages.push(' SQL Server Execution Times:\n   CPU time = 0 ms,  elapsed time = 1 ms.');
       if (!/^SELECT\s+(TOP\s*\(?\s*\d+\s*\)?\s*)?\*\s+FROM\s+\S+$/i.test(s)) state.messages.push('The demo has no SQL engine: this shows the table as it is, without WHERE, JOIN or ORDER BY.');
@@ -232,7 +686,10 @@ async function runStatement(session, text, line, state, { signal, limit = 500 })
     const t = target(s);
     const all = m[1].toUpperCase() === 'TRUNCATE' || (/^(UPDATE|DELETE)$/i.test(m[1]) && !/\bWHERE\b/i.test(s));
     const n = all ? (t?.rows.length ?? 0) : m[1].toUpperCase() === 'INSERT' ? Math.max(1, (s.match(/\)\s*,\s*\(/g) ?? []).length + 1) : 1;
+    if (t) session.wrote = t;
     if (m[1].toUpperCase() !== 'TRUNCATE') state.messages.push(`${n} row${n === 1 ? '' : 's'} affected`);
+    const verb = { INSERT: 'Insert', UPDATE: 'Update', DELETE: 'Delete', MERGE: 'Merge' }[m[1].toUpperCase()];
+    if (session.profile && verb && t) state.sets.push(profileSet([{ text: s, rows: n, est: n, type: m[1].toUpperCase() }, { text: `  |--Clustered Index ${verb}(OBJECT:(${index(t)}))`, rows: n, est: n }]));
     state.messages.push('(Demo: nothing was changed.)');
   } else if (/^(CREATE|ALTER|DROP|EXEC|EXECUTE|DECLARE|SET|GRANT|REVOKE|DENY|DBCC)\b/i.test(s)) {
     if (/^(CREATE|ALTER|DROP)\b/i.test(s)) state.messages.push('Commands completed successfully. (Demo: nothing was changed.)');
@@ -253,8 +710,18 @@ export function demoSession(conn, { database } = {}) {
     tran: 0,
     spid: 52,
     others: fakeActivity(),
-    run: (script, opts = {}) =>
-      runScript(
+    jobs: fakeJobs(),
+    history: demoHistory(),
+    // A run to come that loses the connection part-way (drop({ during })).
+    dropDuring: null,
+    run: (script, opts = {}) => {
+      const d = session.dropDuring;
+      if (d && !session.closed && (d === true || d.test(script))) {
+        session.dropDuring = null;
+        session.drop();
+        return Promise.reject(new DbError('Connection lost - read ECONNRESET', { lost: true, partial: { sets: [], messages: [] } }));
+      }
+      return runScript(
         session,
         script,
         async (batch, line, state) => {
@@ -265,9 +732,24 @@ export function demoSession(conn, { database } = {}) {
             return void state.sets.push(set(['schema', 'object', 'name', 'is_unique', 'type_desc', 'filter_definition', 'columns', 'included'], db.indexes.map(([name, table, unique, columns]) => ['dbo', table, name, unique, 'NONCLUSTERED', null, columns, null])));
           }
           if (batch.startsWith('-- trawl:activity')) return void state.sets.push(...activitySets(session));
+          if (batch.startsWith('-- trawl:script-extras')) return void state.sets.push(...scriptExtrasSets(session.database));
+          if (/-- trawl:migration/.test(batch)) return migrationBatch(session, batch, state);
+          if (batch.startsWith('-- trawl:grep')) return void state.sets.push(grepSet(session.database, batch));
+          if (batch.startsWith('-- trawl:uses')) return void state.sets.push(usesSet(session.database, batch));
+          if (batch.startsWith('-- trawl:jobs-probe')) return void state.sets.push(set(['engine_edition', 'server_now'], [[session.conn.engineEdition ?? 3, new Date()]]));
+          if (batch.startsWith('-- trawl:jobs')) return void state.sets.push(...jobSets(session));
+          if (batch.startsWith('-- trawl:job-history')) return void state.sets.push(...jobHistorySets(session, batch.match(/job_id = '([^']+)'/)[1]));
+          if (batch.startsWith('-- trawl:top-probe')) return void state.sets.push(...topProbeSets(session));
+          if (batch.startsWith('-- trawl:top-queries')) return void state.sets.push(...topQuerySets(batch));
+          if (batch.startsWith('-- trawl:health ')) return void state.sets.push(...healthSets(session, batch.match(/^-- trawl:health (\w+)/)[1]));
+          if (batch.startsWith('-- trawl:sizes')) return void state.sets.push(...sizeSets(session));
+          if (batch.startsWith('-- trawl:deadlocks')) return void state.sets.push(...deadlockSets(session, batch));
+          if (batch.startsWith('-- trawl:snapshot')) return void state.sets.push(snapshotSet(DATABASES[session.database], batch));
+          if (batch.startsWith('-- trawl:locks')) return void state.sets.push(lockSet(session));
           if (batch.startsWith('-- trawl:definition')) {
             const name = batch.match(/OBJECT_ID\(N'(.*)'\)\)/)[1].replace(/''/g, "'");
-            const t = findObject({ objects: DATABASES[session.database].tables }, name);
+            const db = DATABASES[session.database];
+            const t = findObject({ objects: [...db.tables, ...db.triggers] }, name);
             return void state.sets.push(set(['definition'], [[t?.definition ?? null]]));
           }
           // Saved edits (edit.js) come as one TRY/CATCH batch, which the demo has no engine for: it
@@ -275,7 +757,7 @@ export function demoSession(conn, { database } = {}) {
           const edit = batch.indexOf('-- trawl:edit');
           if (edit >= 0) {
             if (/^\s*BEGIN\s+TRAN/i.test(batch.slice(0, edit))) session.tran++;
-            for (const _ of batch.matchAll(/^\s*(UPDATE|DELETE)\b/gim)) state.messages.push('1 row affected');
+            for (const _ of batch.matchAll(/^\s*(UPDATE|DELETE|INSERT)\b/gim)) state.messages.push('1 row affected');
             return void state.messages.push('(Demo: nothing was changed.)');
           }
           for (const st of splitStatements(batch)) {
@@ -284,11 +766,21 @@ export function demoSession(conn, { database } = {}) {
           }
         },
         opts,
-      ),
+      );
+    },
     tranCount: async () => session.tran,
     close() {
-      session.closed = true;
-      session.onEnd?.();
+      ended(session);
+    },
+    /**
+     * The server closing the connection, as Azure SQL does to an idle one (its transaction rolled
+     * back). With `during` (true, or a pattern the script must match), the next such run loses it
+     * part-way instead; whether a write got through then is anyone's guess, as on a real server.
+     */
+    drop({ during = null } = {}) {
+      if (during) return void (session.dropDuring = during);
+      session.tran = 0;
+      ended(session);
     },
   };
   return session;

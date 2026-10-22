@@ -1,25 +1,40 @@
 // Every operation the UI offers, written once. Keys and slash commands both call these.
 // `ctx` is the app's handle: session, schema, query, confirm, note, prefill, and so on (see App.jsx).
-import { readFileSync, statSync } from 'node:fs';
+import { mkdirSync, readFileSync, readdirSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
-import { basename, extname, resolve } from 'node:path';
-import { ADD_USAGE, cleanFolder, commitMode, describeConn, isReadOnly, parseAddArgs, splitArgs } from './connections.js';
+import { basename, dirname, extname, join, resolve } from 'node:path';
+import { ADD_USAGE, cleanFolder, commitMode, describeConn, isReadOnly, parseAddArgs, splitArgs, sshText } from './connections.js';
 import { csvInsertScript, parseCsv } from './csv.js';
 import * as ed from './editor.js';
 import { findDataSources, importPlan, planText } from './datagrip.js';
 import { formatSql } from './format.js';
-import { changesText, insertScript, saveScript, tsvText, withSaved } from './edit.js';
-import { AI_LABELS, AI_LEVELS, EXPLAIN_SYSTEM, aiLevel, askPrompt, canSeeSchema, consoleText, explainPrompt, parseAnswer } from './ai.js';
+import { wrap } from './text.js';
+import { cellText } from './cell.js';
+import { changesText, hasChanges, insertScript, saveRecovery, saveScript, tsvText, withSaved } from './edit.js';
+import { AI_LABELS, AI_LEVELS, EXPLAIN_SYSTEM, WHY_SYSTEM, aiLevel, askPrompt, canSeeSchema, consoleText, explainPrompt, parseAnswer, whyConsoleText, whyPrompt } from './ai.js';
+import { parseWatch } from './watch.js';
 import { followTargets } from './follow.js';
+import { moreQuery, raiseTop } from './more.js';
+import { analyzedText, splitProfile } from './plans.js';
 import { compareSets, comparisonSet, comparisonSummary } from './compare.js';
 import { droppedPaths, findTab, freeName, tabNameFor, tabNameProblem } from './consoles.js';
 import { findSnippet, snippetNameProblem, snippetsFor, withSnippet, withoutSnippet } from './snippets.js';
 import { folderNames, inFolder, inParallel, mergeResults, readOnlyScript } from './fanout.js';
 import { DIFF_SQL, buildExtras, diffText, schemaDiff, syncScript } from './diff.js';
-import { buildActivity, killSql } from './activity.js';
+import { buildHealth, buildSizes, fixableGroups, healthScript, healthSummary, healthText } from './health.js';
+import { SOURCES as DEADLOCK_SOURCES, buildDeadlocks, buildInnodbDeadlocks, deadlockSummary, deadlockText, deadlockTime } from './deadlocks.js';
+import { agentProbe, buildActivity, buildJobHistory, buildJobs, buildTopQueries, jobHistorySql, jobHistoryText, killSql, sortColumn, sortQueries, startJobSql, topProbe } from './activity.js';
 import { dialectOf, definitionSqlFor, qualifiedFor, selectTopFor } from './dialects.js';
-import { buildSchema, createTableScript, definitionSql, describeObject, findObject, objectName } from './schema.js';
-import { applySqlcmd, bindVariables, classifyScript, countQuery, oneLine, scriptVariables, splitStatements, sqlcmdVariables, statementAt, toCsv, toJson, withoutLeadingComments } from './sql.js';
+import { buildSchema, createTableScript, definitionSql, describeObject, findObject, objectName, rowsOf } from './schema.js';
+import { grepHits, usesReport, usesSummary, usesText } from './references.js';
+import { EXTRAS_SQL, KIND_DIRS, buildTableExtras, createKey, planFiles, scriptFiles, scriptedObjects, summaryLine, summaryText, uniqueColumns, withoutAutoIncrement } from './scriptall.js';
+import { TOOLS, createPlainSql, historySql, migrationStatus, nextRank, parseFlywayName, pickHistory, probeSql, recordSql, statusText } from './migrations.js';
+import { generateScript, refValuesSql } from './generate.js';
+import { LANGUAGE_NAMES, LANGUAGES, languageOf, scaffold } from './scaffold.js';
+import { UNDO_ROWS, reverseScript, snapshotOf, snapshotRows, snapshotSummary, undoPlan, withSnapshot } from './undo.js';
+import { loadUndo, saveUndo } from './config.js';
+import { relTime } from './text.js';
+import { applySqlcmd, bindVariables, classifyScript, countQuery, oneLine, scriptVariables, splitStatements, sqlcmdVariables, statementAt, toCsv, toJson, toMarkdown, withoutLeadingComments } from './sql.js';
 
 // A WHERE that still changes more rows than this is asked about too.
 const MANY_ROWS = 1000;
@@ -35,13 +50,33 @@ function needSession(ctx) {
   return false;
 }
 
+/** needSession, and when the connection dropped since (an idle one Azure SQL closed), a new one first. */
+async function liveSession(ctx) {
+  if (!needSession(ctx)) return false;
+  return ctx.session.closed ? ctx.reconnect() : true;
+}
+
+/**
+ * What to do about SQL whose connection dropped while it ran: { rerun, message }. Only a read with
+ * no transaction open runs again by itself; a write may or may not have happened, and an open
+ * transaction went with the connection (the server rolls it back). `wrapped`: Trawl began a
+ * transaction for it (manual commit), which went the same way.
+ */
+export function afterLostConnection(sql, { dialect = 'sqlserver', hadTran = false, wrapped = false } = {}) {
+  if (hadTran && /^COMMIT\b/i.test(withoutLeadingComments(sql).trim())) return { rerun: false, message: 'It dropped during the COMMIT, which may or may not have gone through: look before running anything again.' };
+  if (hadTran) return { rerun: false, message: 'The open transaction went with it: the server rolled it back, undoing everything since it began. Nothing ran again.' };
+  if (wrapped) return { rerun: false, message: 'The transaction manual commit began for it went with it: the server rolled that back, so nothing of it was kept.' };
+  if (classifyScript(sql, { dialect }).write) return { rerun: false, message: 'It dropped while this ran, so the change may or may not have been made: check before running it again.' };
+  return { rerun: true, message: 'The connection had dropped: reconnected and ran it again.' };
+}
+
 /**
  * How many rows an UPDATE or DELETE would change, counted first with a SELECT built from it (so
  * nothing is written to find out). Null when it can't be counted; 'cancelled' after esc.
  */
 async function countChanges(ctx, text) {
   const d = dialectOf(ctx.session);
-  const q = countQuery(text)?.replace(/^SELECT COUNT_BIG\(\*\)/, `SELECT ${d.count}`);
+  const q = countQuery(text, { dialect: d.kind })?.replace(/^SELECT COUNT_BIG\(\*\)/, `SELECT ${d.count}`);
   if (!q || classifyScript(q, { dialect: d.kind }).write) return null;
   let n = null;
   const r = await ctx.task(
@@ -104,10 +139,18 @@ async function withParameters(ctx, sql) {
   return bindVariables(text, values);
 }
 
-/** Runs SQL on the current connection, after the read-only and danger checks. */
-export async function runSql(ctx, sql, { title, prefix = '', lineBase, stay, keep } = {}) {
-  if (!needSession(ctx)) return;
+/**
+ * Runs SQL on the current connection, after the read-only and danger checks. `top`: the SQL is
+ * Trawl's own TOP (n) at the row limit, so m in Results can raise it. `run` takes over once the
+ * checks have passed ((text, { write, wrap, title }) => …), as the actual plan does; it gets the
+ * SQL with its parameters filled in, and `wrap` says manual commit wants it in a transaction.
+ * `recover` runs if it fails (see db.js runScript).
+ */
+export async function runSql(ctx, sql, { title, prefix = '', lineBase, stay, keep, top, run, recover } = {}) {
   if (!sql.trim()) return;
+  // Any other run ends a /watch, which would otherwise be in its way.
+  await ctx.stopWatch?.('another run');
+  if (!(await liveSession(ctx))) return;
   const text = await withParameters(ctx, sql.trim());
   if (text == null) return;
   const dialect = dialectOf(ctx.session);
@@ -118,11 +161,22 @@ export async function runSql(ctx, sql, { title, prefix = '', lineBase, stay, kee
   }
   const changes = write ? await countChanges(ctx, text) : null;
   if (changes === 'cancelled') return;
+  // What /undo-write will have: a copy of the rows an UPDATE or DELETE changes, an INSERT's keys.
+  // The actual plan (run) keeps none.
+  const undo = write && !run ? undoPlan(text, ctx.schema, { kind: dialect.kind }) : null;
+  const tooMany = undo?.op !== 'insert' && changes != null && changes > UNDO_ROWS;
+  const undoNote = !undo
+    ? ''
+    : undo.reason || tooMany
+      ? ` No copy is kept for /undo-write: ${undo.reason ?? `that's more than ${UNDO_ROWS.toLocaleString('en')} rows`}.`
+      : undo.op === 'insert'
+        ? ' Its keys are kept: /undo-write can take the rows out again.'
+        : ' A copy of the rows is kept first: /undo-write can put them back.';
   const on = `On ${conn.name}${conn.prod ? ' (production)' : ''}`;
   if (danger.length) {
     const ok = await ctx.confirm({
       title: danger.length === 1 ? `${danger[0]}. Run it?` : `This script has ${danger.length} risky statements. Run it?`,
-      detail: danger.length > 1 ? danger.join(' · ') : `${on}${changes != null ? `: that's ${rowsText(changes)}` : ''}.`,
+      detail: danger.length > 1 ? `${danger.join(' · ')}.${undoNote}` : `${on}${changes != null ? `: that's ${rowsText(changes)}` : ''}.${undoNote}`,
       options: YES_NO('Yes, run it'),
       danger: true,
     });
@@ -130,31 +184,140 @@ export async function runSql(ctx, sql, { title, prefix = '', lineBase, stay, kee
   } else if (changes != null && changes > MANY_ROWS) {
     const ok = await ctx.confirm({
       title: `This changes ${rowsText(changes)}. Run it?`,
-      detail: `${on}. Counted with a SELECT over the same FROM and WHERE.`,
+      detail: `${on}. Counted with a SELECT over the same FROM and WHERE.${undoNote}`,
       options: YES_NO('Yes, run it'),
       danger: true,
     });
     if (!ok) return;
   }
+  let kept = null;
+  const notes = [];
+  if (undo && !undo.reason && !tooMany) {
+    const copy = await copyRows(ctx, undo, text);
+    if (copy === 'cancelled') return;
+    if (copy.reason) notes.push(`No copy kept for /undo-write: ${copy.reason}.`);
+    else if (snapshotRows(copy.snapshot)) {
+      kept = copy.snapshot;
+      const n = snapshotRows(kept);
+      notes.push(kept.op === 'insert' ? `Kept its keys: /undo-write takes the ${n === 1 ? 'row' : rowsText(n)} out again.` : n === 1 ? 'Kept the row as it was: /undo-write puts it back.' : `Kept the ${rowsText(n)} as they were: /undo-write puts them back.`);
+    }
+  }
   // With manual commit (production's default), a write starts a transaction, so nothing sticks until /commit.
   const wrap = write && commitMode(conn) === 'manual' && !ctx.tranCount;
-  return ctx.query(wrap ? `${dialect.begin}\n${text}` : text, { title: title ?? `${prefix}${oneLine(withoutLeadingComments(text))}`, wrapped: wrap, lineBase, stay, keep });
+  const heading = title ?? `${prefix}${oneLine(withoutLeadingComments(text))}`;
+  if (run) return run(text, { write, wrap, title: heading });
+  const r = await ctx.query(wrap ? `${dialect.begin}\n${text}` : text, { title: heading, wrapped: wrap, lineBase, stay, keep, top, recover, notes });
+  if (r?.ok && kept) {
+    try {
+      saveUndo(conn.name, withSnapshot(loadUndo(conn.name), kept));
+    } catch (e) {
+      ctx.note(`Couldn't keep the copy for /undo-write: ${e.message.split('\n')[0]}`, 'error');
+    }
+  }
+  return r;
+}
+
+/**
+ * The copy /undo-write keeps of what a write is about to change (undo.js): the rows the plan's SELECT
+ * reads (quietly; esc cancels the write), or an INSERT's keys. { snapshot } or { reason }, or
+ * 'cancelled'.
+ */
+async function copyRows(ctx, plan, text) {
+  const session = ctx.session;
+  const d = dialectOf(session);
+  const meta = { sql: text, conn: session.conn.name, database: session.database, kind: d.kind };
+  if (plan.op === 'insert') return { snapshot: snapshotOf(plan, null, meta) };
+  if (classifyScript(plan.select, { dialect: d.kind }).write) return { reason: 'its WHERE changes something too' };
+  let out = null;
+  const r = await ctx.task(
+    'copy the rows it changes',
+    async (signal) => {
+      try {
+        const res = await session.run(plan.select, { signal, limit: UNDO_ROWS + 1 });
+        out = snapshotOf(plan, res.sets.at(-1), { ...meta, at: Date.now() });
+      } catch (e) {
+        if (e.cancelled) throw e;
+        out = { reason: `reading them failed (${e.message.split('\n')[0]})` };
+      }
+      return [];
+    },
+    { label: 'Copying the rows it changes, for /undo-write', quiet: true },
+  );
+  if (!r.ok) return r.error?.cancelled ? 'cancelled' : { reason: r.error?.message ?? 'it failed' };
+  return out.reason ? out : { snapshot: out };
+}
+
+/**
+ * /undo-write: the copies kept of this connection's last writes (newest first: when, what, how many
+ * rows). ↵ puts the script that undoes one in the console tab undo, to read and run; nothing runs.
+ */
+export function undoWrites(ctx) {
+  if (!needSession(ctx)) return;
+  const { conn } = ctx.session;
+  const list = loadUndo(conn.name);
+  const items = list.map((s) => ({
+    label: `${relTime(s.at)} ago`.replace(/^now ago$/, 'just now'),
+    detail: `${snapshotSummary(s)} · ${s.sql}`,
+    text: [`${new Date(s.at).toLocaleString('en-GB')} on ${s.database}`, snapshotSummary(s), '', s.sql, '', ...reverseScript(s).split('\n').slice(3, 13)].join('\n'),
+    snapshot: s,
+  }));
+  ctx.showPicker({
+    title: `Undo a write on ${conn.name}`,
+    hint: '↵ the script that undoes it, into the console tab undo',
+    items,
+    empty: `No writes kept for ${conn.name} yet. Each UPDATE or DELETE of a table with a primary key keeps a copy of its rows (up to ${UNDO_ROWS.toLocaleString('en')}), and an INSERT its keys.`,
+    keys: { return: (it) => openUndo(ctx, it.snapshot) },
+  });
+}
+
+/** The script that undoes a kept write, in the console tab undo (made when there's none); nothing runs. */
+export function openUndo(ctx, snapshot) {
+  const script = reverseScript(snapshot);
+  const { names } = ctx.consoleTabs;
+  const at = names.findIndex((n) => n.toLowerCase() === 'undo');
+  if (at >= 0) ctx.showConsoleTab(at);
+  else ctx.addConsoleTab('undo');
+  ctx.setConsole(ed.fromText(script));
+  const elsewhere = ctx.session && ctx.session.database !== snapshot.database ? ` It ran on ${snapshot.database}, and you're on ${ctx.session.database}: /use ${snapshot.database} first.` : '';
+  ctx.note(`The script that undoes it is in the console tab undo: read it, then R runs it.${elsewhere}`, elsewhere ? 'error' : 'ok');
+}
+
+/**
+ * m in Results and /more: the query behind the result set on screen again, when the row limit cut
+ * it off, with the limit raised by another limit's worth (500, 1000, 1500…), in place of the rows on
+ * screen so the cursor, the sort and the filter stay. Only reads run again (more.js moreQuery).
+ */
+export async function moreRows(ctx) {
+  const res = ctx.results;
+  if (!needSession(ctx)) return;
+  const index = ctx.resultIndex ?? 0;
+  const m = moreQuery(res, index, { step: ctx.config.limit, dialect: dialectOf(ctx.session).kind });
+  if (m.reason) return ctx.note(m.reason, 'error');
+  if (res.conn !== ctx.session.conn.name || res.database !== ctx.session.database) return ctx.note(`These rows came from ${res.conn} (${res.database}); connect there again to fetch more.`, 'error');
+  const { changes } = ctx;
+  if (hasChanges(changes)) return ctx.note(`Save (s) or undo (U) the ${changesText(changes)} first: the rows are read again.`, 'error');
+  // A title with Trawl's TOP in it says the new one.
+  const title = (m.top && raiseTop(res.title ?? '', res.top, m.top)) || res.title;
+  return ctx.query(m.sql, { title, limit: m.limit, top: m.top ?? null, again: { id: res.id, index } });
 }
 
 /**
  * Saves the edits staged in Results: shows the script, asks, then runs it through runSql (so a
- * read-only connection refuses it and production keeps it in a transaction until /commit).
+ * read-only connection refuses it and production keeps it in a transaction until /commit). On
+ * Postgres and MySQL the script depends on whether a transaction will be open when it runs (one is,
+ * or runSql starts one for manual commit): then it keeps to a savepoint, which a failure goes back to.
  */
 export async function saveEdits(ctx) {
   const res = ctx.results;
   const { changes } = ctx;
-  if (!changes.cells.size && !changes.deletes.size) return ctx.note('Nothing to save: e edits a cell, n makes it NULL, d marks a row to delete.');
+  if (!hasChanges(changes)) return ctx.note('Nothing to save: e edits a cell, n makes it NULL, d marks a row to delete, a adds one.');
   const { session } = ctx;
   if (!session || session.conn.name !== res.conn || session.database !== res.database) return ctx.note(`These rows came from ${res.conn} (${res.database}); connect there again to save them.`, 'error');
   const { table } = res.edit;
+  const transaction = Boolean(ctx.tranCount) || commitMode(session.conn) === 'manual';
   let script;
   try {
-    script = saveScript(res.edit, res.sets[0], changes);
+    script = saveScript(res.edit, res.sets[0], changes, { transaction });
   } catch (e) {
     return ctx.note(e.message, 'error');
   }
@@ -162,16 +325,35 @@ export async function saveEdits(ctx) {
   ctx.showText(`Save to ${objectName(table)}`, script);
   const ok = await ctx.confirm({
     title: `Save ${what} to ${objectName(table)} on ${session.conn.name}${session.conn.prod ? ' (production)' : ''}?`,
-    detail: 'The script is above (pgup/pgdn scroll it). Each change must find exactly its row, unchanged since it was read, or nothing is saved.',
+    detail: `The script is above (pgup/pgdn scroll it). Each change must find exactly its row, unchanged since it was read${changes.inserts?.length ? ', and each new row go in as one' : ''}, or nothing is saved.`,
     scrollsOverlay: true,
     options: YES_NO('Yes, save'),
     danger: changes.deletes.size > 0 || Boolean(session.conn.prod),
   });
   ctx.closeOverlay();
   if (!ok) return;
-  const r = await runSql(ctx, script, { title: `save ${what} to ${objectName(table)}`, keep: true });
+  const r = await runSql(ctx, script, { title: `save ${what} to ${objectName(table)}`, keep: true, recover: saveRecovery(res.edit, { transaction }) });
   // On a failure, nothing was saved: the changes stay staged to fix or undo.
-  if (r?.ok && ctx.results === res) ctx.replaceResults({ ...res, sets: [withSaved(res.sets[0], changes, res.edit)] });
+  if (!r?.ok || ctx.results !== res) return;
+  ctx.replaceResults({ ...res, sets: [withSaved(res.sets[0], changes, res.edit)] });
+  // New rows get their identity and default values from the server, so the query runs again to show them.
+  if (changes.inserts?.length) await ctx.query(res.sql, { title: res.title, stay: true });
+}
+
+/**
+ * v in Results and /cell: the whole value of the cell under the cursor in a viewer, JSON
+ * pretty-printed, XML indented, binary as hex and long text folded to the width (cell.js).
+ */
+export function showCell(ctx) {
+  const c = ctx.cellOnScreen;
+  if (!c) return ctx.note('Put the cursor on a cell in Results first: v there shows its whole value.', 'error');
+  const name = c.set.columns[c.col].name;
+  if (c.isDefault) return ctx.note(`${name} has no value in this new row: it gets the column's default when saved.`);
+  const { text, kind } = cellText(c.value, Math.max(20, c.width - 4));
+  const v = c.value;
+  const size = typeof v === 'string' ? `${v.length.toLocaleString('en-US')} character${v.length === 1 ? '' : 's'}` : Buffer.isBuffer(v) ? `${v.length.toLocaleString('en-US')} byte${v.length === 1 ? '' : 's'}` : '';
+  const about = [kind === 'json' ? 'JSON' : kind === 'xml' ? 'XML' : '', size, c.edited ? 'not saved' : ''].filter(Boolean).join(', ');
+  ctx.showText(`${name} · ${c.label}${about ? ` · ${about}` : ''}`, text);
 }
 
 /**
@@ -184,14 +366,14 @@ export async function followKey(ctx, cell = ctx.resultCell) {
   if (!needSession(ctx)) return;
   if (res.conn !== ctx.session.conn.name || res.database !== ctx.session.database) return ctx.note(`These rows came from ${res.conn} (${res.database}); connect there again to follow their keys.`, 'error');
   const d = dialectOf(ctx.session);
-  const r = followTargets(res.source, res.sets[0], cell.row, cell.col, ctx.schema, { limit: ctx.config.limit, quote: d.quote, selectTop: d.selectTop });
+  const r = followTargets(res.source, res.sets[0], cell.row, cell.col, ctx.schema, { limit: ctx.config.limit, quote: d.quote, selectTop: d.selectTop, kind: d.kind });
   if (r.reason) return ctx.note(r.reason, 'error');
   let pick = r.targets[0];
   if (r.targets.length > 1) {
     pick = await ctx.confirm({ title: 'Follow which foreign key?', options: [...r.targets.map((t) => ({ label: `${t.label} (${t.fk})`, value: t })), { label: 'Neither', value: null }] });
     if (!pick) return;
   }
-  return runSql(ctx, pick.sql);
+  return runSql(ctx, pick.sql, { top: ctx.config.limit });
 }
 
 export async function connect(ctx, name, { database } = {}) {
@@ -230,7 +412,8 @@ export function addConnection(ctx, rest) {
   const replaced = ctx.config.connections.some((c) => c.name.toLowerCase() === conn.name.toLowerCase());
   ctx.setConfig((c) => ({ ...c, connections: [...c.connections.filter((x) => x.name.toLowerCase() !== conn.name.toLowerCase()), conn] }));
   const signIn = conn.auth === 'azure-cli' ? 'Signs in with your az login.' : conn.passwordEnv ? `Password from $${conn.passwordEnv}.` : `Asks for the password when you connect, and keeps it in ${ctx.credentials.name}.`;
-  ctx.note(`${replaced ? 'Updated' : 'Added'} ${conn.name}${conn.folder ? ` in ${conn.folder}/` : ''}${conn.prod ? ' (production, read-only)' : ''}. ${signIn} /connect ${conn.name}`, 'ok');
+  const tunnel = conn.ssh ? ` Through ssh ${sshText(conn.ssh)}, which signs in with a key or your ssh agent (no password prompt).` : '';
+  ctx.note(`${replaced ? 'Updated' : 'Added'} ${conn.name}${conn.folder ? ` in ${conn.folder}/` : ''}${conn.prod ? ' (production, read-only)' : ''}. ${signIn}${tunnel} /connect ${conn.name}`, 'ok');
 }
 
 export async function forgetConnection(ctx, name) {
@@ -365,7 +548,7 @@ export async function rollback(ctx) {
 export function browse(ctx, obj) {
   if (!needSession(ctx) || !obj) return;
   if (obj.kind !== 'table' && obj.kind !== 'view') return ctx.note(`${objectName(obj)} is a ${obj.kind}; only tables and views have rows to show.`, 'error');
-  return runSql(ctx, selectTopFor(dialectOf(ctx.session), obj.schema, obj.name, ctx.config.limit));
+  return runSql(ctx, selectTopFor(dialectOf(ctx.session), obj.schema, obj.name, ctx.config.limit), { top: ctx.config.limit });
 }
 
 export function describe(ctx, text) {
@@ -376,12 +559,25 @@ export function describe(ctx, text) {
   ctx.showText(objectName(obj), describeObject(obj, ctx.schema));
 }
 
+// A view's, procedure's, function's or trigger's own CREATE text, from the server, or null. `sql`
+// asks another way (MySQL's SHOW CREATE TABLE).
+async function readDefinition(session, obj, signal, sql) {
+  const dialect = dialectOf(session);
+  const set = (await session.run(sql ?? (dialect.kind === 'sqlserver' ? definitionSql(obj) : definitionSqlFor(dialect, obj)), { signal, limit: 1 })).sets[0];
+  // MySQL's SHOW CREATE answers with the name first and the text in a "Create …" column (a
+  // trigger's in "SQL Original Statement").
+  const at = Math.max(0, set?.columns.findIndex((c) => /^(create |sql original statement)/i.test(c.name)) ?? 0);
+  const definition = set?.rows[0]?.[at] ?? null;
+  return definition == null ? null : String(definition).replace(/\r\n?/g, '\n').trim();
+}
+
 /**
  * /script <name> and c in the Explorer: the object's CREATE script, into the console to edit. A table's
- * is written from the catalog; a view's, procedure's or function's is the server's own text.
+ * is written from the catalog; a view's, procedure's, function's or trigger's is the server's own text.
+ * `find` (from /grep) selects the first place it has that text, rather than starting to type.
  */
-export async function scriptObject(ctx, text) {
-  if (!needSession(ctx)) return;
+export async function scriptObject(ctx, text, { find } = {}) {
+  if (!(await liveSession(ctx))) return;
   if (!text) return ctx.prefill('/script ');
   const obj = typeof text === 'string' ? findObject(ctx.schema, text) : text;
   if (!obj) return ctx.note(`Nothing called ${text} in ${ctx.session.database}.`, 'error');
@@ -391,15 +587,96 @@ export async function scriptObject(ctx, text) {
   const r = await ctx.task(
     `script ${objectName(obj)}`,
     async (signal) => {
-      const set = (await ctx.session.run(dialect.kind === 'sqlserver' ? definitionSql(obj) : definitionSqlFor(dialect, obj), { signal, limit: 1 })).sets[0];
-      // MySQL's SHOW CREATE answers with the name first and the text in a "Create …" column.
-      const at = Math.max(0, set?.columns.findIndex((c) => /^create /i.test(c.name)) ?? 0);
-      definition = set?.rows[0]?.[at] ?? null;
+      definition = await readDefinition(ctx.session, obj, signal);
       return [definition ? 'In the console.' : "The server gave no definition: it may be encrypted, or the login can't VIEW DEFINITION."];
     },
     { label: 'Reading the definition' },
   );
-  if (r.ok && definition) ctx.editInConsole(String(definition).replace(/\r\n?/g, '\n').trim());
+  if (r.ok && definition) ctx.editInConsole(definition, { find });
+}
+
+/**
+ * /grep <text>: every view, procedure, function and trigger in the database whose definition has the
+ * text in it (ignoring case), as Redgate's SQL Search does, filtered on the server. A list to pick from:
+ * ↵ puts the object's CREATE script in the console with the first match selected (n, N: the others).
+ */
+export async function grepDefinitions(ctx, text) {
+  if (!needSession(ctx)) return;
+  const query = String(text ?? '').trim();
+  if (!query) return ctx.prefill('/grep ');
+  const session = ctx.session;
+  let hits = null;
+  const r = await ctx.task(
+    `grep ${query}`,
+    async (signal) => {
+      hits = grepHits((await session.run(dialectOf(session).grepSql(query), { signal, limit: 100_000 })).sets, query);
+      return [hits.length ? `${hits.length} object${hits.length === 1 ? '' : 's'} with "${query}" in ${hits.length === 1 ? 'its definition' : 'their definitions'}.` : `No view, procedure, function or trigger has "${query}" in it.`];
+    },
+    { label: `Searching the definitions for "${query}"` },
+  );
+  if (!r.ok || !hits) return;
+  showGrep(ctx, query, hits, session.database);
+}
+
+const matches = (n) => `${n} match${n === 1 ? '' : 'es'}`;
+
+function showGrep(ctx, query, hits, database) {
+  const items = hits.map((h) => {
+    const first = h.lines[0];
+    const w = String(h.lines.at(-1).line).length;
+    return {
+      label: `${h.schema}.${h.name}`,
+      // The line first, as it's what a narrow list has room for; the kind is on the right.
+      detail: `${matches(h.count)} · ${first.line}: ${first.text}`,
+      text: [`A ${h.kind}${h.parent ? ` on ${h.parent}` : ''}: ${matches(h.count)} on ${h.lines.length === 1 ? 'this line' : `these ${h.lines.length} lines`}.`, '', ...h.lines.map((l) => `${String(l.line).padStart(w)}  ${l.text}`)].join('\n'),
+      hit: h,
+    };
+  });
+  ctx.showPicker({
+    title: `"${query}" in ${database}'s definitions`,
+    hint: '↵ its CREATE script, at the match',
+    items,
+    empty: `No view, procedure, function or trigger in ${database} has "${query}" in it.`,
+    keys: {
+      return: (it) => scriptObject(ctx, { schema: it.hit.schema, name: it.hit.name, kind: it.hit.kind }, { find: query }),
+    },
+  });
+}
+
+/**
+ * /uses <object> and u in the Explorer: what refers to it (views, routines, triggers, and tables by
+ * their foreign keys) and what it refers to, grouped by kind, in the viewer. SQL Server's come from
+ * its dependency catalog; Postgres and MySQL record less, and the rest is found by name.
+ */
+export async function showUses(ctx, text) {
+  if (!needSession(ctx)) return;
+  if (!text) return ctx.prefill('/uses ');
+  const obj = typeof text === 'string' ? findObject(ctx.schema, text) : text;
+  if (!obj) return ctx.note(`Nothing called ${text} in ${ctx.session.database}.`, 'error');
+  const session = ctx.session;
+  const dialect = dialectOf(session);
+  const byName = dialect.usesByName;
+  let report = null;
+  const r = await ctx.task(
+    `what uses ${objectName(obj)}`,
+    async (signal) => {
+      const rows = (await session.run(dialect.usesSql(obj), { signal, limit: 100_000 })).sets.flatMap(rowsOf);
+      let named = [];
+      let own = null;
+      if (byName) {
+        named = (await session.run(dialect.grepSql(obj.name), { signal, limit: 100_000 })).sets.flatMap(rowsOf);
+        if (byName.uses.includes(obj.kind)) own = await readDefinition(session, obj, signal).catch((e) => (e.cancelled ? Promise.reject(e) : null));
+      }
+      report = usesReport(obj, ctx.schema, { rows, named, own, byName });
+      return [usesSummary(report)];
+    },
+    { label: `Finding what uses ${objectName(obj)}` },
+  );
+  if (!r.ok || !report) return;
+  const title = `Uses: ${objectName(obj)}`;
+  const body = usesText(obj, report, { database: session.database, label: dialect.label, byName });
+  ctx.rememberOutput(title, body);
+  ctx.showText(title, body);
 }
 
 /**
@@ -407,7 +684,7 @@ export async function scriptObject(ctx, text) {
  * read from which table and how long the server spent (as one line). With nothing, it toggles.
  */
 export async function setStats(ctx, mode) {
-  if (!needSession(ctx)) return;
+  if (!(await liveSession(ctx))) return;
   if (mode && mode !== 'on' && mode !== 'off') return ctx.note('/stats on shows the pages read and the server time after each run; /stats off stops it.', 'error');
   if (dialectOf(ctx.session).kind !== 'sqlserver') return ctx.note('/stats is SQL Server’s STATISTICS IO and TIME; there’s no such thing here.', 'error');
   const session = ctx.session;
@@ -430,7 +707,7 @@ export async function setStats(ctx, mode) {
  * happens, or the session would answer every query with a plan.
  */
 export async function showPlan(ctx, sql) {
-  if (!needSession(ctx)) return;
+  if (!(await liveSession(ctx))) return;
   const e = ctx.console;
   const text = sql?.trim() || ed.selectedText(e)?.text.trim() || statementAt(splitStatements(ed.toText(e)), e.row + 1)?.text;
   if (!text) return ctx.note('Nothing to plan: give the SQL (/plan SELECT …) or put the cursor on a statement in the console.', 'error');
@@ -466,13 +743,93 @@ export async function showPlan(ctx, sql) {
   }
 }
 
+// The savepoint a write's EXPLAIN ANALYZE is rolled back to inside a transaction already open.
+const PLAN_SAVEPOINT = 'trawl_plan';
+
+/**
+ * P in the console and /plan actual [sql]: the actual plan, of the SQL given, the selection or the
+ * statement under the cursor. The statement runs, so it goes through runSql's checks (read-only,
+ * risky statements, manual commit) like any run, and lands in History.
+ *
+ * SQL Server: with SET STATISTICS PROFILE on (and off again whatever happens), each statement's rows
+ * go to Results as usual, followed by a set of its operators with the rows each really produced,
+ * which plans.js turns into the tree. The rows are read to the end (past the limit, dropped), so the
+ * counts are whole. Postgres and MySQL: EXPLAIN ANALYZE, which runs the statement but sends no rows.
+ * There it always runs in a transaction that is rolled back (back to a savepoint when one is open,
+ * which then stays as it was), whatever the commit mode: EXPLAIN ANALYZE is for looking at the plan,
+ * and nothing on screen would show what a write changed. Running the statement itself applies it.
+ */
+export async function showActualPlan(ctx, sql) {
+  if (!needSession(ctx)) return;
+  const pick = sql?.trim() ? { text: sql.trim() } : consolePick(ctx);
+  if (!pick?.text) return ctx.note('Nothing to run: give the SQL (/plan actual SELECT …) or put the cursor on a statement in the console.', 'error');
+  const session = ctx.session;
+  const dialect = dialectOf(session);
+  let plan = null;
+  let ran = null;
+  const run = async (text, { write, wrap, title }) => {
+    ran = text;
+    if (dialect.kind === 'sqlserver') {
+      const runner = async (s, script, opts) => {
+        await s.run('SET STATISTICS PROFILE ON;', { signal: opts.signal });
+        try {
+          const split = splitProfile(await s.run(script, { ...opts, drain: true }));
+          plan = split.plan;
+          return split.res;
+        } catch (e) {
+          if (e.partial) e.partial = splitProfile(e.partial).res;
+          throw e;
+        } finally {
+          await s.run('SET STATISTICS PROFILE OFF;').catch(() => {});
+        }
+      };
+      return ctx.query(wrap ? `${dialect.begin}\n${text}` : text, { title, wrapped: wrap, lineBase: pick.lineBase, stay: pick.lineBase != null, runner });
+    }
+    // Always rolled back (a read can call a function that writes, too); inside an open transaction,
+    // only back to the savepoint, so the transaction stays as it was.
+    const inTran = Boolean(ctx.tranCount);
+    const runner = async (s, script, opts) => {
+      await s.run(inTran ? `SAVEPOINT ${PLAN_SAVEPOINT};` : dialect.begin, { signal: opts.signal });
+      try {
+        const res = await s.run(script, { ...opts, limit: 100_000 });
+        plan = analyzedText(res.sets);
+        return { ...res, sets: [], messages: [...res.messages, ...(write ? ['Rolled back: EXPLAIN ANALYZE ran it to measure it, and nothing it changed was kept.'] : [])] };
+      } catch (e) {
+        if (dialect.kind === 'mysql' && /syntax|doesn't yet support|not supported/i.test(e.message)) e.message = `${e.message}\nEXPLAIN ANALYZE needs MySQL 8.0.18 or later, and takes SELECT, multi-table UPDATE and DELETE (MariaDB has ANALYZE instead); p shows the estimated plan.`;
+        throw e;
+      } finally {
+        await s.run(inTran ? `ROLLBACK TO SAVEPOINT ${PLAN_SAVEPOINT};` : dialect.rollback).catch(() => {});
+      }
+    };
+    return ctx.query(dialect.explainAnalyze(text), { title, lineBase: pick.lineBase, keep: true, runner });
+  };
+  const text = pick.text;
+  const title = `Actual plan: ${oneLine(withoutLeadingComments(text))}`;
+  const r = await runSql(ctx, text, { title, run });
+  if (!r?.ok) return;
+  if (!plan) return ctx.note(dialect.kind === 'sqlserver' ? 'The server sent no plan: nothing in it reads or writes a table (SET, DECLARE, PRINT), or it ran a procedure whose statements gave none.' : 'The server sent no plan.', 'error');
+  const how = dialect.kind === 'sqlserver' ? 'STATISTICS PROFILE' : 'EXPLAIN ANALYZE';
+  ctx.lastPlan = { sql: ran ?? text, plan, conn: session.conn.name, database: session.database, label: dialect.label, how, actual: true };
+  ctx.showText(title, plan, { keys: { a: () => explainPlan(ctx) }, hint: 'a Claude explains it' });
+  ctx.rememberOutput(title, plan);
+}
+
+/** The console's selection, or the statement under its cursor, with the line it starts on. */
+function consolePick(ctx) {
+  const e = ctx.console;
+  const sel = ed.selectedText(e);
+  if (sel?.text.trim()) return { text: sel.text, lineBase: sel.row + 1 };
+  const st = statementAt(splitStatements(ed.toText(e)), e.row + 1);
+  return st ? { text: st.text, lineBase: st.line } : null;
+}
+
 /**
  * a on a plan, and /explain: Claude reads the last plan with its query (never rows) and says what it
  * does, what costs the most and what might help. Refused on a connection closed to Claude.
  */
 export async function explainPlan(ctx) {
   const p = ctx.lastPlan;
-  if (!p) return ctx.note('Show a plan first: p in the console, or /plan <sql>.', 'error');
+  if (!p) return ctx.note('Show a plan first: p (or P, the actual plan) in the console, or /plan <sql>.', 'error');
   const conn = ctx.config.connections.find((c) => c.name === p.conn) ?? ctx.session?.conn;
   if (!canSeeSchema(conn)) return ctx.note(`${p.conn} is closed to Claude. /ai schema lets Claude see its queries and plans (never rows).`, 'error');
   let answer = null;
@@ -496,7 +853,7 @@ export async function explainPlan(ctx) {
  * the activity log (opening the tab, R); errors (no VIEW SERVER STATE, say) still show.
  */
 export async function loadActivity(ctx, { quiet = true } = {}) {
-  if (!needSession(ctx)) return;
+  if (!(await liveSession(ctx))) return;
   const session = ctx.session;
   let act = null;
   const r = await ctx.task(
@@ -542,6 +899,125 @@ export async function killSession(ctx, id) {
   if (!ok) return;
   const r = await ctx.query(dialect.kind === 'sqlserver' ? sql : dialect.kill(n), { title: `KILL ${n}`, keep: true });
   if (r?.ok) await loadActivity(ctx);
+}
+
+/**
+ * J, Q (and the same key or esc back) in Activity, /jobs, /top-queries and /activity: which list the
+ * tab shows. A list already read for this connection is read again; one that isn't, the view reads.
+ */
+export function showActivityList(ctx, which) {
+  ctx.setView('activity');
+  ctx.setActivityLists({ show: which });
+  const { session } = ctx;
+  if (!session) return;
+  const read = which === 'jobs' ? ctx.activityLists.jobs : which === 'queries' ? ctx.activityLists.queries : ctx.activity;
+  if (read?.conn !== session.conn.name) return;
+  if (which === 'jobs') return loadJobs(ctx);
+  if (which === 'queries') return loadTopQueries(ctx);
+  return loadActivity(ctx);
+}
+
+/**
+ * The SQL Agent jobs, for Activity's jobs list: first whether the server has the Agent (Azure SQL
+ * Database, Express and Postgres or MySQL don't), then msdb's jobs. Errors (msdb's roles) still show.
+ */
+export async function loadJobs(ctx, { quiet = true } = {}) {
+  if (!needSession(ctx)) return;
+  const session = ctx.session;
+  const d = dialectOf(session);
+  const base = { jobs: [], at: Date.now(), conn: session.conn.name, error: null, unavailable: null };
+  if (!d.jobs.sql) return ctx.setActivityLists({ jobs: { ...base, unavailable: d.jobs.unavailable } });
+  let read = null;
+  const r = await ctx.task(
+    'read the SQL Agent jobs',
+    async (signal) => {
+      const { unavailable } = agentProbe((await session.run(d.jobs.probe, { signal, limit: 10 })).sets);
+      if (unavailable) return (read = { unavailable }), [unavailable];
+      read = { jobs: buildJobs((await session.run(d.jobs.sql, { signal, limit: 10_000 })).sets) };
+      return [`${read.jobs.length} job${read.jobs.length === 1 ? '' : 's'}`];
+    },
+    { label: 'Reading the SQL Agent jobs', quiet },
+  );
+  if (read) return ctx.setActivityLists({ jobs: { ...base, ...read, at: Date.now() } });
+  if (!r.ok && r.error?.message !== 'busy' && !r.error?.cancelled) ctx.setActivityLists({ jobs: { ...base, error: r.error.message } });
+}
+
+/** ↵ on a job: its recent runs in the viewer, with what its failed steps said. */
+export async function showJobHistory(ctx, job) {
+  if (!needSession(ctx) || !job) return;
+  const session = ctx.session;
+  let text = null;
+  await ctx.task(
+    `read the history of job ${job.name}`,
+    async (signal) => {
+      const runs = buildJobHistory((await session.run(jobHistorySql(job.id), { signal, limit: 1000 })).sets);
+      text = jobHistoryText(job, runs);
+      return [`${runs.length} run${runs.length === 1 ? '' : 's'}`];
+    },
+    { label: `Reading the history of ${job.name}`, quiet: true },
+  );
+  if (text != null) ctx.showText(`Job ${job.name}: recent runs`, text);
+}
+
+/**
+ * s on a job: starts it with msdb's sp_start_job, after asking. It's an EXEC, so a write as classify()
+ * has it: a read-only connection refuses it until /writes. Not inside an open transaction, which
+ * couldn't take it back.
+ */
+export async function startJob(ctx, job) {
+  if (!needSession(ctx) || !job) return;
+  const { conn } = ctx.session;
+  const dialect = dialectOf(ctx.session);
+  if (!dialect.jobs.sql) return ctx.note(dialect.jobs.unavailable, 'error');
+  const sql = startJobSql(job.name);
+  if (classifyScript(sql, { dialect: dialect.kind }).write && isReadOnly(conn) && !ctx.writesAllowed) {
+    return ctx.note(`${conn.name} is read-only${conn.prod ? ' (production)' : ''}, and starting a job changes things. /writes allows it until you disconnect.`, 'error');
+  }
+  if (ctx.tranCount) return ctx.note('A transaction is open, and a job started now runs outside it: /commit or /rollback first.', 'error');
+  if (job.running) return ctx.note(`${job.name} is running already.`, 'error');
+  const ok = await ctx.confirm({
+    title: `Start job ${job.name}?`,
+    detail: `On ${conn.name}${conn.prod ? ' (production)' : ''}. SQL Agent runs it from its first step, now${job.enabled ? '' : ' (it is disabled, which only stops its schedules)'}.`,
+    options: YES_NO('Yes, start it'),
+    danger: Boolean(conn.prod),
+  });
+  if (!ok) return;
+  const r = await ctx.query(sql, { title: `start job ${job.name}`, keep: true });
+  if (r?.ok) await loadJobs(ctx);
+}
+
+/**
+ * The costliest queries, for Activity's top-queries list, by `sort` (duration, cpu, reads,
+ * executions): first where to read them (Query Store, the plan cache, pg_stat_statements…), then them.
+ */
+export async function loadTopQueries(ctx, { sort, quiet = true } = {}) {
+  if (!needSession(ctx)) return;
+  const session = ctx.session;
+  const d = dialectOf(session);
+  const by = sort ?? ctx.activityLists.queries?.sort ?? 'duration';
+  const base = { queries: [], sort: by, at: Date.now(), conn: session.conn.name, database: session.database, source: null, note: null, error: null, unavailable: null };
+  let read = null;
+  const r = await ctx.task(
+    'read the top queries',
+    async (signal) => {
+      let probe;
+      try {
+        probe = topProbe((await session.run(d.topQueries.probe, { signal, limit: 10 })).sets);
+      } catch (e) {
+        // SQL Server before 2016 has no sys.database_query_store_options: the plan cache it is.
+        if (d.kind !== 'sqlserver' || e.number !== 208) throw e;
+        probe = { database: session.database, store: null };
+      }
+      const plan = d.topQueries.plan(probe, sortColumn(by));
+      if (plan.unavailable) return (read = { unavailable: plan.unavailable }), [plan.unavailable];
+      const queries = sortQueries(buildTopQueries((await session.run(plan.sql, { signal, limit: 1000 })).sets), by);
+      read = { queries, source: plan.source, note: plan.note ?? null };
+      return [`${queries.length} quer${queries.length === 1 ? 'y' : 'ies'}`];
+    },
+    { label: 'Reading the top queries', quiet },
+  );
+  if (read) return ctx.setActivityLists({ queries: { ...base, ...read, at: Date.now() } });
+  if (!r.ok && r.error?.message !== 'busy' && !r.error?.cancelled) ctx.setActivityLists({ queries: { ...base, error: r.error.message } });
 }
 
 /** The console's selection, or the statement under its cursor: what ctrl+r would run. */
@@ -738,6 +1214,147 @@ export async function diffSchema(ctx, rest) {
   if (open) ctx.editInConsole(syncScript(changes, { left, right, rightSchema: theirs.schema, rightDefinitions: theirs.definitions }));
 }
 
+// On Postgres a statement that fails spoils the transaction it's in, so with one open each of
+// /health's reads goes inside a savepoint of its own.
+const HEALTH_SAVEPOINT = 'trawl_health';
+
+/**
+ * /health: a check-up of the database you're in, as Splice's /cleanup is of a repository: what the
+ * server suggests or shows (missing and unused indexes, duplicates, foreign keys without an index,
+ * tables without a primary key, untrusted constraints, stale statistics, disabled triggers; the
+ * kinds have some each, health.js CHECKS), each with why, in the viewer. Then it offers the fixes,
+ * all of them or one group's, in a console tab of their own to read through; nothing runs by itself.
+ * A read that fails (a permission it needs) only says so in its group.
+ */
+export async function healthCheck(ctx) {
+  if (!needSession(ctx)) return;
+  const session = ctx.session;
+  const dialect = dialectOf(session);
+  const guarded = dialect.kind === 'postgres' && Boolean(ctx.tranCount);
+  let report = null;
+  const r = await ctx.task(
+    `health check of ${session.database}`,
+    async (signal) => {
+      const results = {};
+      for (const [id, sql] of Object.entries(dialect.health)) {
+        try {
+          if (guarded) await session.run(`SAVEPOINT ${HEALTH_SAVEPOINT};`, { signal });
+          results[id] = { sets: (await session.run(sql, { signal, limit: 100_000 })).sets };
+          if (guarded) await session.run(`RELEASE SAVEPOINT ${HEALTH_SAVEPOINT};`, { signal });
+        } catch (e) {
+          if (e.cancelled || signal.aborted) throw e;
+          if (guarded) await session.run(`ROLLBACK TO SAVEPOINT ${HEALTH_SAVEPOINT};`).catch(() => {});
+          results[id] = { error: e.message.split('\n')[0] };
+        }
+      }
+      report = buildHealth(results, { kind: dialect.kind, quote: dialect.quote });
+      return [healthSummary(report)];
+    },
+    { label: `Checking ${session.database}` },
+  );
+  if (!r.ok || !report) return;
+  const where = { database: session.database, conn: session.conn.name };
+  const title = `Health: ${session.conn.name}/${session.database}`;
+  const text = healthText(report, where);
+  ctx.rememberOutput(title, text);
+  ctx.showText(title, text);
+  const groups = fixableGroups(report);
+  if (!groups.length) return;
+  const n = (g) => g.findings.length;
+  const lower = (t) => t[0].toLowerCase() + t.slice(1);
+  const pick = await ctx.confirm({
+    title: 'Put the fixes in a console tab of their own?',
+    detail: 'The report is above (pgup/pgdn scroll it). Nothing runs; dropping an index or turning a trigger on comes commented out.',
+    scrollsOverlay: true,
+    options: [
+      { label: `Yes, all of them (${groups.reduce((s, g) => s + n(g), 0)})`, value: 'all' },
+      ...(groups.length > 1 ? groups.map((g) => ({ label: `Only ${lower(g.title)} (${n(g)})`, value: g.id })) : []),
+      { label: 'No', value: null },
+    ],
+  });
+  ctx.closeOverlay();
+  if (!pick) return;
+  const script = healthScript(report, { ...where, groups: pick === 'all' ? null : [pick] });
+  const name = freeName(ctx.consoleTabs.names.map((x) => ({ name: x })), 'health');
+  ctx.addConsoleTab(name);
+  ctx.setConsole(ed.fromText(script));
+  ctx.note(`The fixes are in the console tab ${name}: read them through, then ctrl+r runs the statement under the cursor.`, 'ok');
+}
+
+/**
+ * /sizes: every table in the database with its rows and the space it takes (reserved, data,
+ * indexes, and what each kind has besides), biggest first, as a result set in Results, where o
+ * sorts, f filters and x exports it. Postgres's row counts and all of MySQL's are estimates.
+ */
+export async function showSizes(ctx) {
+  if (!needSession(ctx)) return;
+  const session = ctx.session;
+  const dialect = dialectOf(session);
+  const title = `Table sizes: ${session.database}`;
+  const started = Date.now();
+  let set = null;
+  const r = await ctx.task(
+    title,
+    async (signal) => {
+      set = buildSizes((await session.run(dialect.sizesSql, { signal, limit: 1_000_000 })).sets);
+      return [`${set.rows.length} table${set.rows.length === 1 ? '' : 's'}, biggest first`];
+    },
+    { label: 'Reading the table sizes' },
+  );
+  if (!r.ok || !set) return;
+  ctx.present({ title, sql: dialect.sizesSql, sets: [set], messages: [dialect.sizesNote], ms: Date.now() - started, edit: { reason: 'the sizes come from the catalog' }, conn: session.conn.name, database: session.database });
+}
+
+// The most /deadlocks lists.
+const DEADLOCKS_SHOWN = 50;
+
+/**
+ * /deadlocks: the server's recent deadlocks (deadlocks.js has where each kind keeps them), newest
+ * first. One is shown in the viewer; several are a list, ↵ showing one. Each is drawn as a tree from
+ * the victim, through whose lock each one wanted, with every session's SQL and the locks under it.
+ */
+export async function showDeadlocks(ctx) {
+  if (!needSession(ctx)) return;
+  const session = ctx.session;
+  const d = dialectOf(session).deadlocks;
+  let found = null;
+  const r = await ctx.task(
+    'read the recent deadlocks',
+    async (signal) => {
+      const probe = d.probe ? (rowsOf((await session.run(d.probe, { signal, limit: 10 })).sets[0])[0] ?? {}) : {};
+      const plan = d.plan(probe);
+      if (plan.unavailable) return (found = { unavailable: plan.unavailable }), [plan.unavailable];
+      let error = null;
+      // The first place that can be read is the answer, even with none in it.
+      for (const src of plan.sources) {
+        try {
+          const sets = (await session.run(src.sql, { signal, limit: 10_000 })).sets;
+          const list = (src.parse === 'innodb' ? buildInnodbDeadlocks(sets) : buildDeadlocks(sets)).slice(0, DEADLOCKS_SHOWN);
+          found = { list, source: DEADLOCK_SOURCES[src.id] };
+          return [list.length ? `${list.length} deadlock${list.length === 1 ? '' : 's'} from ${found.source}.` : `No deadlocks in ${found.source}.`];
+        } catch (e) {
+          if (e.cancelled || signal.aborted) throw e;
+          error ??= e;
+        }
+      }
+      throw error;
+    },
+    { label: 'Reading the recent deadlocks' },
+  );
+  if (!r.ok || !found) return;
+  // Why there's nothing to read here is longer than the activity log's line.
+  if (found.unavailable) return ctx.showText('Deadlocks', wrap(found.unavailable, 96).join('\n'));
+  if (!found.list.length) return;
+  // To the minute in the list; the viewer has the seconds.
+  const items = found.list.map((x) => ({ label: deadlockTime(x).replace(/(\d\d:\d\d):\d\d/, '$1'), detail: deadlockSummary(x), text: deadlockText(x), title: `Deadlock ${deadlockTime(x)}` }));
+  const show = (it) => {
+    ctx.rememberOutput(it.title, it.text);
+    ctx.showText(it.title, it.text);
+  };
+  if (items.length === 1) return show(items[0]);
+  ctx.showPicker({ title: 'Deadlocks, newest first', hint: '↵ the deadlock in full', items, keys: { return: show } });
+}
+
 export function setLimit(ctx, value) {
   if (!value) return ctx.note(`Result sets stop at ${ctx.config.limit} rows. /limit <n> changes it.`);
   const n = Number(value);
@@ -767,6 +1384,58 @@ export async function ask(ctx, question) {
     { label: 'Asking Claude' },
   );
   if (r.ok && answer?.sql) ctx.editInConsole(consoleText({ question, ...answer }));
+}
+
+/**
+ * /why: Claude explains the last run's error from the server (its message, number and line, the SQL
+ * around it) with the schema's names, never rows, and the corrected statement goes into the console
+ * under the explanation as comments. Nothing runs. Refused on a connection closed to Claude.
+ */
+export async function why(ctx) {
+  const err = ctx.lastError;
+  if (!err) return ctx.note('Nothing to explain: /why is for the last run, when the server turned it down with an error.', 'error');
+  const conn = ctx.config.connections.find((c) => c.name === err.conn) ?? ctx.session?.conn;
+  if (!canSeeSchema(conn)) return ctx.note(`${err.conn} is closed to Claude. /ai schema lets Claude see its names, SQL and errors (never rows).`, 'error');
+  const schema = ctx.schema && ctx.session?.conn.name === err.conn && ctx.schema.database === err.database ? ctx.schema : null;
+  const prompt = whyPrompt({ ...err, schema });
+  const first = err.message.split('\n')[0];
+  let answer = null;
+  const r = await ctx.task(
+    `ask Claude why: ${first}`,
+    async (signal) => {
+      answer = parseAnswer(await ctx.askClaude({ prompt, system: WHY_SYSTEM, signal }));
+      return answer.sql ? ['A corrected statement is in the console, with why as comments: read it, then ctrl+r runs it.', ...(answer.note ? [answer.note] : [])] : [answer.note || 'Claude gave no answer.'];
+    },
+    { label: 'Asking Claude what went wrong' },
+  );
+  if (!r.ok || !answer) return;
+  if (answer.sql) return ctx.editInConsole(whyConsoleText({ message: err.message, ...answer }));
+  if (answer.note) {
+    ctx.showText(`Claude on: ${first}`, answer.note);
+    ctx.rememberOutput(`Claude on: ${first}`, answer.note);
+  }
+}
+
+/**
+ * /watch <seconds> [sql] [--until <condition>]: runs a read again every few seconds (2 at least), in
+ * Results with what changed since the run before picked out, until esc, another run or the condition
+ * (watch.js) matching a row. Without SQL, the console's selection or the statement under its cursor.
+ * /watch stop ends it.
+ */
+export async function watch(ctx, rest) {
+  const w = parseWatch(rest);
+  if (w.stop) return ctx.watching ? ctx.stopWatch('/watch stop') : ctx.note('Nothing is being watched.');
+  if (w.empty) return ctx.prefill('/watch ');
+  if (w.error) return ctx.note(w.error, 'error');
+  await ctx.stopWatch(ctx.watching ? 'another watch' : null);
+  if (!(await liveSession(ctx))) return;
+  const sql = w.sql || consoleStatement(ctx);
+  if (!sql) return ctx.note('Nothing to watch: /watch <seconds> <sql>, or put the cursor on a statement in the console.', 'error');
+  const text = await withParameters(ctx, sql);
+  if (text == null) return;
+  const { write } = classifyScript(text, { dialect: dialectOf(ctx.session).kind });
+  if (write) return ctx.note('/watch only runs reads, and this changes data or schema: run it once with ctrl+r instead.', 'error');
+  return ctx.startWatch({ sql: text, every: w.seconds, until: w.until, title: oneLine(withoutLeadingComments(text)) });
 }
 
 /**
@@ -889,7 +1558,7 @@ export async function importCsv(ctx, rest) {
   let built;
   try {
     const d = dialectOf(ctx.session);
-    built = csvInsertScript(parseCsv(await readFile(full, 'utf8')), table, d.kind === 'sqlserver' ? {} : { quote: d.quote });
+    built = csvInsertScript(parseCsv(await readFile(full, 'utf8')), table, d.kind === 'sqlserver' ? {} : { quote: d.quote, kind: d.kind });
   } catch (e) {
     return ctx.note(`${full}: ${e.code === 'ENOENT' ? 'no such file' : e.message.split('\n')[0]}`, 'error');
   }
@@ -1035,11 +1704,12 @@ export function compareResults(ctx) {
   ctx.note(summary, 'ok');
 }
 
-const COPY_FORMATS = ['tsv', 'csv', 'json', 'insert'];
+const COPY_FORMATS = ['tsv', 'csv', 'json', 'md', 'insert'];
 
 /**
- * /copy [tsv|csv|json|insert]: the result set on screen, on the clipboard. Tab-separated (the
- * default) pastes into a spreadsheet as cells; insert gives INSERT statements for the table.
+ * /copy [tsv|csv|json|md|insert]: the result set on screen, on the clipboard. Tab-separated (the
+ * default) pastes into a spreadsheet as cells; md is a Markdown table; insert gives INSERT
+ * statements for the table.
  */
 export function copyResults(ctx, format) {
   const set = ctx.currentSet();
@@ -1050,23 +1720,365 @@ export function copyResults(ctx, format) {
   const d = dialectOf(ctx.session);
   const source = res?.edit?.table ?? res?.source?.table;
   const table = source ? qualifiedFor(d, source.schema, source.name) : d.quote('TableName');
-  const text = f === 'csv' ? toCsv(set) : f === 'json' ? toJson(set) : f === 'insert' ? insertScript(set, table, { quote: d.quote }) : tsvText(set);
+  const text = f === 'csv' ? toCsv(set) : f === 'json' ? toJson(set) : f === 'md' ? toMarkdown(set) : f === 'insert' ? insertScript(set, table, { quote: d.quote, kind: d.kind }) : tsvText(set);
   const n = `${set.rows.length} row${set.rows.length === 1 ? '' : 's'}`;
-  return ctx.copy(text, f === 'tsv' ? `${n}, tab-separated` : f === 'insert' ? `${n} as INSERT statements${source ? '' : ` (into ${table}: rename it)`}` : `${n} as ${f.toUpperCase()}`);
+  return ctx.copy(text, f === 'tsv' ? `${n}, tab-separated` : f === 'insert' ? `${n} as INSERT statements${source ? '' : ` (into ${table}: rename it)`}` : f === 'md' ? `${n} as a Markdown table` : `${n} as ${f.toUpperCase()}`);
 }
 
-/** Writes the result set on screen to a .csv or .json file. */
+const EXPORTS = { '.csv': toCsv, '.json': toJson, '.md': toMarkdown, '.markdown': toMarkdown };
+
+/** Writes the result set on screen to a .csv, .json or .md (a Markdown table) file. */
 export async function exportResults(ctx, path) {
   const set = ctx.currentSet();
   if (!set) return ctx.note('Run a query first: there is nothing to export.', 'error');
   if (!path) return ctx.prefill('/export ');
   const full = resolve(path);
-  const ext = extname(full).toLowerCase();
-  if (ext !== '.csv' && ext !== '.json') return ctx.note('Export to a .csv or .json file.', 'error');
+  const format = EXPORTS[extname(full).toLowerCase()];
+  if (!format) return ctx.note('Export to a .csv, .json or .md file.', 'error');
   try {
-    await writeFile(full, ext === '.csv' ? toCsv(set) : toJson(set), 'utf8');
+    await writeFile(full, format(set), 'utf8');
     ctx.note(`Wrote ${set.rows.length} row${set.rows.length === 1 ? '' : 's'} to ${full}${set.truncated ? ` (only the first ${set.rows.length}: raise /limit for more)` : ''}`, 'ok');
   } catch (e) {
     ctx.note(`Couldn't write ${full}: ${e.message}`, 'error');
   }
+}
+
+const firstLine = (s) => String(s ?? '').split('\n')[0];
+const plural = (n, what) => `${n.toLocaleString('en')} ${what}${n === 1 ? '' : 's'}`;
+const pathArg = (s) => String(s ?? '').trim().replace(/^"(.*)"$/, '$1');
+
+// Every file under `root` in /script-all's layout (<schema>/<Tables|Views|…>/<name>.sql), as a Map of
+// its path (with /) to its text.
+function readLayout(root) {
+  const out = new Map();
+  let schemas = [];
+  try {
+    schemas = readdirSync(root, { withFileTypes: true }).filter((d) => d.isDirectory());
+  } catch {
+    return out;
+  }
+  for (const s of schemas) {
+    for (const dir of Object.values(KIND_DIRS)) {
+      let files = [];
+      try {
+        files = readdirSync(join(root, s.name, dir), { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const f of files) if (f.isFile() && /\.sql$/i.test(f.name)) out.set(`${s.name}/${dir}/${f.name}`, readFileSync(join(root, s.name, dir, f.name), 'utf8'));
+    }
+  }
+  return out;
+}
+
+/**
+ * /script-all <folder>: every table, view, procedure, function and trigger of the database in a file
+ * of its own under the folder (<schema>/Tables/<name>.sql and so on), for keeping the schema in git.
+ * Only files whose text changed are written. Files in that layout whose objects are gone are listed,
+ * and removed only after asking.
+ */
+export async function scriptAll(ctx, rest) {
+  if (!needSession(ctx)) return;
+  const folder = pathArg(rest);
+  if (!folder) return ctx.prefill('/script-all ');
+  const root = resolve(folder);
+  const session = ctx.session;
+  const dialect = dialectOf(session);
+  let done = null;
+  const r = await ctx.task(
+    `script ${session.database} into ${root}`,
+    async (signal) => {
+      const read = async (sql) => (await session.run(sql, { signal, limit: 1_000_000 })).sets;
+      const schema = buildSchema(await read(dialect.schemaSql));
+      const modules = rowsOf((await read(dialect.grepSql('')))[0]);
+      let extras = null;
+      let creates = null;
+      let note = null;
+      if (dialect.kind === 'mysql') {
+        // MySQL writes its own CREATE for each object, tables included; the catalog only has bodies.
+        creates = new Map();
+        for (const o of scriptedObjects(schema, modules)) {
+          const sql = o.kind === 'table' ? `SHOW CREATE TABLE ${qualifiedFor(dialect, o.schema, o.name)};` : undefined;
+          const text = await readDefinition(session, o, signal, sql).catch((e) => (e.cancelled ? Promise.reject(e) : null));
+          if (text) creates.set(createKey(o.kind, o.schema, o.name), o.kind === 'table' ? withoutAutoIncrement(text) : text);
+        }
+      } else {
+        try {
+          extras = buildTableExtras(await read(EXTRAS_SQL[dialect.kind]));
+        } catch (e) {
+          if (e.cancelled) throw e;
+          note = `The defaults, checks and indexes couldn't be read (${firstLine(e.message)}), so the tables have their columns and keys only.`;
+        }
+      }
+      const { files, skipped } = scriptFiles({ schema, extras, modules, dialect, creates });
+      const plan = planFiles(files, readLayout(root), { keep: skipped.map((x) => x.path) });
+      for (const f of plan.written) {
+        const full = join(root, ...f.path.split('/'));
+        mkdirSync(dirname(full), { recursive: true });
+        writeFileSync(full, f.text, 'utf8');
+      }
+      done = { plan, skipped, note, database: session.database };
+      return [summaryLine(plan), ...(plan.stale.length ? [`${plural(plan.stale.length, 'file')} of objects that are gone: asking before removing them.`] : [])];
+    },
+    { label: `Scripting ${session.database}` },
+  );
+  if (!r.ok || !done) return;
+  const { plan } = done;
+  const removed = [];
+  let kept = [];
+  if (plan.stale.length) {
+    ctx.showText(`Files of objects no longer in ${done.database}`, plan.stale.map((p) => `  - ${p}`).join('\n'));
+    const ok = await ctx.confirm({
+      title: `Remove ${plural(plan.stale.length, 'file')} whose object${plan.stale.length === 1 ? ' is' : 's are'} gone from ${done.database}?`,
+      detail: `The list is above (pgup/pgdn scroll it): files in Trawl's layout under ${root} that no table, view, routine or trigger has now.`,
+      scrollsOverlay: true,
+      options: YES_NO('Yes, remove them'),
+    });
+    ctx.closeOverlay();
+    if (ok) {
+      for (const p of plan.stale) {
+        const full = join(root, ...p.split('/'));
+        try {
+          unlinkSync(full);
+          removed.push(p);
+        } catch (e) {
+          ctx.note(`Couldn't remove ${full}: ${firstLine(e.message)}`, 'error');
+          continue;
+        }
+        // A folder left empty goes too: the kind's, then the schema's.
+        for (const dir of [dirname(full), dirname(dirname(full))]) {
+          try {
+            rmdirSync(dir);
+          } catch {
+            break;
+          }
+        }
+      }
+    } else kept = plan.stale;
+  }
+  const title = `Script all: ${done.database} → ${root}`;
+  const text = summaryText(plan, { database: done.database, folder: root, removed, kept, skipped: done.skipped, note: done.note });
+  ctx.rememberOutput(title, text);
+  ctx.showText(title, text);
+  if (removed.length) ctx.note(`${summaryLine(plan, removed.length)} in ${root}.`, 'ok');
+}
+
+// The migration scripts under a folder (and EF Core's .cs migrations), with paths relative to it.
+function migrationFiles(root) {
+  const out = [];
+  const walk = (dir, rel) => {
+    for (const e of readdirSync(dir, { withFileTypes: true }).sort((x, y) => (x.name < y.name ? -1 : 1))) {
+      const path = rel ? `${rel}/${e.name}` : e.name;
+      if (e.isDirectory()) {
+        if (!/^(\.git|node_modules|bin|obj)$/i.test(e.name)) walk(join(dir, e.name), path);
+      } else if (/\.(sql|cs)$/i.test(e.name)) out.push({ path, text: readFileSync(join(dir, e.name), 'utf8').replace(/^﻿/, '') });
+    }
+  };
+  walk(root, '');
+  return out;
+}
+
+// The folder and the history it's compared with: { history, rows, columns, status, files, database }, or null.
+async function readMigrations(ctx, root) {
+  const session = ctx.session;
+  const dialect = dialectOf(session);
+  let files;
+  try {
+    if (!statSync(root).isDirectory()) throw Object.assign(new Error('not a folder'), { code: 'ENOTDIR' });
+    files = migrationFiles(root);
+  } catch (e) {
+    ctx.note(`${root}: ${e.code === 'ENOENT' ? 'no such folder' : e.code === 'ENOTDIR' ? 'not a folder' : firstLine(e.message)}`, 'error');
+    return null;
+  }
+  let out = null;
+  const r = await ctx.task(
+    `migrations in ${root}`,
+    async (signal) => {
+      const found = rowsOf((await session.run(probeSql(dialect.kind), { signal, limit: 100 })).sets[0]);
+      const history = pickHistory(found, { sqlserver: 'dbo', postgres: 'public' }[dialect.kind] ?? session.database);
+      let rows = [];
+      let columns = [];
+      if (!history.missing) {
+        const set = (await session.run(historySql(dialect, history), { signal, limit: 1_000_000 })).sets[0];
+        rows = rowsOf(set);
+        columns = set?.columns.map((c) => c.name) ?? [];
+      }
+      const status = migrationStatus({ tool: history.tool, files, rows });
+      if (history.missing && files.some((f) => parseFlywayName(f.path.split('/').at(-1))?.prefix === 'V')) {
+        status.notes.unshift(`These look like Flyway's, but ${session.database} has no flyway_schema_history, so Trawl keeps its own ${TOOLS.plain.table} for them; flyway baseline (or migrate) once makes Flyway's.`);
+      }
+      out = { history, rows, columns, status, files, database: session.database };
+      return [`${TOOLS[history.tool].label}: ${status.pending.length} pending of ${plural(files.length, 'file')}`];
+    },
+    { label: 'Reading the migrations', quiet: true },
+  );
+  return r.ok ? out : null;
+}
+
+function showMigrationStatus(ctx, root, m) {
+  // The folder by name: its whole path is in the text below, and in the title it would crowd out R's hint.
+  const title = `Migrations: ${basename(root)}`;
+  const text = statusText(m.status, { database: m.database, folder: root, history: m.history, files: m.files.length });
+  ctx.rememberOutput(title, text);
+  const n = m.status.pending.length;
+  ctx.showText(title, text, m.status.runnable && n ? { keys: { R: () => runMigrations(ctx, root) }, hint: `R runs the ${n} pending (/migrations run)` } : {});
+}
+
+/**
+ * /migrations [run] <folder>: the folder's migration scripts against the database's history table
+ * (Flyway, EF Core, DbUp, or Trawl's own): what's applied, pending, changed or missing. R there, or
+ * /migrations run, runs the pending ones in order. With run and no folder, the last one shown.
+ */
+export async function migrations(ctx, rest) {
+  if (!needSession(ctx)) return;
+  const args = splitArgs(rest);
+  const run = args[0]?.toLowerCase() === 'run';
+  const folder = (run ? args.slice(1) : args).join(' ') || (run ? (ctx.migrationsFolder ?? '') : '');
+  if (!folder) return run ? ctx.note('Which folder? /migrations run <folder>, or /migrations <folder> to see it first.', 'error') : ctx.prefill('/migrations ');
+  const root = resolve(folder);
+  ctx.migrationsFolder = root;
+  if (run) return runMigrations(ctx, root);
+  const m = await readMigrations(ctx, root);
+  if (m) showMigrationStatus(ctx, root, m);
+}
+
+/**
+ * Runs the pending migrations in order, each through runSql's checks (read-only, the questions before
+ * risky statements, manual commit) and recorded in the history as its tool would, stopping at the
+ * first that fails or is refused. Trawl's own history table is made first, after asking.
+ */
+export async function runMigrations(ctx, root) {
+  if (!needSession(ctx)) return;
+  const m = await readMigrations(ctx, root);
+  if (!m) return;
+  const { status, history } = m;
+  if (!status.runnable) return ctx.note(status.notes.at(-1), 'error');
+  if (!status.pending.length) return ctx.note(`Nothing pending in ${root}: ${m.database} has them all.`);
+  const session = ctx.session;
+  const { conn } = session;
+  const dialect = dialectOf(session);
+  if (isReadOnly(conn) && !ctx.writesAllowed) return ctx.note(`${conn.name} is read-only${conn.prod ? ' (production)' : ''}, and migrations change it. /writes allows writes until you disconnect.`, 'error');
+  const n = status.pending.length;
+  const odd = status.entries.filter((e) => ['changed', 'missing', 'failed'].includes(e.status)).length;
+  const names = status.pending.map((e) => e.script);
+  const ok = await ctx.confirm({
+    title: `Run ${plural(n, 'pending migration')} on ${conn.name}${conn.prod ? ' (production)' : ''}?`,
+    detail: `${odd ? `${odd} applied ${odd === 1 ? 'one is' : 'ones are'} changed, missing or failed, which ${TOOLS[status.tool].label} would stop at. ` : ''}${names.slice(0, 6).join(', ')}${n > 6 ? ` and ${n - 6} more` : ''}, in order, each recorded in ${history.table}; the first that fails stops the rest.`,
+    options: YES_NO(`Yes, run ${n === 1 ? 'it' : 'them'}`),
+    danger: Boolean(conn.prod) || odd > 0,
+  });
+  if (!ok) return;
+  if (history.missing) {
+    const make = await ctx.confirm({
+      title: `Make ${TOOLS.plain.table} in ${m.database} to record them?`,
+      detail: `Trawl's own history table, in ${history.schema}: each script's name, its checksum, who ran it, when, and how long it took.`,
+      options: YES_NO('Yes, make it'),
+    });
+    if (!make) return;
+    const c = await runSql(ctx, createPlainSql(dialect, history.schema), { title: `create ${TOOLS.plain.table}`, keep: true });
+    if (!c?.ok) return;
+  }
+  let rank = nextRank(m.rows);
+  let ran = 0;
+  for (const [i, e] of status.pending.entries()) {
+    const r = await runSql(ctx, e.file.text, {
+      title: `migration ${e.script}`,
+      keep: true,
+      run: async (text, { wrap, title }) => {
+        const started = Date.now();
+        const q = await ctx.query(wrap ? `${dialect.begin}\n${text}` : text, { title, wrapped: wrap, keep: true });
+        if (!q.ok) return q;
+        return ctx.query(recordSql(dialect, history, e, { ms: Date.now() - started, rank, columns: m.columns }), { title: `record ${e.script} in ${history.table}`, keep: true });
+      },
+    });
+    if (!r?.ok) {
+      const left = n - i - 1;
+      ctx.note(`Stopped at ${e.script}${r ? '' : ', which didn’t run'}${left ? `: the ${plural(left, 'migration')} after it didn’t run` : ''}.`, 'error');
+      break;
+    }
+    rank++;
+    ran++;
+  }
+  if (!ran) return;
+  if (ctx.tranCount) ctx.note(`Ran ${plural(ran, 'migration')} in an open transaction (${conn.name} commits manually): /commit keeps them, /rollback undoes them.`);
+  else ctx.note(`Ran ${plural(ran, 'migration')}, each recorded in ${history.table}.`, 'ok');
+  const again = await readMigrations(ctx, root);
+  if (again) showMigrationStatus(ctx, root, again);
+}
+
+/**
+ * /generate <table> [rows] [--seed n]: rows of made-up test data for a table as INSERTs, in a console
+ * tab of its own (generate) to read and run; nothing runs by itself. Foreign keys take values the
+ * referenced tables have (the first thousand, read in key order), so the same seed gives the same rows.
+ */
+export async function generateData(ctx, rest) {
+  if (!needSession(ctx)) return;
+  const args = splitArgs(rest);
+  let seed = 1;
+  const at = args.findIndex((x) => x.toLowerCase() === '--seed');
+  if (at >= 0) {
+    const value = args[at + 1];
+    if (value == null) return ctx.note('--seed takes a number (or any word): /generate <table> <rows> --seed 42', 'error');
+    seed = /^\d+$/.test(value) ? Number(value) : value;
+    args.splice(at, 2);
+  }
+  const [name, many] = args;
+  if (!name) return ctx.prefill('/generate ');
+  const obj = findObject(ctx.schema, name);
+  if (!obj) return ctx.note(`No table called ${name} in ${ctx.session.database}.`, 'error');
+  if (obj.kind !== 'table') return ctx.note(`${objectName(obj)} is a ${obj.kind}; /generate writes INSERTs into a table.`, 'error');
+  const count = many == null ? 10 : Number(many);
+  if (!Number.isInteger(count) || count < 1 || count > 100_000) return ctx.note('How many rows: a whole number from 1 to 100000 (/generate <table> <rows>).', 'error');
+  const session = ctx.session;
+  const dialect = dialectOf(session);
+  const schema = ctx.schema;
+  let built = null;
+  const r = await ctx.task(
+    `generate ${plural(count, 'row')} for ${objectName(obj)}`,
+    async (signal) => {
+      let unique = [];
+      try {
+        unique = uniqueColumns(buildTableExtras((await session.run(EXTRAS_SQL[dialect.kind], { signal, limit: 1_000_000 })).sets), obj);
+      } catch (e) {
+        // Without the indexes, only the primary key is kept unique.
+        if (e.cancelled) throw e;
+      }
+      const refs = [];
+      for (const fk of schema.foreignKeys.filter((f) => f.from.toLowerCase() === objectName(obj).toLowerCase())) {
+        const set = (await session.run(refValuesSql(dialect, fk), { signal, limit: 1000 })).sets[0];
+        const at = fk.columns.map(([, to]) => set?.columns.findIndex((c) => c.name.toLowerCase() === to.toLowerCase()) ?? -1);
+        const rows = at.some((i) => i < 0) ? [] : set.rows.slice(0, 1000).map((row) => at.map((i) => row[i]));
+        refs.push({ ...fk, rows, capped: rows.length >= 1000 });
+      }
+      built = generateScript(obj, count, { seed, kind: dialect.kind, quote: dialect.quote, refs, unique });
+      return ['The INSERTs are in a console tab of their own (generate): read them, then R runs them.'];
+    },
+    { label: `Making ${plural(count, 'row')} for ${objectName(obj)}` },
+  );
+  if (!r.ok || !built) return;
+  ctx.addConsoleTab(freeName(ctx.consoleTabs.names.map((n) => ({ name: n })), 'generate'));
+  ctx.setConsole(ed.fromText(built.script));
+}
+
+/**
+ * /scaffold <table> [csharp|ef|ts|python]: the table's or view's columns as a C# class (the default),
+ * an EF Core entity, a TypeScript interface or a Python dataclass, shown and copied to the clipboard.
+ */
+export function scaffoldObject(ctx, rest) {
+  if (!needSession(ctx)) return;
+  const args = splitArgsLoose(rest);
+  if (!args.length) return ctx.prefill('/scaffold ');
+  let lang = 'csharp';
+  if (args.length > 1) {
+    lang = languageOf(args.at(-1));
+    if (!lang) return ctx.note(`/scaffold makes ${LANGUAGES.join(', ')} (C# by default), not ${args.at(-1)}.`, 'error');
+    args.pop();
+  }
+  const obj = findObject(ctx.schema, args.join(' '));
+  if (!obj || (obj.kind !== 'table' && obj.kind !== 'view')) return ctx.note(`No table or view called ${args.join(' ')} in ${ctx.session.database}.`, 'error');
+  const text = scaffold(obj, lang, { kind: dialectOf(ctx.session).kind });
+  const title = `${LANGUAGE_NAMES[lang]}: ${objectName(obj)}`;
+  ctx.rememberOutput(title, text);
+  ctx.showText(title, text);
+  return ctx.copy(text, `the ${LANGUAGE_NAMES[lang]} for ${objectName(obj)}`);
 }

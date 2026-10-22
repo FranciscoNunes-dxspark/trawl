@@ -126,6 +126,7 @@ export function ConsoleView({ editor, tabs = ['console'], tab = 0, editing, ctx,
     if (key.ctrl && input === 'f') return ctx.prefill('/search ');
     if (input === 'f') return a.formatConsole(ctx);
     if (input === 'p') return a.showPlan(ctx);
+    if (input === 'P') return a.showActualPlan(ctx);
     // The tabs: the one before, the one after, a new one.
     if ((input === '[' || input === ']') && tabs.length > 1) return ctx.showConsoleTab((ctx.consoleTabs.index + (input === '[' ? tabs.length - 1 : 1)) % tabs.length);
     if (input === '+') return a.consoleTab(ctx, 'new');

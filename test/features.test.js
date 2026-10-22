@@ -7,7 +7,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import React from 'react';
 import { render } from 'ink-testing-library';
+import { EventEmitter } from 'node:events';
 import { DEMO_CONNECTIONS } from '../src/connections.js';
+import { postgresSession } from '../src/db-postgres.js';
+import { DIALECTS, splitScript } from '../src/dialects.js';
 import { App } from '../src/ui/App.jsx';
 
 const KEYS = { down: '\x1b[B', up: '\x1b[A', enter: '\r', esc: '\x1b' };
@@ -277,7 +280,9 @@ test('a long run ends with a notification, unless Settings turns it off', async 
   assert.match(told[0][1], /\d+ ms/);
   app.stdin.write(',');
   await until(() => frame().includes('Row limit'), 'Settings');
+  // The last row is the open-transaction warning; the notify row is just above it.
   app.stdin.write('G');
+  app.stdin.write('k');
   await until(() => /❯ Notify when done\s+on\s+after 0\.5 s/.test(frame()), 'the notify row');
   app.stdin.write(KEYS.enter);
   await until(() => /Notify when done\s+off/.test(frame()), 'turned off');
@@ -336,5 +341,139 @@ test('? opens on the section for the view on screen; j k pick another, / searche
   await until(() => frame().includes('❯ Activity') && !frame().includes('Matches for'), 'the search cleared, on the section it found');
   app.stdin.write(KEYS.esc);
   await until(() => !frame().includes('Keyboard shortcuts'), 'closed');
+  app.unmount();
+});
+
+test('/grep lists the definitions with the text in them; ↵ puts one in the console with the match selected', async () => {
+  mkdirSync(process.env.TRAWL_HOME, { recursive: true });
+  writeFileSync(join(process.env.TRAWL_HOME, 'console.sql'), '');
+  const app = start();
+  await until(() => frame().includes('Clubs'), 'the explorer');
+  await command(app, '/grep dbo.players');
+  await until(() => frame().includes('"dbo.players" in ClubA\'s definitions') && frame().includes('dbo.trg_Players_Goals'), 'the list');
+  assert.match(frame(), /❯ dbo\.vTopScorers\s+1 match · 3: FROM/);
+  assert.match(frame(), /A view: 1 match on this line\.[\s\S]*3  FROM dbo\.Players/);
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('CREATE VIEW dbo.vTopScorers AS') && frame().includes('↵/i type'), 'the view in the console, not typing');
+  assert.match(frame(), /─ Console ─+ selected ·/);
+  assert.match(frame(), /▌3 FROM dbo\.Players/, 'the cursor on the line with the match');
+  await command(app, '/grep nothing like this');
+  await until(() => frame().includes('No view, procedure, function or trigger has "nothing like this" in it.'), 'nothing found');
+  app.unmount();
+});
+
+test('u in the Explorer, or /uses, shows what refers to an object and what it refers to', async () => {
+  const app = start();
+  await until(() => frame().includes('Clubs'), 'the explorer');
+  app.stdin.write('u');
+  await until(() => frame().includes('Uses: dbo.Clubs') && frame().includes('dbo.usp_RecalculateTable'), 'the report on Clubs');
+  assert.match(frame(), /Tables, through their foreign keys/);
+  assert.match(frame(), /dbo\.Matches \(AwayId\) → Id  FK_Matches_Away/);
+  app.stdin.write(KEYS.esc);
+  await until(() => !frame().includes('Uses: dbo.Clubs'), 'closed');
+  await type(app.stdin, '/uses vTop');
+  await until(() => frame().includes('dbo.vTopScorers'), 'completion offers the object');
+  app.stdin.write('\t');
+  await until(() => frame().includes('/uses dbo.vTopScorers'), 'completed');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('Uses: dbo.vTopScorers') && /Uses\s+│\s*│\s+Tables\s+│\s*│\s+dbo\.Players/.test(frame()), 'the report on the view');
+  app.unmount();
+});
+
+// A pretend Postgres server behind the real pg session (db-postgres.js): it answers Trawl's catalog
+// queries and one table's rows, keeps the transaction status as the protocol would, records what
+// it's sent, and turns a save's DO block down while `refuse` says so.
+class FakePgServer extends EventEmitter {
+  constructor() {
+    super();
+    this.sent = [];
+    this.status = 'I';
+    this.refuse = null;
+    const field = (name, dataTypeID = 25) => ({ name, dataTypeID });
+    const answer = (names, rows) => ({ command: 'SELECT', fields: names.map((n) => field(n)), rows });
+    const catalog = [
+      answer(['db'], [['shop']]),
+      answer(['name'], [['shop']]),
+      answer(['schema', 'name', 'type', 'rows'], [['public', 'clubs', 'U', 2]]),
+      answer(['schema', 'object', 'name', 'type', 'max_length', 'precision', 'scale', 'is_nullable', 'is_identity', 'is_computed', 'pk'], [
+        ['public', 'clubs', 'id', 'integer', null, null, null, false, true, false, 1],
+        ['public', 'clubs', 'name', 'text', null, null, null, true, false, false, 0],
+        ['public', 'clubs', 'name_len', 'integer', null, null, null, true, false, true, 0],
+      ]),
+      answer(['name', 'schema', 'object', 'column', 'ref_schema', 'ref_object', 'ref_column'], []),
+      answer(['schema', 'object', 'name', 'type', 'max_length', 'precision', 'scale', 'is_output'], []),
+    ];
+    this.answers = new Map(splitScript(DIALECTS.postgres.schemaSql, DIALECTS.postgres).map((st, i) => [st.text, catalog[i]]));
+    this.rows = { command: 'SELECT', fields: [field('id', 23), field('name'), field('name_len', 23)], rows: [[1, 'Club A', 6], [2, 'Club B', 6]] };
+  }
+  async query({ text }) {
+    this.sent.push(text);
+    if (this.answers.has(text)) return this.answers.get(text);
+    if (/^SELECT \* FROM "public"\."clubs"/.test(text)) return this.rows;
+    const done = (command) => ({ command, fields: [], rows: [] });
+    if (/^BEGIN/.test(text)) return (this.status = 'T'), done('BEGIN');
+    if (/^ROLLBACK TO/.test(text)) return (this.status = 'T'), done('ROLLBACK');
+    if (/^(COMMIT|ROLLBACK)/.test(text)) return (this.status = 'I'), done('COMMIT');
+    if (/^DO /.test(text) && this.refuse) {
+      if (this.status === 'T') this.status = 'E';
+      throw Object.assign(new Error(this.refuse), { code: 'P0001' });
+    }
+    return done('SELECT');
+  }
+  getTransactionStatus() {
+    return this.status;
+  }
+  async end() {
+    this.emit('end');
+  }
+}
+
+test('on Postgres, Results are edited and saved too: a DO block in a savepoint, which a refused save goes back to', async () => {
+  const server = new FakePgServer();
+  const shop = { name: 'shop', kind: 'postgres', server: 'db', database: 'shop', user: 'app', commit: 'manual' };
+  const app = start('shop', { open: async (conn) => postgresSession(conn, server, { database: 'shop' }) }, { connections: [shop] });
+  await until(() => /❯ T clubs/.test(frame()), 'the explorer');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('Club A'), 'the rows of clubs');
+  assert.ok(server.sent.includes('SELECT * FROM "public"."clubs" LIMIT 500'));
+  app.stdin.write('e');
+  await until(() => frame().includes('id is an identity column'), 'the refusal on the identity key');
+  app.stdin.write('l');
+  await new Promise((r) => setTimeout(r, 50));
+  app.stdin.write('l');
+  await new Promise((r) => setTimeout(r, 50));
+  app.stdin.write('e');
+  await until(() => frame().includes('name_len is a generated column; the server sets it.'), 'the refusal on the generated column');
+  app.stdin.write('h');
+  await new Promise((r) => setTimeout(r, 50));
+  app.stdin.write('e');
+  await until(() => frame().includes('editing the cell'), 'typing in the cell');
+  app.stdin.write('\x15');
+  await type(app.stdin, "Club Q'");
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('1 edited row not saved'), 'the staged change');
+  // The connection commits manually, so the save will run in a transaction: it keeps to a savepoint.
+  app.stdin.write('s');
+  await until(() => frame().includes('Save 1 edited row to public.clubs on shop?'), 'the question');
+  assert.match(frame(), /SAVEPOINT trawl_edit;[\s│]*DO \$trawl\$/);
+  assert.match(frame(), /UPDATE "public"\."clubs" SET "name" = 'Club Q''' WHERE "id" = 1 AND "name" = 'Club A';/);
+  server.refuse = 'The row id = 1 changed or is gone since it was read. Nothing was saved.';
+  app.stdin.write('1');
+  await until(() => frame().includes('changed or is gone since it was read'), 'the refusal');
+  assert.match(frame(), /1 edited row not saved/, 'the change stays staged');
+  const sent = server.sent.slice(server.sent.findIndex((t) => /^BEGIN/.test(t)));
+  assert.match(sent[0], /^BEGIN$/);
+  assert.match(sent[1], /^-- trawl:edit 1 change to public\.clubs\nSAVEPOINT trawl_edit$/);
+  assert.match(sent[2], /^DO \$trawl\$/);
+  assert.deepEqual(sent.slice(3, 5), ['ROLLBACK TO SAVEPOINT trawl_edit', 'RELEASE SAVEPOINT trawl_edit']);
+  assert.equal(server.status, 'T', 'the transaction is open and usable again');
+  // Saved this time, and left for /commit.
+  server.refuse = null;
+  app.stdin.write('s');
+  await until(() => frame().includes('Save 1 edited row to public.clubs on shop?'), 'the question again');
+  app.stdin.write('1');
+  await until(() => frame().includes('save 1 edited row to public.clubs') && !frame().includes('not saved'), 'saved');
+  assert.match(frame(), /TRANSACTION OPEN/);
+  assert.match(server.sent.at(-1), /^RELEASE SAVEPOINT trawl_edit$/);
   app.unmount();
 });

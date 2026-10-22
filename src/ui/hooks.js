@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { useStdout } from 'ink';
+import { useStdin, useStdout } from 'ink';
 
 export function useTerminalSize() {
   const { stdout } = useStdout();
@@ -126,6 +126,34 @@ export function useMouse(ctx, handler, { top = 0, drags } = {}) {
       ctx.mouseHandlers = ctx.mouseHandlers.filter((h) => h !== entry);
     };
   }, []);
+}
+
+/**
+ * Rewrites keys where they come in, before any useInput handler (the views', App's) sees them:
+ * `translate(input)` gets each key as Ink read it and returns the key to hand on (the same one, or
+ * another), or null to swallow it. Returns `send(input)`, which hands a key to every handler as if it
+ * had been typed, without translating it. App uses it for your own keys (keymap.js) and ctrl+p.
+ */
+export function useKeyTranslation(translate) {
+  const { internal_eventEmitter: events } = useStdin();
+  const ref = useRef(translate);
+  ref.current = translate;
+  const emit = useRef(null);
+  useEffect(() => {
+    if (!events) return;
+    const own = events.emit;
+    emit.current = own;
+    events.emit = function (name, input, ...rest) {
+      if (name !== 'input' || typeof input !== 'string') return own.call(this, name, input, ...rest);
+      const out = ref.current(input);
+      return out == null ? false : own.call(this, name, out, ...rest);
+    };
+    return () => {
+      events.emit = own;
+      emit.current = null;
+    };
+  }, [events]);
+  return (input) => (emit.current ?? events?.emit)?.call(events, 'input', input);
 }
 
 // Results of slow reads (diffs, commit details), keyed by what was asked, so moving back is instant.

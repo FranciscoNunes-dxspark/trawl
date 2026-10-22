@@ -1,7 +1,7 @@
 // Reading a CSV file into a table: parsing it (quotes, quotes doubled inside them, line breaks
 // inside quotes, CRLF, a byte-order mark, comma, semicolon or tab between values) and turning its
 // rows into INSERT statements for the table's columns, matched by the header. Pure.
-import { insertScript, toLiteral } from './edit.js';
+import { canEdit, insertScript, toLiteral } from './edit.js';
 import { qualified } from './sql.js';
 
 /** The delimiter of the first line: the one of , ; and tab that appears most outside quotes. */
@@ -57,7 +57,7 @@ const norm = (s) => String(s).toLowerCase().replace(/[\s_-]+/g, '');
  * where the column allows it. Throws, saying the row and column, on a value that doesn't fit its type.
  * Returns { script, rows, columns, skipped, missing }.
  */
-export function csvInsertScript(rows, table, { quote } = {}) {
+export function csvInsertScript(rows, table, { quote, kind = 'sqlserver' } = {}) {
   if (!rows.length) throw new Error('The file is empty.');
   const [header, ...data] = rows;
   if (!data.length) throw new Error('The file has a header and no rows.');
@@ -67,17 +67,19 @@ export function csvInsertScript(rows, table, { quote } = {}) {
     const col = table.columns.find((c) => norm(c.name) === norm(h));
     if (!col) skipped.push(`${h || `(column ${i + 1})`}: no such column`);
     else if (col.identity) skipped.push(`${h}: an identity column, which the server fills`);
+    else if (col.computed) skipped.push(`${h}: ${kind === 'sqlserver' ? 'a computed' : 'a generated'} column, which the server fills`);
     else if (used.some((u) => u.col === col)) skipped.push(`${h}: ${col.name} is in the file twice`);
     else used.push({ i, col });
   });
   if (!used.length) throw new Error(`None of the file's columns (${header.join(', ')}) is a column of ${table.schema}.${table.name}.`);
-  const missing = table.columns.filter((c) => !c.identity && !c.nullable && !used.some((u) => u.col === c)).map((c) => c.name);
+  const missing = table.columns.filter((c) => !c.identity && !c.computed && !c.nullable && !used.some((u) => u.col === c)).map((c) => c.name);
   const values = data.map((r, n) => {
     if (r.length !== header.length) throw new Error(`Row ${n + 2} has ${r.length} value${r.length === 1 ? '' : 's'}; the header has ${header.length}.`);
     return used.map(({ i, col }) => {
       const v = r[i] === '' && (col.nullable || !/char|text/i.test(col.type)) ? null : r[i];
       try {
-        if (v !== null) toLiteral(v, col.type);
+        // Postgres reads its arrays, intervals and geometric values from text, though Trawl doesn't edit them.
+        if (v !== null && !(kind === 'postgres' && !canEdit({ type: col.type }, kind))) toLiteral(v, col.type, kind);
       } catch (e) {
         throw new Error(`Row ${n + 2}, ${col.name}: ${e.message} ("${v}")`);
       }
@@ -85,5 +87,5 @@ export function csvInsertScript(rows, table, { quote } = {}) {
     });
   });
   const set = { columns: used.map(({ col }) => ({ name: col.name, type: col.type })), rows: values };
-  return { script: insertScript(set, quote ? `${quote(table.schema)}.${quote(table.name)}` : qualified(table.schema, table.name), quote ? { quote } : {}), rows: values.length, columns: used.map(({ col }) => col.name), skipped, missing };
+  return { script: insertScript(set, quote ? `${quote(table.schema)}.${quote(table.name)}` : qualified(table.schema, table.name), quote ? { quote, kind } : { kind }), rows: values.length, columns: used.map(({ col }) => col.name), skipped, missing };
 }

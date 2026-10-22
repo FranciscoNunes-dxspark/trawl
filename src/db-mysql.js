@@ -3,7 +3,7 @@
 // understood), each result set cut at the row limit after it has arrived. esc cancels with KILL QUERY
 // from a second connection.
 import mysql from 'mysql2/promise';
-import { DbError, runScript } from './db.js';
+import { DbError, connectionLost, ended, localSocket, runScript } from './db.js';
 import { DIALECTS, splitScript } from './dialects.js';
 import { hostPort } from './connections.js';
 
@@ -12,17 +12,25 @@ const dialect = DIALECTS.mysql;
 // mysql2's column type codes for the numbers (right-aligned in the grid) and a few others.
 const TYPES = { 0: 'Decimal', 1: 'TinyInt', 2: 'SmallInt', 3: 'Int', 4: 'Real', 5: 'Float', 8: 'BigInt', 9: 'Int', 10: 'date', 12: 'datetime', 13: 'Int', 246: 'Decimal', 252: 'text', 253: 'varchar', 254: 'char', 245: 'json' };
 
-/** The mysql2 options for a connection: host:port from `server`, TLS when asked for. */
+/**
+ * The mysql2 options for a connection: host:port from `server`, TLS when asked for. FOUND_ROWS
+ * (mysql2's default, asked for here all the same) makes an UPDATE's count the rows it found, not
+ * only those whose values it changed, which saving edits relies on. Through an SSH
+ * tunnel, open (below) adds the socket as `stream`, and `host` stays the server's own name, which
+ * TLS goes by.
+ */
 export function mysqlConfig(conn, { database = conn.database, password } = {}) {
   const { host, port } = hostPort(conn.server, dialect.defaultPort);
   const ssl = conn.trustCert ? { rejectUnauthorized: false } : conn.ssl || conn.encrypt ? {} : undefined;
-  return { host, port, user: conn.user, password, database, ssl, timezone: 'Z', dateStrings: ['DATE'], supportBigNumbers: true, bigNumberStrings: true, connectTimeout: 20000, multipleStatements: false };
+  return { host, port, user: conn.user, password, database, ssl, timezone: 'Z', dateStrings: ['DATE'], supportBigNumbers: true, bigNumberStrings: true, connectTimeout: 20000, multipleStatements: false, flags: ['FOUND_ROWS'] };
 }
 
-export async function open(conn, { database, password, signal } = {}) {
+export async function open(conn, { database, password, signal, tunnel } = {}) {
   const config = mysqlConfig(conn, { database, password });
   let c;
   try {
+    // mysql2 takes the socket as it is, so it's connected to the tunnel's end first.
+    if (tunnel) config.stream = await localSocket(tunnel.port);
     c = await mysql.createConnection(config);
   } catch (e) {
     if (signal?.aborted) throw new DbError('Cancelled', { cancelled: true });
@@ -35,11 +43,11 @@ export async function open(conn, { database, password, signal } = {}) {
     c.destroy();
     throw new DbError('Cancelled', { cancelled: true });
   }
-  return mysqlSession(conn, c, { database: database ?? null, cancel: () => killQuery(config, c.threadId) });
+  return mysqlSession(conn, c, { database: database ?? null, cancel: () => killQuery(config, c.threadId, tunnel) });
 }
 
-async function killQuery(config, id) {
-  const other = await mysql.createConnection({ ...config, connectTimeout: 5000 });
+async function killQuery(config, id, tunnel) {
+  const other = await mysql.createConnection({ ...config, connectTimeout: 5000, ...(tunnel ? { stream: await localSocket(tunnel.port) } : {}) });
   try {
     await other.query(`KILL QUERY ${Number(id)}`);
   } finally {
@@ -61,6 +69,12 @@ export function collectResult([rows, fields], state, limit) {
     }
   }
 }
+
+/**
+ * The message a statement fails with unless it affects exactly one row: what follows its
+ * `-- trawl:one row:` line (edit.js saveScript writes one above each change), or null.
+ */
+export const oneRowCheck = (text) => text.match(/^-- trawl:one row: ([^\n]*)/)?.[1].trim() ?? null;
 
 // MySQL says nothing about open transactions without a query of its own, so the session follows the
 // statements: BEGIN or START TRANSACTION opens one; COMMIT, ROLLBACK and DDL (which commits) end it.
@@ -88,18 +102,23 @@ export function mysqlSession(conn, c, { database = null, cancel = async () => {}
           const { signal, limit = 500 } = opts;
           const onAbort = () => cancel().catch(() => {});
           signal?.addEventListener('abort', onAbort, { once: true });
+          let mismatch = null;
           try {
-            collectResult(await c.query({ sql: text, rowsAsArray: true }), state, limit);
+            const result = await c.query({ sql: text, rowsAsArray: true });
+            collectResult(result, state, limit);
             open = transactionAfter(open, text);
+            const one = oneRowCheck(text);
+            if (one && result[0]?.affectedRows !== 1) mismatch = one;
             const use = text.match(/^\s*USE\s+`?([^`\s;]+)`?/i);
             if (use) session.database = use[1];
           } catch (e) {
             if (e.errno === 1317 || signal?.aborted) throw new DbError('Cancelled', { cancelled: true });
             const at = String(e.message).match(/at line (\d+)/);
-            throw new DbError(e.sqlMessage ?? e.message, { number: e.errno ?? null, line: at ? line + Number(at[1]) - 1 : line });
+            throw new DbError(e.sqlMessage ?? e.message, { number: e.errno ?? null, line: at ? line + Number(at[1]) - 1 : line, lost: connectionLost(e) });
           } finally {
             signal?.removeEventListener('abort', onAbort);
           }
+          if (mismatch) throw new DbError(mismatch, { line });
         },
         { ...opts, split: (s) => splitScript(s, dialect) },
       ),
@@ -108,10 +127,8 @@ export function mysqlSession(conn, c, { database = null, cancel = async () => {}
       if (!session.closed) c.end().catch(() => c.destroy());
     },
   };
-  c.on?.('end', () => {
-    session.closed = true;
-    session.onEnd?.();
-  });
-  c.on?.('error', () => {});
+  c.on?.('end', () => ended(session));
+  // A connection that drops while idle (the server's wait_timeout) says so here.
+  c.on?.('error', (e) => connectionLost(e) && ended(session));
   return session;
 }

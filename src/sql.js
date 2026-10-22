@@ -312,15 +312,31 @@ export function classify(statement, { dialect = 'sqlserver' } = {}) {
 /**
  * A read-only count of the rows an UPDATE or DELETE would change: SELECT COUNT_BIG(*) over its FROM
  * and WHERE. Null when that can't be worked out safely (TOP, OUTPUT, WHERE CURRENT OF, a CTE, or more
- * than one statement).
+ * than one statement). On Postgres (`dialect`), UPDATE … FROM and DELETE … USING name the tables
+ * they read besides the one they change, which the count reads too, and RETURNING is left off.
  */
-export function countQuery(sql) {
-  const src = normalise(sql).trim().replace(/;\s*$/, '');
+export function countQuery(sql, { dialect } = {}) {
+  let src = normalise(sql).trim().replace(/;\s*$/, '');
   if (splitStatements(src).length !== 1) return null;
-  const toks = tokens(src);
+  let toks = tokens(src);
   const first = toks[0]?.w;
   if ((first !== 'UPDATE' && first !== 'DELETE') || toks.some((t) => ['TOP', 'OUTPUT', 'CURRENT', 'OPENQUERY'].includes(t.w))) return null;
   const at = (word, after = 0) => toks.find((t) => t.w === word && t.depth === 0 && t.at >= after)?.at ?? -1;
+  if (dialect === 'postgres') {
+    const returning = at('RETURNING');
+    if (returning >= 0) (src = src.slice(0, returning).trim()), (toks = tokens(src));
+    const set = first === 'UPDATE' ? at('SET') : -1;
+    const from = first === 'UPDATE' ? (set >= 0 ? at('FROM', set) : -1) : at('FROM');
+    const using = first === 'DELETE' ? at('USING') : -1;
+    if (first === 'UPDATE' && set >= 0 && from >= 0) {
+      const target = src.slice(toks[0].at + 6, set).trim().replace(/^ONLY\s+/i, '');
+      return `SELECT COUNT_BIG(*) FROM ${target}, ${src.slice(from + 4).trim()};`;
+    }
+    if (using >= 0) {
+      const target = src.slice(from >= 0 ? from + 4 : toks[0].at + 6, using).trim().replace(/^ONLY\s+/i, '');
+      return `SELECT COUNT_BIG(*) FROM ${target}, ${src.slice(using + 5).trim()};`;
+    }
+  }
   let body;
   if (first === 'DELETE') {
     // DELETE [FROM] t [WHERE …], or DELETE t FROM t JOIN … WHERE … (a second FROM says what's read).
@@ -396,6 +412,19 @@ export function toJson(set) {
     Object.fromEntries(set.columns.map((c, i) => [c.name, Buffer.isBuffer(row[i]) ? formatValue(row[i]) : row[i] ?? null])),
   );
   return JSON.stringify(rows, null, 2) + '\n';
+}
+
+const mdCell = (s) => s.replace(/\\/g, '\\\\').replace(/\|/g, '\\|').replace(/\r?\n|\r/g, '<br>');
+
+/**
+ * One result set as a Markdown table, header row first: values as the grid shows them (NULL as
+ * NULL), pipes escaped, line breaks as <br>, numbers aligned right.
+ */
+export function toMarkdown(set) {
+  const row = (cells) => `| ${cells.join(' | ')} |`;
+  const lines = [row(set.columns.map((c) => mdCell(c.name))), row(set.columns.map((c) => (isNumericType(c.type) ? '---:' : '---')))];
+  for (const r of set.rows) lines.push(row(r.map((v) => mdCell(formatValue(v)))));
+  return lines.join('\n') + '\n';
 }
 
 export const KEYWORDS = new Set(
@@ -486,7 +515,7 @@ export function withoutLeadingComments(text) {
 
 // Sorting values from the server: NULL first, then by what they are (numbers as numbers, dates
 // by time), text by the user's locale.
-function compareValues(a, b) {
+export function compareValues(a, b) {
   if (a == null || b == null) return a == null ? (b == null ? 0 : -1) : 1;
   if (a instanceof Date && b instanceof Date) return a - b;
   if ((typeof a === 'number' || typeof a === 'bigint') && (typeof b === 'number' || typeof b === 'bigint')) return a < b ? -1 : a > b ? 1 : 0;

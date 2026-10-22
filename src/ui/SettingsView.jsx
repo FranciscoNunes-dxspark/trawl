@@ -1,10 +1,11 @@
 import React from 'react';
 import { Box, useInput } from 'ink';
 import { configDir } from '../config.js';
-import { ACCENTS, setAccent, theme } from '../theme.js';
+import { ACCENTS, THEMES, applyTheme, setAccent, theme } from '../theme.js';
 import { relTime, wrap } from '../text.js';
 import { checksDisabled } from '../update.js';
 import { NOTIFY_AFTER } from '../notify.js';
+import { minutesText, nextWarnMinutes, warnMinutes } from '../transactions.js';
 import { VERSION } from '../version.js';
 import { useListNav, useMouse } from './hooks.js';
 import { Lines, Panel, Row } from './parts.jsx';
@@ -25,6 +26,7 @@ export function SettingsView({ config, ctx, updates, update, width, height, acti
 
   const accent = config.accent ?? ACCENTS[0].color;
   const preset = ACCENTS.findIndex((x) => x.color.toLowerCase() === accent.toLowerCase());
+  const themeSetting = THEMES.includes(config.theme) ? config.theme : 'auto';
   const checksOff = checksDisabled(config);
   const envOff = checksOff && config.checkUpdates !== false;
   const onOff = (on, note = '') => [{ text: on ? 'on' : 'off', color: on ? theme.ok : theme.dim, bold: true }, ...(note ? [{ text: `  ${note}`, color: theme.dim }] : [])];
@@ -44,7 +46,7 @@ export function SettingsView({ config, ctx, updates, update, width, height, acti
     {
       label: 'Accent colour',
       value: [
-        { text: '██ ', color: accent },
+        { text: '██ ', color: theme.accent },
         { text: preset >= 0 ? ACCENTS[preset].name : accent, bold: true },
         { text: preset === 0 ? '  (Glim’s)' : '', color: theme.dim },
       ],
@@ -54,6 +56,20 @@ export function SettingsView({ config, ctx, updates, update, width, height, acti
         const next = ACCENTS[(preset + 1) % ACCENTS.length].color;
         setAccent(next);
         ctx.setConfig((c) => ({ ...c, accent: next }));
+      },
+    },
+    {
+      label: 'Theme',
+      value: [{ text: themeSetting, bold: true }, { text: themeSetting === 'auto' ? `  ${theme.mode} here${process.env.COLORFGBG ? '' : ' (the terminal doesn’t say)'}` : '', color: theme.dim }],
+      hint: '↵ next',
+      about: [
+        'Dark or light colours, for a dark or a light terminal background; the accent colour stays yours either way (a preset takes its darker shade on light).',
+        'auto, the default, goes by COLORFGBG, which some terminals set (Konsole, rxvt, iTerm2 with its option on), and is dark where it isn’t set. ↵ goes through dark, light and auto; it is "theme" in config.json.',
+      ],
+      change: () => {
+        const next = THEMES[(THEMES.indexOf(themeSetting) + 1) % THEMES.length];
+        ctx.setConfig((c) => ({ ...c, theme: next }));
+        applyTheme(ctx.config);
       },
     },
     {
@@ -106,6 +122,16 @@ export function SettingsView({ config, ctx, updates, update, width, height, acti
       ],
       change: () => toggle('notify'),
     },
+    {
+      label: 'Warn about open transactions',
+      value: warnMinutes(config) ? [{ text: `after ${minutesText(warnMinutes(config))} idle`, bold: true }] : onOff(false),
+      hint: '↵ next',
+      about: [
+        `When a transaction has been open and nothing has run for ${warnMinutes(config) ? minutesText(warnMinutes(config)) : 'a while'}, Trawl rings the bell and asks the terminal for a notification, once, and the log says what the transaction holds (its locks, which block other sessions) with a reminder of /commit and /rollback. The header says how long it has been open.`,
+        '↵ goes through 1, 2, 5, 10, 15, 30 and 60 minutes, then off. "openTransactionWarning" in config.json takes any number of minutes (0 is off).',
+      ],
+      change: () => ctx.setConfig((c) => ({ ...c, openTransactionWarning: nextWarnMinutes(warnMinutes(c)) })),
+    },
   ];
   const nav = useListNav(rows.length, innerH);
   const row = rows[nav.index];
@@ -141,7 +167,7 @@ export function SettingsView({ config, ctx, updates, update, width, height, acti
             width={innerW}
             selected={nav.offset + i === nav.index}
             focused={active}
-            segments={[{ text: r.label.padEnd(LABEL_W), strong: true }, ...r.value]}
+            segments={[{ text: r.label.padEnd(Math.max(LABEL_W, r.label.length + 2)), strong: true }, ...r.value]}
           />
         ))}
       </Panel>

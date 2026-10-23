@@ -13,6 +13,15 @@ import { Lines, Panel, Row } from './parts.jsx';
 const SEP = ' │ ';
 const MAX_COL = 40;
 
+/**
+ * Runs `ref.current` when the component goes. The cleanup is made here rather than in the view, whose
+ * closures share one scope per render: made there, it would hold on to the first render's result
+ * set, however many runs later, for as long as the grid stays on screen.
+ */
+function useOnUnmount(ref) {
+  useEffect(() => () => ref.current(), []);
+}
+
 /** Column widths from the header and the first rows, so wide text doesn't push everything off screen. */
 export function columnWidths(set, sample = 200) {
   return set.columns.map((c, i) => {
@@ -280,13 +289,12 @@ export function ResultsView({ results, changes, setIndex, view, ctx, width, heig
   // The cell under the cursor, for /cell; forgotten when the grid goes, unless another grid has taken over.
   const shownCell = useRef(null);
   shownCell.current = ctx.cellOnScreen = cellAt(shownRows[nav.index], cur);
-  useEffect(
-    () => () => {
-      leaveCell.current();
-      if (ctx.cellOnScreen === shownCell.current) ctx.cellOnScreen = null;
-    },
-    [],
-  );
+  const unmount = useRef(null);
+  unmount.current = () => {
+    leaveCell.current();
+    if (ctx.cellOnScreen === shownCell.current) ctx.cellOnScreen = null;
+  };
+  useOnUnmount(unmount);
 
   const scrollCols = (n) => {
     colFree.current = hasCursor;

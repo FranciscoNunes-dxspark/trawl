@@ -4,6 +4,8 @@ import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import v8 from 'node:v8';
+import vm from 'node:vm';
 import React from 'react';
 import { render } from 'ink-testing-library';
 import { DEMO_CONNECTIONS } from '../src/connections.js';
@@ -1092,5 +1094,38 @@ test("an Azure SQL firewall that turns this machine away offers a rule through a
   await type(app.stdin, '/firewall demo');
   app.stdin.write(KEYS.enter);
   await until(() => frame().includes("demo isn't Azure SQL"), 'the refusal');
+  app.unmount();
+});
+
+test('Results lets go of a result set once two more have run', async () => {
+  // gc, which tests can't ask for otherwise.
+  v8.setFlagsFromString('--expose-gc');
+  const gc = vm.runInNewContext('gc');
+  const refs = [];
+  const open = async (conn, opts) => {
+    const s = demoSession(conn, opts);
+    const run = s.run;
+    s.run = (script, o) => {
+      if (!/FROM big/.test(script)) return run(script, o);
+      const set = { columns: [{ name: 'n', type: 'IntN' }], rows: Array.from({ length: 1000 }, (_, i) => [i]), truncated: false };
+      refs.push(new WeakRef(set.rows));
+      return Promise.resolve({ sets: [set], messages: [], stopped: false, ms: 1 });
+    };
+    return s;
+  };
+  const app = start('demo', { open });
+  await until(() => frame().includes('Clubs'), 'the explorer');
+  for (let i = 1; i <= 3; i++) {
+    app.stdin.write('!');
+    await type(app.stdin, `SELECT n FROM big -- run ${i}`);
+    app.stdin.write(KEYS.enter);
+    await until(() => frame().includes(`run ${i}`) && frame().includes('1000 rows'), `run ${i}`);
+  }
+  await new Promise((r) => setTimeout(r, 100));
+  gc();
+  await new Promise((r) => setTimeout(r, 10));
+  gc();
+  assert.equal(refs[0].deref(), undefined, "the first run's rows are still held");
+  assert.ok(refs[2].deref(), 'the rows on screen');
   app.unmount();
 });

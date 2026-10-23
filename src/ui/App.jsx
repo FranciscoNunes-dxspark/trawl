@@ -65,9 +65,9 @@ const helpSections = (user, keymap) => [...HELP, ...[keymapSection(keymap, VIEW_
 const CTRL_P = '\x10';
 
 const HINTS = {
-  explorer: '↵ first rows · d describe · s query it in the console · c CREATE script · /find filter',
+  explorer: '↵ first rows · d describe · s query it in the console · c CREATE script · C copy rows · /find filter',
   query: '↵ run statement · v select several · R run file · e edit in the console · /console',
-  results: 'h/l columns · o sort · f filter · ↵ record · v value · y/Y copy · F follow key · p pin · c compare · e edit · n NULL · d delete · a add · s save · x export',
+  results: 'h/l columns · o sort · f filter · ↵ record · v value · y/Y copy · F follow key · p pin · c compare · e edit · n NULL · d delete · a add · s save · x export · C copy rows',
   history: '↵ run again · e edit in the console · ◆ ran by Claude',
   connections: '↵ connect · n new · p password · f folder · x forget',
   activity: 'R read again · ↵ full SQL · x kill · a idle sessions too · J jobs · Q top queries',

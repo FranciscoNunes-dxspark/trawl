@@ -68,6 +68,7 @@ export const COMMANDS = [
   { name: 'why', desc: 'Claude explains the last error and puts a corrected statement in the console (nothing runs)', run: (ctx) => a.why(ctx) },
   { name: 'explain', desc: 'Claude explains the last plan (p): what it does, what costs most, what might help', run: (ctx) => a.explainPlan(ctx) },
   { name: 'api', args: '[csharp|node|python|go]', desc: "Claude writes an HTTP endpoint that runs the console's statement, in the project's language (s saves it); copies a request for Hail", run: (ctx, s) => a.api(ctx, s) },
+  { name: 'copy-rows', args: '<target> [table] [--where <condition>] [--no-mask]', desc: 'Copy rows (and the rows they refer to) to another connection, personal data made up; the script shows first (C in Results and the Explorer)', complete: 'connections', run: (ctx, s) => a.copyRowsTo(ctx, s) },
   { name: 'last', desc: 'Show the full output of the last run', run: (ctx) => ctx.showLast() },
   { name: 'refresh', desc: 'Reload the schema', run: (ctx) => ctx.refresh() },
   { name: 'help', desc: 'Keyboard shortcuts', run: (ctx) => ctx.showHelp() },

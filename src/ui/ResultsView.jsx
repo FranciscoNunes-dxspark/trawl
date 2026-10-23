@@ -237,6 +237,11 @@ export function ResultsView({ results, changes, setIndex, view, ctx, width, heig
     else if (input === 'Y' && set?.rows[row]) ctx.copy(tsvText(set, { header: false, rows: [set.rows[row]] }), `row ${row + 1}, tab-separated`);
     else if (k.return && set?.rows[row]) ctx.showText(`Row ${row + 1} of ${set.rows.length}`, recordText(set, set.rows[row]));
     else if (input === 'a' && set) addRow();
+    else if (input === 'C' && set) {
+      const table = results.edit?.table ?? results.source?.table;
+      if (!table) return ctx.note(`These rows aren't one table's, so there's nothing to copy from: /copy-rows <target> <table>.`, 'error');
+      a.pickCopyTarget(ctx, `${table.schema}.${table.name}`);
+    }
     else if (row == null || !set) return;
     else if (input === 'v') {
       ctx.cellOnScreen = cellAt(row, cur);

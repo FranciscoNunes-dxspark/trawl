@@ -291,3 +291,8 @@ test('connect hands Postgres and MySQL connections to their adapters, which fail
     await assert.rejects(connect({ name: kind, kind, server: '127.0.0.1:1', user: 'u', auth: 'sql' }, { password: 'x' }), (e) => e instanceof DbError && !e.needsPassword);
   }
 });
+
+test('a SQL Server connection loads tedious when it first connects, and fails as a DbError', async () => {
+  const { connect, DbError } = await import('../src/db.js');
+  await assert.rejects(connect({ name: 'mssql', server: '127.0.0.1,1', user: 'u', auth: 'sql' }, { password: 'x' }), (e) => e instanceof DbError && !e.needsPassword && /127\.0\.0\.1|ECONNREFUSED|connect/i.test(e.message));
+});

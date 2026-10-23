@@ -3,7 +3,6 @@
 // SQL Server goes through tedious here; Postgres and MySQL through the adapters in db-postgres.js and
 // db-mysql.js, and the demo driver (demo.js), all with the same session interface.
 import net from 'node:net';
-import { Connection, Request } from 'tedious';
 import { az as runAz, azureSqlToken, passwordFromApp } from './azure.js';
 import { tediousConfig } from './connections.js';
 import { STORE_NAME, osCredentials } from './credentials.js';
@@ -119,6 +118,11 @@ export async function connect(conn, { database = conn.database, signal, password
   return s;
 }
 
+// tedious, loaded with the first SQL Server connection: it takes a fifth of a second to load, which
+// a start on the demo, Postgres or MySQL (and every start until it connects) needn't wait for.
+let tedious = null;
+const loadTedious = async () => (tedious ??= await import('tedious'));
+
 /**
  * connect without the tunnel; `tunnel` ({ port, host, targetPort }) is one already open. A stored
  * password that's turned down is tried again from the connection's `passwordFrom`, when it has one.
@@ -168,6 +172,7 @@ async function openOnce(conn, { database, signal, password, credentials, tunnel,
     from = found.from;
     secrets.password = found.password;
   }
+  const { Connection } = await loadTedious();
   const connection = new Connection(tediousConfig(conn, { ...secrets, database, connector: tunnel && tunnelConnector(tunnel) }));
   await new Promise((resolve, reject) => {
     const onAbort = () => connection.close();
@@ -305,7 +310,7 @@ function runBatch(connection, sql, line, state, { signal, limit = 500, drain = f
     let current = null;
     const onAbort = () => connection.cancel();
     signal?.addEventListener('abort', onAbort, { once: true });
-    const request = new Request(sql, (err) => {
+    const request = new tedious.Request(sql, (err) => {
       signal?.removeEventListener('abort', onAbort);
       if (!err) return resolve();
       // Trawl cancels on purpose once a result set reaches the row limit.

@@ -35,6 +35,9 @@ import { LANGUAGE_NAMES, LANGUAGES, languageOf, scaffold } from './scaffold.js';
 import { UNDO_ROWS, reverseScript, snapshotOf, snapshotRows, snapshotSummary, undoPlan, withSnapshot } from './undo.js';
 import { loadUndo, saveUndo } from './config.js';
 import { relTime } from './text.js';
+import { takeLine } from './family.js';
+import { handOverText } from './siblings.js';
+import { API_LANGUAGES, API_SYSTEM, apiFileName, apiLanguage, apiPrompt, apiRequest, parseApi, projectLanguage } from './api.js';
 import { applySqlcmd, bindVariables, classifyScript, countQuery, oneLine, scriptVariables, splitStatements, sqlcmdVariables, statementAt, toCsv, toJson, toMarkdown, withoutLeadingComments } from './sql.js';
 
 // A WHERE that still changes more rows than this is asked about too.
@@ -2156,4 +2159,81 @@ export function scaffoldObject(ctx, rest) {
   ctx.rememberOutput(title, text);
   ctx.showText(title, text);
   return ctx.copy(text, `the ${LANGUAGE_NAMES[lang]} for ${objectName(obj)}`);
+}
+
+// ---------------------------------------------------------------------------------------------------
+// The family: what Trawl hands Splice, Sonar, Bosun and Hail (a command line copied to paste into
+// their prompt), and what it takes from them (/take). Nothing secret goes into a line.
+
+/** Copies `line` for `app` ('Hail') and says so in the log: the line, or for a /take what it holds. */
+export async function handOver(ctx, app, line, context = null) {
+  try {
+    const via = await ctx.copyText(line);
+    ctx.note(`${handOverText(app, line, context)}${via === 'terminal' ? ' (copied through the terminal, which has to allow it)' : ''}`, 'ok');
+  } catch (e) {
+    ctx.note(`Couldn't copy: ${firstLine(e.message)}`, 'error');
+  }
+}
+
+/**
+ * /api [language]: Claude writes an HTTP endpoint that runs the console's statement (its parameters
+ * as route or query parameters) in the project's language: C# when a *.csproj is in the folder, Node
+ * when a package.json is, else the one named, else it asks. It shows in the viewer (s saves it), and
+ * a Hail /take request line for calling it is copied.
+ */
+export async function api(ctx, rest = '') {
+  const word = String(rest).trim();
+  let language = word ? apiLanguage(word) : null;
+  if (word && !language) return ctx.note(`/api writes ${Object.keys(API_LANGUAGES).join(', ')}, not ${word}.`, 'error');
+  const pick = consolePick(ctx);
+  if (!pick?.text.trim()) return ctx.note('Nothing to turn into an endpoint: put the cursor on a statement in the console (or select it).', 'error');
+  const conn = ctx.session?.conn;
+  if (conn && !canSeeSchema(conn)) return ctx.note(`${conn.name} is closed to Claude. /ai schema lets Claude see its SQL and names (never rows).`, 'error');
+  const dir = ctx.projectDir;
+  language ??= projectLanguage(dir);
+  if (!language) {
+    language = await ctx.confirm({
+      title: 'Which language should the endpoint be in?',
+      detail: `There's no *.csproj or package.json in ${dir} to go by. /api <language> says it straight away.`,
+      options: [...Object.entries(API_LANGUAGES).map(([value, l]) => ({ label: l.name, value })), { label: 'Cancel', value: false }],
+    });
+    if (!language) return;
+  }
+  const d = dialectOf(ctx.session);
+  const sql = pick.text.trim();
+  const prompt = apiPrompt({ sql, language, label: d.label, database: ctx.session?.database ?? null });
+  let answer = null;
+  const r = await ctx.task(
+    `ask Claude for an endpoint: ${oneLine(withoutLeadingComments(sql))}`,
+    async (signal) => {
+      answer = parseApi(await ctx.askClaude({ prompt, system: API_SYSTEM, signal }));
+      return [`${answer.method} ${answer.path} in ${API_LANGUAGES[language].name}: on screen (s saves it).`];
+    },
+    { label: 'Asking Claude for an endpoint' },
+  );
+  if (!r.ok || !answer) return;
+  const title = `${answer.method} ${answer.path} · ${API_LANGUAGES[language].name}`;
+  ctx.rememberOutput(title, answer.code);
+  ctx.showText(title, answer.code, { hint: 's save to a file', keys: { s: () => saveApi(ctx, answer, language) } });
+  const request = apiRequest(answer, { name: `${answer.method} ${answer.path}` });
+  await handOver(ctx, 'Hail', takeLine('request', request), { kind: 'request', data: request });
+}
+
+async function saveApi(ctx, answer, language) {
+  const dir = ctx.projectDir;
+  const name = await ctx.askText({ title: 'Save the endpoint as', detail: `A path in ${dir}, or one of your own.`, value: apiFileName(answer, language) });
+  if (!name?.trim()) return;
+  const full = resolve(dir, pathArg(name));
+  try {
+    statSync(full);
+    const ok = await ctx.confirm({ title: `${basename(full)} is there already. Replace it?`, detail: full, options: YES_NO('Yes, replace it') });
+    if (!ok) return;
+  } catch {}
+  try {
+    mkdirSync(dirname(full), { recursive: true });
+    await writeFile(full, answer.code, 'utf8');
+    ctx.note(`Saved the endpoint to ${full}.`, 'ok');
+  } catch (e) {
+    ctx.note(`Couldn't write ${full}: ${firstLine(e.message)}`, 'error');
+  }
 }

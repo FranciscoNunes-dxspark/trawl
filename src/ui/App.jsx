@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Box, Text, useApp, useInput } from 'ink';
 import { readFileSync, statSync, unwatchFile, watchFile } from 'node:fs';
-import { basename, resolve } from 'node:path';
+import { basename, dirname, resolve } from 'node:path';
 import * as a from '../actions.js';
 import { COMMANDS, findCommand, suggestionsFor } from '../commands.js';
 import { loadClaudeHistory, loadConsole, removeConsole, saveConfig, saveConsole, withRan } from '../config.js';
@@ -45,6 +45,7 @@ import { COMPILED, VERSION } from '../version.js';
 import { worthNotifying } from '../notify.js';
 import { changedCells, untilMatch, untilText } from '../watch.js';
 import { dueWarning, locksText, openFor, warnMinutes, warningTitle } from '../transactions.js';
+import { repoRoot } from '../family.js';
 
 const VIEWS = [
   { id: 'explorer', label: 'Explorer' },
@@ -194,10 +195,11 @@ const DOUBLE_CLICK_MS = 400;
  * the last one. `az(args, { signal })` runs the Azure CLI (azure.js) and `publicIp({ signal })` finds this
  * machine's address, for an Azure SQL firewall; `firewallWaits` are the pauses (ms) before each try
  * to connect again once a rule is added. The tests pass their own, so nothing reaches Azure.
+ * `projectDir` is the folder Trawl started in, the project /api (and later the family's commands) look at.
  */
 const FIREWALL_WAITS = [0, 5000, 10000];
 
-export function App({ config: initialConfig, initialFile, initialConnection, checkLatest, installUpdate, askClaude = askClaudeCli, findDataSources, credentials = osCredentials, open = openSession, clipboard = copyToClipboard, setTitle, mouse, notify, azureSql, az = runAz, publicIp = findPublicIp, firewallWaits = FIREWALL_WAITS }) {
+export function App({ config: initialConfig, initialFile, initialConnection, checkLatest, installUpdate, askClaude = askClaudeCli, findDataSources, credentials = osCredentials, open = openSession, clipboard = copyToClipboard, setTitle, mouse, notify, azureSql, az = runAz, publicIp = findPublicIp, firewallWaits = FIREWALL_WAITS, projectDir = process.cwd() }) {
   const { exit } = useApp();
   const { columns, rows } = useTerminalSize();
   const [config, setConfigState] = useState(initialConfig);
@@ -1059,6 +1061,12 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
       get watching() {
         return watchRef.current && { every: watchRef.current.every, run: watchRef.current.run, title: watchRef.current.title };
       },
+      // The project the family's commands look at: the open script's checkout (or its folder), else
+      // the folder Trawl started in.
+      get projectDir() {
+        const f = fileRef.current;
+        return f?.path ? (repoRoot(dirname(f.path)) ?? dirname(f.path)) : resolve(projectDir);
+      },
       // What useMouse registers: the component on screen takes the main area's clicks and wheel.
       mouseHandlers: [],
     };
@@ -1120,6 +1128,9 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
         note(`Couldn't copy: ${firstLine(e.message)}`, 'error');
       }
     },
+    // Puts text on the clipboard without a word in the log (the caller says what it was); resolves
+    // 'terminal' when it went through the terminal (OSC 52).
+    copyText: (text) => Promise.resolve(clipboard(text)),
     // Text selected with the mouse (the console's SQL), or cut with ctrl+x: copied, and said for a
     // moment in the bottom line.
     copySelection: (text, verb = 'Copied') =>

@@ -64,6 +64,7 @@ export const HELP = [
       ['[  ]  +', 'Console tabs: the one before · the one after · a new one (/tab new [name])'],
       ['/tab …', '/tab <name or number> switch · /tab rename <name> · /tab close · /tab alone lists them\nclick a tab\'s name in the title to go to it · drop a .sql or .txt file on Trawl to open it in a tab'],
       ['S', 'Save the statement under the cursor (or the selection) as a snippet (/snippet save <name>)'],
+      ['/api [language]', 'Claude writes an HTTP endpoint that runs the statement (C# if the project has a .csproj, Node if a package.json); s saves it, and a request for Hail is copied'],
     ],
   },
   {
@@ -211,6 +212,7 @@ export const HELP = [
     rows: [
       ['/ask <question>', 'Claude writes a query from the schema; it lands in the console, and nothing runs until ctrl+r'],
       ['/explain', 'Claude explains the last plan: what it does, what costs most, what might help (the query and plan only)'],
+      ['/api [language]', 'Claude writes an HTTP endpoint that runs the console\'s statement, its parameters as route or query parameters, in the project\'s language; s saves it, and a Hail request for it is copied'],
       ['/why', 'Claude explains the last error (its message, line and SQL, with the schema\'s names) and puts a corrected statement in the console, the explanation as comments; nothing runs'],
       ['/ai [connection] [off|schema|results]', 'What Claude may see: nothing, names only (the default), or rows too'],
       ['trawl mcp', 'Run from Claude Code (claude mcp add --scope user trawl -- trawl mcp); it only reads'],

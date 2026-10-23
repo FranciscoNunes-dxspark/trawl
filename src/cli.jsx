@@ -6,6 +6,7 @@ import { loadConfig } from './config.js';
 import { DEMO_CONNECTIONS } from './connections.js';
 import { applyTheme } from './theme.js';
 import { App } from './ui/App.jsx';
+import { familyDir } from './family.js';
 import { terminalMouse } from './mouse.js';
 import { notification } from './notify.js';
 import { parseArgs } from './launch.js';
@@ -97,6 +98,7 @@ async function runApp() {
       setTitle={setTitle}
       mouse={mouse}
       notify={(title, body) => process.stdout.write(notification(title, body))}
+      familyHome={familyDir()}
     />,
     // Through the mouse's stdout, which watches the frames to select text from.
     { exitOnCtrlC: false, stdout: mouse?.stdout ?? process.stdout },

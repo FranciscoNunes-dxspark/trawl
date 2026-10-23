@@ -1,15 +1,15 @@
-// The family: /take and /share. The pure
+// The family: /take, /share, /family, pasting a command over a view, and the mascots' moods. The pure
 // parts (siblings.js), then the real UI against the demo, in app.test.js's style.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import React from 'react';
 import { render } from 'ink-testing-library';
 import { DEMO_CONNECTIONS } from '../src/connections.js';
-import { contextIn, takeLine } from '../src/family.js';
-import { connectionForQuery, handOverText, rowsContext, rowsScript } from '../src/siblings.js';
+import { contextIn, projectAt, readMoods, takeLine, writeMood } from '../src/family.js';
+import { connectionForQuery, familyMood, familyOffers, handOverText, moodsToShow, notForTrawl, reactionText, rowsContext, rowsScript } from '../src/siblings.js';
 import { App } from '../src/ui/App.jsx';
 
 const KEYS = { enter: '\r', esc: '\x1b', down: '\x1b[B' };
@@ -48,9 +48,21 @@ const command = async (app, text) => {
   app.stdin.write(KEYS.enter);
 };
 
-test('handing over: what the log says', () => {
+test('handing over: what the log says, whose a context is, and what a project offers', () => {
   assert.equal(handOverText('Splice', '/open C:\\repo'), "Copied for Splice: paste it into Splice's prompt\n/open C:\\repo");
   assert.equal(handOverText('Hail', 'x', { kind: 'request', data: { method: 'GET', url: '{{host}}/a' } }), "Copied for Hail: paste it into Hail's prompt\nrequest GET {{host}}/a");
+  assert.equal(notForTrawl({ kind: 'request', data: { method: 'GET', url: 'https://x' } }), "That's a request GET https://x, for Hail: paste it into Hail's prompt instead.");
+  assert.match(notForTrawl({ kind: 'exception', data: { type: 'E' } }), /^That's an exception E, for Splice or Sonar: paste it into Splice's or Sonar's prompt instead\.$/);
+  const dir = mkdtempSync(join(base, 'proj-'));
+  mkdirSync(join(dir, '.git'));
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({ scripts: { dev: 'node a.js' } }));
+  mkdirSync(join(dir, 'http'));
+  writeFileSync(join(dir, 'http', 'api.http'), 'GET https://x\n');
+  const offers = familyOffers(projectAt(dir));
+  assert.deepEqual(offers.map((o) => o.app), ['Splice', 'Bosun', 'Hail']);
+  assert.equal(offers[0].line, `/open ${dir.includes(' ') ? `"${dir}"` : dir}`);
+  assert.equal(offers[1].line.split(' ')[0], '/move');
+  assert.match(offers[2].line, /^\/open .*api\.http$/);
 });
 
 test('rows: from a set, without secrets, and back as an INSERT; the connection a query was for', () => {
@@ -67,7 +79,20 @@ test('rows: from a set, without secrets, and back as an INSERT; the connection a
   assert.equal(connectionForQuery(conns, { server: 'demo', database: 'ClubA' }).name, 'demo');
 });
 
-test('/take query puts the SQL in a console tab on its connection; /take rows an INSERT', async () => {
+test('moods: Glim\'s in the family\'s words, which of the others it reacts to, and how it says so', () => {
+  const session = { conn: { name: 'dev' }, database: 'Shop' };
+  assert.deepEqual(familyMood('alert', { session, tranMinutes: 20.4 }), { mood: 'worried', reason: 'transaction open 20 min on dev/Shop' });
+  assert.deepEqual(familyMood('worried', { session, lastEntry: { lines: ["Invalid object name 'x'."] } }), { mood: 'sad', reason: "query failed on dev/Shop: Invalid object name 'x'." });
+  assert.equal(familyMood('look', { busy: { label: 'Running' } }).mood, 'busy');
+  assert.equal(familyMood('happy', { session }).mood, 'happy');
+  assert.deepEqual(familyMood('sleep'), { mood: 'neutral', reason: 'not connected' });
+  const moods = [{ app: 'sonar', mood: 'worried', reason: 'production has 12 new exceptions', at: 2 }, { app: 'bosun', mood: 'busy', reason: 'x', at: 1 }, { app: 'hail', mood: 'happy', reason: '', at: 3 }];
+  assert.deepEqual(moodsToShow(moods, new Set(['hail:3'])).map((m) => m.app), ['sonar']);
+  assert.equal(reactionText(moods[0]), 'Ping says: production has 12 new exceptions');
+  assert.equal(reactionText(moods[2]), 'Hoot is happy');
+});
+
+test('/take query puts the SQL in a console tab on its connection; /take rows an INSERT; others say whose they are', async () => {
   const app = start('demo');
   await until(() => frame().includes('Clubs'), 'the explorer');
   await command(app, `take ${takeLine('query', { sql: 'SELECT * FROM dbo.Matches', server: 'demo', database: 'ClubB' })}`);
@@ -76,6 +101,8 @@ test('/take query puts the SQL in a console tab on its connection; /take rows an
   await command(app, `take ${takeLine('rows', { table: 'dbo.Clubs', columns: ['Id', 'Name'], rows: [[9, 'New FC']] })}`);
   await until(() => frame().includes("(9, N'New FC')"), 'the rows as an INSERT');
   assert.match(frame(), /\[3 rows\]/);
+  await command(app, `take ${takeLine('commit', { hash: 'abc1234def', subject: 'Fix it' })}`);
+  await until(() => frame().includes("That's a commit abc1234def Fix it, for Splice"), 'whose it is');
   app.unmount();
 });
 
@@ -106,3 +133,63 @@ test('t in Results copies the row as /take rows for Hail; t in the console the s
   app.unmount();
 });
 
+test('a command or a context pasted over a view goes into the prompt, and ↵ runs it', async () => {
+  const app = start('demo');
+  await until(() => frame().includes('Clubs'), 'the explorer');
+  const line = takeLine('query', { sql: 'SELECT 2 AS two' });
+  app.stdin.write(`${line.replace(/^\/take /, '')}\r`);
+  await until(() => frame().includes('> family:v1:query:'), 'the context in the prompt');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('SELECT 2 AS two'), 'taken');
+  assert.match(frame(), /didn't say which database it was for/);
+  app.stdin.write('1');
+  await until(() => frame().includes('Explorer') && !frame().includes('typing SQL'), 'the explorer');
+  app.stdin.write('/limit 77\n');
+  await until(() => frame().includes('> /limit 77'), 'the command in the prompt, not run');
+  app.stdin.write(KEYS.enter);
+  await until(() => /77/.test(frame()) && !frame().includes('> /limit 77'), 'the command run');
+  app.unmount();
+});
+
+test('/family lists what the project offers the others, and ↵ copies the line', async () => {
+  const dir = mkdtempSync(join(base, 'repo-'));
+  mkdirSync(join(dir, '.git'));
+  writeFileSync(join(dir, 'api.http'), 'GET https://x\n');
+  const copied = [];
+  const app = start('demo', { projectDir: dir, clipboard: async (text) => (copied.push(text), 'system') });
+  await until(() => frame().includes('Clubs'), 'the explorer');
+  await command(app, 'family');
+  await until(() => frame().includes('offers the family'), 'the list');
+  assert.match(frame(), /❯ Splice +\/open/);
+  assert.match(frame(), /Hail +\/open /);
+  assert.doesNotMatch(frame(), /Bosun/);
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes("Copied for Splice: paste it into Splice's prompt"), 'copied for Splice');
+  assert.equal(copied.at(-1), `/open ${dir}`);
+  app.unmount();
+});
+
+test('Glim writes its mood for the family, and says once what a sibling is worried about', async () => {
+  const home = mkdtempSync(join(base, 'family-'));
+  writeMood('sonar', { mood: 'worried', reason: 'production has 12 new exceptions' }, { dir: home });
+  const app = start('demo', { familyHome: home, moodEvery: 200 });
+  await until(() => frame().includes('Ping says: production has 12 new exceptions'), 'the reaction');
+  await until(() => readMoods('sonar', { dir: home }).some((m) => m.app === 'trawl'), 'Glim\'s mood written');
+  app.stdin.write(KEYS.esc);
+  await until(() => !frame().includes('Ping says'), 'dismissed');
+  // Shown once: reading again doesn't bring it back, but a new one comes.
+  await new Promise((r) => setTimeout(r, 500));
+  assert.doesNotMatch(frame(), /Ping says/);
+  writeMood('hail', { mood: 'sad', reason: 'POST /orders failed: 500' }, { dir: home });
+  await until(() => frame().includes('Hoot says: POST /orders failed: 500'), 'the next reaction');
+  app.unmount();
+  // Turned off in Settings, nothing is read or written.
+  const quiet = mkdtempSync(join(base, 'quiet-'));
+  writeMood('sonar', { mood: 'sad', reason: 'down' }, { dir: quiet });
+  const off = start('demo', { familyHome: quiet, moodEvery: 100 }, { familyMoods: false });
+  await until(() => frame().includes('Clubs'), 'the explorer');
+  await new Promise((r) => setTimeout(r, 400));
+  assert.doesNotMatch(frame(), /Ping says/);
+  assert.ok(!readMoods('sonar', { dir: quiet }).some((m) => m.app === 'trawl'));
+  off.unmount();
+});

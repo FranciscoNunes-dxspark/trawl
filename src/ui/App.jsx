@@ -45,8 +45,8 @@ import { COMPILED, VERSION } from '../version.js';
 import { worthNotifying } from '../notify.js';
 import { changedCells, untilMatch, untilText } from '../watch.js';
 import { dueWarning, locksText, openFor, warnMinutes, warningTitle } from '../transactions.js';
-import { projectAt, repoRoot } from '../family.js';
-import { newDatabases, projectNote } from '../siblings.js';
+import { decodeContext, projectAt, readMoods, repoRoot, writeMood } from '../family.js';
+import { familyMood, moodsToShow, newDatabases, projectNote, reactionText } from '../siblings.js';
 
 const VIEWS = [
   { id: 'explorer', label: 'Explorer' },
@@ -196,11 +196,14 @@ const DOUBLE_CLICK_MS = 400;
  * the last one. `az(args, { signal })` runs the Azure CLI (azure.js) and `publicIp({ signal })` finds this
  * machine's address, for an Azure SQL firewall; `firewallWaits` are the pauses (ms) before each try
  * to connect again once a rule is added. The tests pass their own, so nothing reaches Azure.
- * `projectDir` is the folder Trawl started in, the project /api (and later the family's commands) look at.
+ * `projectDir` is the folder Trawl started in (the project /family, /project and /api look at), and
+ * `familyHome` the family's folder for the mascots' moods (family.js familyDir): without it, as in the
+ * tests that don't pass one, Glim's mood is neither written nor are the others' read, every
+ * `moodEvery` ms.
  */
 const FIREWALL_WAITS = [0, 5000, 10000];
 
-export function App({ config: initialConfig, initialFile, initialConnection, checkLatest, installUpdate, askClaude = askClaudeCli, findDataSources, credentials = osCredentials, open = openSession, clipboard = copyToClipboard, setTitle, mouse, notify, azureSql, az = runAz, publicIp = findPublicIp, firewallWaits = FIREWALL_WAITS, projectDir = process.cwd() }) {
+export function App({ config: initialConfig, initialFile, initialConnection, checkLatest, installUpdate, askClaude = askClaudeCli, findDataSources, credentials = osCredentials, open = openSession, clipboard = copyToClipboard, setTitle, mouse, notify, azureSql, az = runAz, publicIp = findPublicIp, firewallWaits = FIREWALL_WAITS, projectDir = process.cwd(), familyHome = null, moodEvery = 30_000 }) {
   const { exit } = useApp();
   const { columns, rows } = useTerminalSize();
   const [config, setConfigState] = useState(initialConfig);
@@ -252,6 +255,14 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     const t = setTimeout(() => setFlash(null), 3000);
     return () => clearTimeout(t);
   }, [flash]);
+
+  // A sibling's mood Glim reacts to, in a line of its own until esc: { text, mood }.
+  const [reaction, setReactionState] = useState(null);
+  const reactionRef = useRef(null);
+  const setReaction = (r) => {
+    reactionRef.current = r;
+    setReactionState(r);
+  };
 
   // Async actions read the latest state through refs, not through stale closures.
   const sessionRef = useRef(null);
@@ -1247,6 +1258,8 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
       let r;
       if (text.startsWith('!')) r = await a.runSql(ctx, text.slice(1));
       else if (SQL_START.test(text)) r = await a.runSql(ctx, text);
+      // What a sibling copied, pasted without its /take.
+      else if (decodeContext(text)) r = await a.take(ctx, text);
       else {
         const [, name, rest] = text.replace(/^\//, '').match(/^(\S+)\s*([\s\S]*)$/);
         const cmd = findCommand(name, customRef.current.commands);
@@ -1443,6 +1456,7 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     if (key.escape) {
       if (watchRef.current) stopWatch('esc');
       else if (busyRef.current) busyRef.current.abort();
+      else if (reactionRef.current) setReaction(null);
       else {
         setEntries([]);
         setWelcome(false);
@@ -1453,6 +1467,12 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     if (key.ctrl || key.meta) return;
     // A .sql or .txt file dropped on the terminal (which types its path) opens in a console tab.
     if (input.length > 1 && a.openDropped(ctx, input)) return;
+    // A command pasted over a view (as a sibling copies them), or a bare family:v1:… context: into the
+    // prompt, to read and run with ↵.
+    if (input.length > 1) {
+      const pasted = input.replace(/\x1b\[20[01]~/g, '').replace(/[\r\n]+$/, '').replace(/[\r\n]+/g, ' ');
+      if (pasted.trimStart().startsWith('/') || decodeContext(pasted)) return prefill(pasted.trim());
+    }
     if (input === '/' || input === ':') return prefill('/');
     if (input === '!') return prefill('!');
     if (input === '?') return ctx.showHelp();
@@ -1563,16 +1583,38 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
   const act = activityRows(entries);
   const bottom = confirmReq ? confirmHeight(confirmReq) : 3 + suggestions.length;
   const mood = moodFor({ session, busy, lastEntry: entries.at(-1), tranCount });
+  // Glim's mood for the family (family.js), written whenever it changes, and the others' read every
+  // half a minute: a worried, sad or happy one from the last 15 minutes gets a line, once. "Family
+  // moods" in Settings turns both off.
+  const moodsOn = Boolean(familyHome) && config.familyMoods !== false;
+  const shared = familyMood(mood, { session, lastEntry: entries.at(-1), busy, tranMinutes: tranCount && tranSince.current ? (Date.now() - tranSince.current) / 60_000 : 0 });
+  useEffect(() => {
+    if (moodsOn) writeMood('trawl', shared, { dir: familyHome });
+  }, [moodsOn, shared.mood, shared.reason]);
+  const seenMoods = useRef(new Set());
+  useEffect(() => {
+    if (!moodsOn) return void setReaction(null);
+    const look = () => {
+      const fresh = moodsToShow(readMoods('trawl', { dir: familyHome }), seenMoods.current);
+      for (const m of fresh) seenMoods.current.add(`${m.app}:${m.at}`);
+      if (fresh[0]) setReaction({ text: reactionText(fresh[0]), mood: fresh[0].mood });
+    };
+    look();
+    const t = setInterval(look, moodEvery);
+    t.unref?.();
+    return () => clearInterval(t);
+  }, [moodsOn, familyHome, moodEvery]);
   // The welcome box only appears when the terminal has room for it next to a useful view.
   const showWelcome = welcome && H >= 28;
   // A /watch keeps the spinner's line between its runs, so the layout doesn't jump.
   const statusLine = busy || watching ? 1 : 0;
-  const mainH = Math.max(6, H - 2 - act.length - statusLine - bottom - 1 - (showWelcome ? WELCOME_HEIGHT : 0));
+  const reactionH = reaction ? 1 : 0;
+  const mainH = Math.max(6, H - 2 - reactionH - act.length - statusLine - bottom - 1 - (showWelcome ? WELCOME_HEIGHT : 0));
   const viewActive = focus === 'view' && !overlay && !confirmReq;
   layout.current = {
     mainTop: 2,
     mainH,
-    promptTop: 2 + mainH + (showWelcome ? WELCOME_HEIGHT : 0) + act.length + statusLine,
+    promptTop: 2 + mainH + (showWelcome ? WELCOME_HEIGHT : 0) + reactionH + act.length + statusLine,
     sugCount: suggestions.length,
     tabs: tabLabels(results),
   };
@@ -1672,6 +1714,17 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
         {main}
       </Box>
       {showWelcome ? <Welcome mood={mood} session={session} width={W} /> : null}
+      {reaction ? (
+        <Row
+          pointer={false}
+          width={W}
+          segments={[
+            { text: `${FACES[mood]} `, color: theme.accent, bold: true },
+            { text: reaction.text, color: reaction.mood === 'sad' ? theme.del : reaction.mood === 'worried' ? theme.warn : theme.ok },
+            { text: '  esc dismisses', color: theme.dim },
+          ]}
+        />
+      ) : null}
       {act.map((segs, i) => (
         <Row key={i} pointer={false} width={W} segments={segs} />
       ))}

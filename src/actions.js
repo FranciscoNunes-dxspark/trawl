@@ -36,7 +36,7 @@ import { UNDO_ROWS, reverseScript, snapshotOf, snapshotRows, snapshotSummary, un
 import { loadUndo, saveUndo } from './config.js';
 import { relTime } from './text.js';
 import { contextIn, projectAt, quoteArg, takeLine } from './family.js';
-import { addArgsFor, connectionForQuery, handOverText, newDatabases, placeText, queryContext, rowsContext, rowsScript } from './siblings.js';
+import { addArgsFor, connectionForQuery, familyOffers, handOverText, newDatabases, notForTrawl, placeText, queryContext, rowsContext, rowsScript } from './siblings.js';
 import { API_LANGUAGES, API_SYSTEM, apiFileName, apiLanguage, apiPrompt, apiRequest, parseApi, projectLanguage } from './api.js';
 import { copyRefusal, copyScript, foreignKeysFrom, insertOrder, insertedRows, keyTuples, maskRows, parentSql, parseCopyRowsArgs, rowKey, rowsSql, selfOrder, tupleKey } from './copyrows.js';
 import { rehearsalRefusal, rehearsalSteps, rehearsalText, rowsAffected } from './rehearse.js';
@@ -2189,7 +2189,7 @@ export async function take(ctx, rest) {
   if (!c) return ctx.note("That isn't a line one of the family copied: /take takes the family:v1:… that Splice, Sonar, Bosun or Hail puts on the clipboard.", 'error');
   if (c.kind === 'query') return takeQuery(ctx, c.data);
   if (c.kind === 'rows') return takeRows(ctx, c.data);
-  ctx.note(`Trawl takes queries and rows; that's a ${c.kind}.`, 'error');
+  ctx.note(notForTrawl(c), 'error');
 }
 
 // A console tab of its own (`base`, made unique) holding `text`, on screen.
@@ -2247,6 +2247,20 @@ export async function share(ctx, rest = '') {
   const { line, context, hidden } = rowsContext(set, indexes, { ...from, table: table ? objectName(table) : null });
   await handOver(ctx, 'Hail', line, context);
   if (hidden.length) ctx.note(`Left out of it: ${hidden.join(', ')}, which look${hidden.length === 1 ? 's' : ''} like ${hidden.length === 1 ? 'it holds a secret' : 'they hold secrets'}.`);
+}
+
+/** /family: what this project offers the siblings, each a line to copy for the app that takes it. */
+export function family(ctx) {
+  const dir = ctx.projectDir;
+  const project = projectAt(dir);
+  const offers = familyOffers(project);
+  ctx.showPicker({
+    title: `What ${basename(dir) || dir} offers the family`,
+    hint: '↵ copy it',
+    empty: `Nothing in ${dir} for the others: no git repository (Splice), nothing to run (Bosun), no .http files (Hail).`,
+    items: offers.map((o) => ({ label: o.app, detail: o.line, text: `${o.detail[0].toUpperCase()}${o.detail.slice(1)}.\n\n${o.line}\n\n↵ copies it, to paste into ${o.app}'s prompt.`, offer: o })),
+    keys: { return: (it) => handOver(ctx, it.offer.app, it.offer.line) },
+  });
 }
 
 /**

@@ -77,7 +77,7 @@ Save connections with `/add`:
 
 Azure SQL gets a fresh token from the Azure CLI each time it connects, so there's no password to keep. A SQL or Windows login asks for its password the first time you connect, shown as `*`. With "Keep it" ticked (`tab` changes it), a password that signs in is saved in the operating system's credential store: **Windows Credential Manager** (as `Trawl:<connection>`), the macOS Keychain, or the Secret Service keyring on Linux (through `secret-tool`). It is never written to Trawl's own files. A saved password the server turns down is asked for again. `p` in Connections, or `/password [connection]`, sets a new one ahead of time; leaving it empty removes the saved one, and forgetting a connection removes its password too. If you'd rather keep a password in an environment variable, `/add … --password-env <VAR>` names it, and the variable comes first when it's set.
 
-Connections live in `~/.trawl/config.json` (or `TRAWL_HOME`), along with the prompt history, the run history and what Settings (`,`) changes: the row limit, the accent colour, the mouse, updates, notifications and the warning about open transactions.
+Connections live in `~/.trawl/config.json` (or `TRAWL_HOME`), along with the prompt history, the run history and what Settings (`,`) changes: the row limit, the accent colour, the mouse, updates, notifications, the warning about open transactions and the family's moods.
 
 When a query (or anything else with the spinner) takes longer than 10 seconds, Trawl rings the terminal's bell and asks it for a desktop notification saying what finished and how (OSC 9, which Windows Terminal, iTerm2, WezTerm and kitty show, or OSC 777 in GNOME Terminal and other VTE terminals), for when you've switched to another window. **Notify when done** in Settings turns it off, and `"notifyAfter": 30` in `config.json` changes the seconds. A run you cancel says nothing.
 
@@ -188,7 +188,7 @@ Press `?` inside for every shortcut: the sections down the left, opening on the 
 | Activity, jobs | `↵` recent runs · `s` start the job · `R` read again |
 | Activity, top queries | `o` sort by total duration, CPU, reads or executions · `↵` the query in full · `e` edit in the console · `R` read again |
 | Migrations (`/migrations <folder>`) | `R` run the pending ones (`/migrations run`) |
-| Settings (`,`) | `↵` or space changes the row limit, the accent colour, the theme (dark, light or auto), the mouse, whether Trawl checks for and installs updates, whether it notifies when a long run ends, and how long a transaction may sit open before Trawl warns · `esc` closes |
+| Settings (`,`) | `↵` or space changes the row limit, the accent colour, the theme (dark, light or auto), the mouse, whether Trawl checks for and installs updates, whether it notifies when a long run ends, how long a transaction may sit open before Trawl warns, and whether Glim shares moods with the family · `esc` closes |
 
 One-liners can also go straight in the prompt: SQL there runs with `!`, or without it when it starts with a SQL keyword (`select …`, `exec …`).
 
@@ -467,6 +467,10 @@ Trawl has siblings, built the same way: Splice (git), Sonar (Azure), Bosun (the 
 
 - `/take <family:v1:…>` takes what a sibling copied for Trawl: a query goes into a console tab of its own (`take`), and Trawl connects to the saved connection to the server and database it was for (or says which it was for, when none is); rows become an `INSERT … VALUES` script in a tab of their own (`rows`). Pasting the bare `family:v1:…` at the prompt works too. What's for another app (a request, a commit, an exception) says whose it is.
 - `/share`, or `t` in the console and Results, copies one: the console's statement as a query (for another Trawl), or in Results the row under the cursor, as rows (for Hail to send as a request's body, or another Trawl to insert); `/share all` copies every row of the result set. Columns that look like they hold a secret (a password, a hash, a token) are left out of it, and the log says which.
+- `/family` lists what this project offers the others: the repository, for Splice (`/open <repo>`); its processes, for Bosun (`/move <folder>`), when it has something to run; each `.http` file, for Hail (`/open <file>`). `↵` copies the line. The project is the folder Trawl started in, or the checkout of the script you opened.
+- A command pasted over a view (anywhere but the prompt, the console or a cell being typed in), or a bare `family:v1:…`, goes into the prompt instead of being taken as keys: `↵` runs it.
+- Glim tells the others how it feels, and why (a query failed, a transaction has been open 20 minutes), in a small file under `~/.family` (or `FAMILY_HOME`), on this machine only. Every half a minute Trawl reads theirs: when one has been worried, sad or happy in the last 15 minutes, Glim says so once, in a line above the log (`Ping says: production has 12 new exceptions`), until `esc`. **Family moods** in Settings (`"familyMoods": false`) turns both off.
+
 ## Updates
 
 The downloaded Trawl keeps itself up to date, as Tiller does. Once a day, in the background, it asks GitHub for the latest release of [FranciscoNunes-dxspark/trawl](https://github.com/FranciscoNunes-dxspark/trawl/releases). If there's a newer one, it downloads it in the background and puts it in place of the executable you ran; the new version starts the next time you open Trawl. The header shows `↑ 0.2.0 downloading…`, then `↑ 0.2.0 at next start`, and the activity log says when it's in. `/update` does the same right away, with the spinner (esc stops it).

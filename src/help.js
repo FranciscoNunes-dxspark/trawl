@@ -167,7 +167,10 @@ export const HELP = [
     rows: [
       ['/take <family:v1:…>', 'What a sibling copied: a query goes into a console tab (on the saved connection it was for), rows into an INSERT script; pasting the bare family:v1:… works too'],
       ['/share [query|rows|all]', 'Copy a /take line: the console\'s statement, or in Results the row under the cursor (all: every row); t in both'],
+      ['/family', 'What this project offers the others: Splice /open <repo>, Bosun /move <dir>, Hail /open <file> per .http file; ↵ copies it'],
       ['/project', 'The databases appsettings*.json and .env files name that aren\'t saved yet: ↵ adds one (a password in the file is kept in the OS store, after asking)'],
+      ['paste', 'A command pasted over a view (not while typing) goes into the prompt, to run with ↵'],
+      ['moods', 'Glim tells the others how it feels, and says in a line when one of them is worried, sad or happy (esc dismisses it); "Family moods" in Settings turns it off'],
     ],
   },
   {

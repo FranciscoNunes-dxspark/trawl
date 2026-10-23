@@ -8,6 +8,7 @@ import { applyTheme } from './theme.js';
 import { App } from './ui/App.jsx';
 import { terminalMouse } from './mouse.js';
 import { notification } from './notify.js';
+import { parseArgs, readAll, storePassword } from './launch.js';
 
 // A title is printed raw, so nothing in it may end or start an escape sequence.
 const clean = (s) => String(s).replace(/[\x00-\x1f\x7f]/g, '');
@@ -21,14 +22,22 @@ if (args.includes('-v') || args.includes('--version')) {
 
 if (args.includes('-h') || args.includes('--help')) {
   console.log(`trawl [file.sql] [--connect <name>] [--demo]
+trawl --azure-sql <server> [--database <db>] [--user <login>] [--name <name>] [--prod] [--folder <folder>]
 trawl mcp [--demo]
+trawl store-password <connection>   (the password on stdin)
 
 A keyboard-driven SQL Server client. Opens [file.sql] in Query, and connects to
 <name> (default: the connection you used last).
 
-  --demo   adds two in-memory demo connections for this session (no server needed)
-  mcp      runs Trawl as an MCP server for Claude Code, reading through your saved
-           connections (register it with: claude mcp add trawl -- trawl mcp)
+  --demo          adds two in-memory demo connections for this session (no server needed)
+  --azure-sql     connects to the saved connection with this Azure SQL server, database and
+                  login, or saves one first as /add does (named --name, else after the server
+                  and database; in --folder; --prod for production). Without --user it signs
+                  in with your az login; with it, the password saved for the connection's name.
+  mcp             runs Trawl as an MCP server for Claude Code, reading through your saved
+                  connections (register it with: claude mcp add trawl -- trawl mcp)
+  store-password  saves the password read from stdin in the OS credential store for
+                  <connection>, where Trawl looks when connecting; config.json isn't touched
 
 Inside: press ? for shortcuts, / for commands, ! to run SQL.`);
   process.exit(0);
@@ -38,6 +47,17 @@ Inside: press ? for shortcuts, / for commands, ! to run SQL.`);
 if (args[0] === 'mcp') {
   const { serve } = await import('./mcp.js');
   serve({ demo: args.includes('--demo') });
+} else if (args[0] === 'store-password') {
+  // Headless, for another program (Sonar) handing over a login: the password comes on stdin, never argv.
+  const { osCredentials } = await import('./credentials.js');
+  try {
+    if (process.stdin.isTTY) throw new Error('Pipe the password in: trawl store-password <connection> < file');
+    await storePassword(args[1], await readAll(process.stdin), osCredentials);
+    process.exit(0);
+  } catch (e) {
+    console.error(`trawl store-password: ${e.message}`);
+    process.exit(1);
+  }
 } else {
   await runApp();
 }
@@ -49,10 +69,14 @@ async function runApp() {
     process.exit(1);
   }
 
-  const demo = args.includes('--demo');
-  const at = args.indexOf('--connect');
-  const connectTo = at >= 0 ? args[at + 1] : demo ? 'demo' : undefined;
-  const file = args.find((x, i) => !x.startsWith('-') && args[i - 1] !== '--connect');
+  let parsed;
+  try {
+    parsed = parseArgs(args);
+  } catch (e) {
+    console.error(`trawl: ${e.message} (trawl --help says how)`);
+    process.exit(1);
+  }
+  const { demo, file, connect: connectTo, azureSql } = parsed;
 
   const config = loadConfig();
   if (demo) config.connections = [...DEMO_CONNECTIONS, ...config.connections.filter((c) => !DEMO_CONNECTIONS.some((d) => d.name === c.name))];
@@ -79,6 +103,7 @@ async function runApp() {
       config={config}
       initialFile={file}
       initialConnection={connectTo}
+      azureSql={azureSql ?? undefined}
       checkLatest={checkLatest}
       installUpdate={COMPILED ? installUpdate : undefined}
       setTitle={setTitle}

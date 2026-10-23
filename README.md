@@ -81,6 +81,26 @@ Connections live in `~/.trawl/config.json` (or `TRAWL_HOME`), along with the pro
 
 When a query (or anything else with the spinner) takes longer than 10 seconds, Trawl rings the terminal's bell and asks it for a desktop notification saying what finished and how (OSC 9, which Windows Terminal, iTerm2, WezTerm and kitty show, or OSC 777 in GNOME Terminal and other VTE terminals), for when you've switched to another window. **Notify when done** in Settings turns it off, and `"notifyAfter": 30` in `config.json` changes the seconds. A run you cancel says nothing.
 
+### Azure SQL: the firewall, and opening from another app
+
+When an Azure SQL server's firewall turns your machine away (error 40615, "Client with IP address … is not allowed to access the server"), Trawl asks whether to add a firewall rule on that server for the address in the error. Yes has the Azure CLI (your `az login`) find the server in its current subscription and add the rule `trawl-<address>` (`az sql server firewall-rule create`), which the log shows, and then connects again, trying a few times over about 15 seconds while the rule applies. `/firewall [connection]` adds the rule on demand, for the connection on screen (or the one the firewall last turned away): with the address that error gave, or else the one [api.ipify.org](https://api.ipify.org) sees. Your login needs the right to change the server's firewall (SQL Server Contributor, say).
+
+Another app (such as Sonar, the Azure console) can open an Azure SQL database in Trawl:
+
+```bash
+trawl --azure-sql myserver.database.windows.net --database ClubA                    # az login
+trawl --azure-sql myserver.database.windows.net --database ClubA --user app --name club-a-app
+trawl --azure-sql myserver.database.windows.net --database ClubA --prod --folder Azure/PROD
+```
+
+Trawl connects to the saved connection with that server (`tcp:` and `,1433` aside, in any case), database and login, or else saves one first, as `/add` would, and connects to it. It's named `--name`, or after the server and database (`myserver-ClubA`), with `-2` added when that name is taken; `--prod` and `--folder` are as for `/add`, for a connection it saves. Without `--user` it signs in with your `az login`; with it, it's a SQL login, whose password is the one saved for the connection's name, else asked for. To save it beforehand without a terminal, pipe it in:
+
+```bash
+trawl store-password club-a-app < password.txt
+```
+
+`store-password` reads the password from stdin (one line ending at the end is dropped), saves it in the operating system's credential store under that connection name, and exits: 0 when it's saved, 1 with the reason on stderr when not. It never takes the password as an argument, and it doesn't touch `config.json`.
+
 ### Through an SSH tunnel
 
 `--ssh [user@]host[:port]` reaches the server through an SSH host (a bastion or jump box), for a database that only that host can see. Trawl starts your system's own `ssh` (OpenSSH, which Windows 10 and later include) to forward a free port on `127.0.0.1` to the server, and connects through it; the tunnel closes with the connection and when Trawl exits. The server is named as the SSH host sees it, so `db.internal` or a private address works, and `/fanout`, `/diff` and `trawl mcp` go through the same tunnel. The Connections tab shows the SSH host beside the server.
@@ -332,7 +352,7 @@ On PostgreSQL it checks what has an equivalent there: tables without a primary k
 
 Type `/` and the menu narrows as you type. `tab` completes, `↑`/`↓` picks, `↵` runs. `/connect` completes connection names, `/use` database names, `/describe`, `/generate` and `/scaffold` tables and views, and `/script` and `/uses` everything in the database.
 
-`/import datagrip [folder]` `/import-csv <file.csv> <table> [--run]` `/connect <name>` `/add …` `/forget <name>` `/folder <connection> [folder]` `/password [connection]` `/disconnect` `/use <database>` `/open <file.sql>` `/snippet [name]` `/snippets` `/console` `/tab …` `/new` `/format` `/search <text>` `/save <file.sql>` `/describe <table>` `/script <name>` `/grep <text>` `/uses <object>` `/find [text]` `/export <file>` `/filter [text]` `/cell` `/follow` `/pin` `/compare` `/copy [tsv|csv|json|md|insert]` `/limit [rows]` `/watch <seconds> [sql] [--until <condition>]` `/writes` `/tx [auto|manual]` `/commit` `/rollback` `/undo-write` `/ask <question>` `/why` `/explain` `/ai [connection] [level]` `/update` `/settings` `/stats [on|off]` `/plan [actual] [sql]` `/more` `/diff <connection> [database]` `/health` `/sizes` `/deadlocks` `/fanout <folder> [sql]` `/activity` `/jobs` `/top-queries` `/kill <session>` `/script-all <folder>` `/migrations [run] <folder>` `/generate <table> [rows] [--seed n]` `/scaffold <table> [csharp|ef|ts|python]` `/last` `/refresh` `/help` `/quit`
+`/import datagrip [folder]` `/import-csv <file.csv> <table> [--run]` `/connect <name>` `/add …` `/forget <name>` `/folder <connection> [folder]` `/password [connection]` `/firewall [connection]` `/disconnect` `/use <database>` `/open <file.sql>` `/snippet [name]` `/snippets` `/console` `/tab …` `/new` `/format` `/search <text>` `/save <file.sql>` `/describe <table>` `/script <name>` `/grep <text>` `/uses <object>` `/find [text]` `/export <file>` `/filter [text]` `/cell` `/follow` `/pin` `/compare` `/copy [tsv|csv|json|md|insert]` `/limit [rows]` `/watch <seconds> [sql] [--until <condition>]` `/writes` `/tx [auto|manual]` `/commit` `/rollback` `/undo-write` `/ask <question>` `/why` `/explain` `/ai [connection] [level]` `/update` `/settings` `/stats [on|off]` `/plan [actual] [sql]` `/more` `/diff <connection> [database]` `/health` `/sizes` `/deadlocks` `/fanout <folder> [sql]` `/activity` `/jobs` `/top-queries` `/kill <session>` `/script-all <folder>` `/migrations [run] <folder>` `/generate <table> [rows] [--seed n]` `/scaffold <table> [csharp|ef|ts|python]` `/last` `/refresh` `/help` `/quit`
 
 ### The command palette
 

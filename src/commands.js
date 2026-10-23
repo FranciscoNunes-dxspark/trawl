@@ -13,6 +13,7 @@ export const COMMANDS = [
   { name: 'forget', args: '<name>', desc: 'Remove a saved connection (and its saved password)', complete: 'connections', run: (ctx, s) => (s ? a.forgetConnection(ctx, s) : ctx.prefill('/forget ')) },
   { name: 'folder', args: '<connection> [folder]', desc: 'Put a connection in a folder (no folder takes it out)', complete: 'connections', run: (ctx, s) => a.moveToFolder(ctx, s) },
   { name: 'password', args: '[connection]', desc: "Save a login's password in the OS credential store", complete: 'connections', run: (ctx, s) => a.setPassword(ctx, s) },
+  { name: 'firewall', args: '[connection]', desc: "Let this machine through an Azure SQL server's firewall (a rule added through az)", complete: 'connections', run: (ctx, s) => a.firewall(ctx, s.trim()) },
   { name: 'disconnect', desc: 'Close the connection', run: (ctx) => a.disconnect(ctx) },
   { name: 'use', args: '<database>', desc: 'Switch to another database on the same server', complete: 'databases', run: (ctx, s) => a.use(ctx, s) },
   { name: 'open', args: '<file.sql>', desc: 'Open a script in Query (reloads when you save it)', run: (ctx, s) => (s ? ctx.openFile(s) : ctx.prefill('/open ')) },

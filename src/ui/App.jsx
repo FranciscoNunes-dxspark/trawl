@@ -10,7 +10,7 @@ import * as ed from '../editor.js';
 import { commitMode, describeConn, isReadOnly } from '../connections.js';
 import { copyToClipboard } from '../clipboard.js';
 import { osCredentials } from '../credentials.js';
-import { connect as openSession } from '../db.js';
+import { DbError, connect as openSession } from '../db.js';
 import { changesText, editTarget, hasChanges, noChanges, readTarget } from '../edit.js';
 import { HELP } from '../help.js';
 import { commandsSection, sectionFor } from '../help-layout.js';
@@ -40,6 +40,7 @@ import { WELCOME_HEIGHT, Welcome } from './Glim.jsx';
 import { FACES, moodFor } from '../glim.js';
 import { checksDisabled, isDue, isNewer, openUrl, updateAdvice } from '../update.js';
 import { askClaude as askClaudeCli, canSeeSchema } from '../ai.js';
+import { az as runAz, firewallBlock, publicIp as findPublicIp } from '../azure.js';
 import { COMPILED, VERSION } from '../version.js';
 import { worthNotifying } from '../notify.js';
 import { changedCells, untilMatch, untilText } from '../watch.js';
@@ -188,9 +189,15 @@ const DOUBLE_CLICK_MS = 400;
  * a session (db.js); the tests pass their own. `setTitle(text)` names the terminal window. `mouse` is
  * mouse.js's terminalMouse() from cli.jsx (missing where the terminal can't report it); tests pass their own.
  * `notify(title, body)` says a long run has finished (cli.jsx rings the terminal's bell and raises a
- * notification); without it, as in most tests, nothing is said.
+ * notification); without it, as in most tests, nothing is said. `azureSql` is `trawl --azure-sql`'s
+ * { server, database, user, name, prod, folder }: that connection, found or added, instead of the last
+ * one. `az(args, { signal })` runs the Azure CLI (azure.js) and `publicIp({ signal })` finds this
+ * machine's address, for an Azure SQL firewall; `firewallWaits` are the pauses (ms) before each try
+ * to connect again once a rule is added. The tests pass their own, so nothing reaches Azure.
  */
-export function App({ config: initialConfig, initialFile, initialConnection, checkLatest, installUpdate, askClaude = askClaudeCli, findDataSources, credentials = osCredentials, open = openSession, clipboard = copyToClipboard, setTitle, mouse, notify }) {
+const FIREWALL_WAITS = [0, 5000, 10000];
+
+export function App({ config: initialConfig, initialFile, initialConnection, checkLatest, installUpdate, askClaude = askClaudeCli, findDataSources, credentials = osCredentials, open = openSession, clipboard = copyToClipboard, setTitle, mouse, notify, azureSql, az = runAz, publicIp = findPublicIp, firewallWaits = FIREWALL_WAITS }) {
   const { exit } = useApp();
   const { columns, rows } = useTerminalSize();
   const [config, setConfigState] = useState(initialConfig);
@@ -267,6 +274,8 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
   const saveTimer = useRef(null);
   // Passwords typed this session, by connection, so /use and reconnecting don't ask again.
   const typed = useRef(new Map());
+  // The last connection an Azure SQL firewall turned away, and the address it gave: { conn, ip }.
+  const firewallBlocked = useRef(null);
   // A connection that dropped while something else ran: said once that has finished.
   const quietDrop = useRef(null);
   // The last run's error from the server, for /why: { message, number, line, sql, conn, database, label }.
@@ -538,7 +547,9 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
 
   // A login with no password to hand (or a turned-down one) asks for it, then tries again. A
   // typed one (`remember` is then set) that works is kept in the OS store when "keep it" is on.
-  const connect = async (conn, { database, password = typed.current.get(conn.name), remember } = {}) => {
+  // An Azure SQL firewall that turned this machine away asks to let it in (`afterFirewall`: a rule was
+  // just added, so the connect is tried again a few times while the rule applies).
+  const connect = async (conn, { database, password = typed.current.get(conn.name), remember, afterFirewall = false } = {}) => {
     dropSession();
     setConnecting(true);
     const title = `connect ${conn.name}${database && database !== conn.database ? ` (${database})` : ''}`;
@@ -547,7 +558,18 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
       async (signal) => {
         let s;
         try {
-          s = await open(conn, { database, signal, password, credentials });
+          for (let i = 0; ; i++) {
+            if (afterFirewall && firewallWaits[i]) {
+              await new Promise((r) => setTimeout(r, firewallWaits[i]));
+              if (signal.aborted) throw new DbError('Cancelled', { cancelled: true });
+            }
+            try {
+              s = await open(conn, { database, signal, password, credentials });
+              break;
+            } catch (e) {
+              if (!afterFirewall || i + 1 >= firewallWaits.length || !firewallBlock(e) || signal.aborted) throw e;
+            }
+          }
         } catch (e) {
           if (e.needsPassword && password == null && !/login failed/i.test(e.message)) e.message = `${conn.name} needs the password for ${conn.user}.`;
           throw e;
@@ -561,6 +583,7 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     );
     setConnecting(false);
     if (r.ok) {
+      if (firewallBlocked.current?.conn.name === conn.name) firewallBlocked.current = null;
       setConfig((c) => ({ ...c, last: conn.name }));
       setView((v) => (v === 'connections' ? 'explorer' : v));
     } else dropSession();
@@ -589,6 +612,24 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
       const trusted = { ...conn, trustCert: true };
       setConfig((c) => ({ ...c, connections: c.connections.map((x) => (x.name === conn.name && !x.demo ? trusted : x)) }));
       return connect(trusted, { database, password, remember });
+    }
+    const blockedIp = !r.ok && !conn.demo && firewallBlock(r.error);
+    if (blockedIp) {
+      firewallBlocked.current = { conn, ip: blockedIp };
+      if (afterFirewall) {
+        note(`${conn.name}: the firewall still turns ${blockedIp} away. The rule can take a few minutes to apply: /connect ${conn.name} again in a moment.`, 'error');
+        return false;
+      }
+      const add = await confirm({
+        title: `Add a firewall rule on ${conn.server.replace(/^tcp:/i, '').replace(/,\d+$/, '')} for ${blockedIp}?`,
+        detail: `The server's firewall turned this machine away. Trawl asks the Azure CLI (your az login) to let ${blockedIp} in, then connects again.`,
+        options: [
+          { label: 'Yes, add it and connect', value: true },
+          { label: 'No', value: false },
+        ],
+      });
+      if (!add || !(await a.addFirewallFor(ctx, conn, blockedIp))) return false;
+      return connect(conn, { database, password, remember, afterFirewall: true });
     }
     if (!r.ok && r.error?.needsPassword) {
       typed.current.delete(conn.name);
@@ -953,6 +994,10 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
   const ctxRef = useRef(null);
   if (!ctxRef.current) {
     ctxRef.current = {
+      // The last connection an Azure SQL firewall turned away: { conn, ip } (/firewall).
+      get firewallBlocked() {
+        return firewallBlocked.current;
+      },
       get session() {
         return sessionRef.current;
       },
@@ -1053,6 +1098,8 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     // A line of text in the same place, shown as typed: resolves the text, or null on esc.
     askText: async (req) => (await confirm({ ...req, secret: true, plain: true, options: [] }))?.value ?? null,
     credentials,
+    az,
+    publicIp,
     // Whether this terminal can report the mouse at all (Settings says so).
     mouseAvailable: Boolean(mouse),
     // Puts text on the clipboard and says so; `what` is "the cell", "12 rows as CSV"…
@@ -1273,6 +1320,7 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
       ctx.rememberOutput('Your commands and keys', text);
     }
     if (initialFile) openFile(initialFile);
+    if (azureSql) return void a.openAzureSql(ctx, azureSql);
     const name = initialConnection ?? initialConfig.last;
     const conn = name && initialConfig.connections.find((c) => c.name === name);
     if (conn) connect(conn);

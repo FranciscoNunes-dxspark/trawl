@@ -1,4 +1,5 @@
 import { kindOf } from './dialects.js';
+import { serverHost } from './azure.js';
 
 // Saved connections: parsing /add, and turning one into tedious's connection options.
 // config.json holds nothing secret. Azure SQL signs in with your Azure CLI login; a SQL login's
@@ -181,3 +182,29 @@ export const DEMO_CONNECTIONS = [
   { name: 'demo', demo: true, server: 'demo', database: 'ClubA' },
   { name: 'demo-prod', demo: true, prod: true, server: 'demo', database: 'ClubA' },
 ];
+
+/**
+ * `trawl --azure-sql <server> [--database <db>] [--user <login>] [--name <name>] [--prod] [--folder <f>]`
+ * (Sonar hands Azure SQL over this way): the saved SQL Server connection to the same server (tcp: and
+ * ,1433 aside, any case), database and login (none: az login), or null.
+ */
+export function findAzureSql(connections, { server, database, user }) {
+  const same = (x, y) => String(x ?? '').toLowerCase() === String(y ?? '').toLowerCase();
+  return connections.find((c) => !c.demo && !c.kind && serverHost(c.server) === serverHost(server) && same(c.database, database) && (user ? c.auth !== 'azure-cli' && same(c.user, user) : c.auth === 'azure-cli')) ?? null;
+}
+
+/**
+ * The /add arguments for an --azure-sql connection that isn't saved yet. Its name is `name`, else the
+ * server's own (its first label) and the database's, made unique among `connections` (and the demo's)
+ * with -2, -3…
+ */
+export function azureSqlAddArgs(connections, { server, database, user, name, prod, folder }) {
+  const host = serverHost(server);
+  const wanted = name || `${host.split('.')[0]}${database ? `-${database}` : ''}`;
+  const taken = new Set([...connections, ...DEMO_CONNECTIONS].map((c) => c.name.toLowerCase()));
+  let chosen = wanted;
+  for (let n = 2; taken.has(chosen.toLowerCase()); n++) chosen = `${wanted}-${n}`;
+  const q = (v) => `"${String(v).replace(/["\\]/g, '\\$&')}"`;
+  const args = [q(chosen), q(host), ...(database ? [q(database)] : []), ...(user ? ['--user', q(user)] : []), ...(prod ? ['--prod'] : []), ...(folder ? ['--folder', q(folder)] : [])];
+  return { name: chosen, args: args.join(' ') };
+}

@@ -3,7 +3,8 @@
 import { mkdirSync, readFileSync, readdirSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import { basename, dirname, extname, join, resolve } from 'node:path';
-import { ADD_USAGE, cleanFolder, commitMode, describeConn, isReadOnly, parseAddArgs, splitArgs, sshText } from './connections.js';
+import { ADD_USAGE, azureSqlAddArgs, cleanFolder, commitMode, describeConn, findAzureSql, isReadOnly, parseAddArgs, splitArgs, sshText } from './connections.js';
+import { addFirewallRule, serverHost } from './azure.js';
 import { csvInsertScript, parseCsv } from './csv.js';
 import * as ed from './editor.js';
 import { findDataSources, importPlan, planText } from './datagrip.js';
@@ -414,6 +415,71 @@ export function addConnection(ctx, rest) {
   const signIn = conn.auth === 'azure-cli' ? 'Signs in with your az login.' : conn.passwordEnv ? `Password from $${conn.passwordEnv}.` : `Asks for the password when you connect, and keeps it in ${ctx.credentials.name}.`;
   const tunnel = conn.ssh ? ` Through ssh ${sshText(conn.ssh)}, which signs in with a key or your ssh agent (no password prompt).` : '';
   ctx.note(`${replaced ? 'Updated' : 'Added'} ${conn.name}${conn.folder ? ` in ${conn.folder}/` : ''}${conn.prod ? ' (production, read-only)' : ''}. ${signIn}${tunnel} /connect ${conn.name}`, 'ok');
+  return conn;
+}
+
+/**
+ * `trawl --azure-sql <server> …` (cli.jsx; Sonar opens Azure SQL databases this way): connects to the
+ * saved connection with the same server, database and login, or adds one as /add would and connects
+ * to that. A login's password is looked for in the credential store under the connection's name
+ * (Sonar saves it there first with `trawl store-password <name>`); one saved under the name asked for
+ * moves with it when that name was taken.
+ */
+export async function openAzureSql(ctx, spec) {
+  let conn = findAzureSql(ctx.config.connections, spec);
+  if (!conn) {
+    const { name, args } = azureSqlAddArgs(ctx.config.connections, spec);
+    conn = addConnection(ctx, args);
+    if (!conn) return false;
+    if (spec.user && spec.name && name.toLowerCase() !== spec.name.toLowerCase()) {
+      const pw = await ctx.credentials.get(spec.name).catch(() => null);
+      if (pw != null) await ctx.credentials.set(name, { user: spec.user, password: pw }).catch(() => {});
+    }
+  }
+  return ctx.connect(conn);
+}
+
+/** Whether a connection can have an Azure firewall rule: SQL Server, and not the demo. */
+const firewallable = (conn) => conn && !conn.demo && !conn.kind;
+
+/**
+ * Adds a rule for `ip` to the firewall of `conn`'s Azure SQL server through az, as a task with a line
+ * in the log. Resolves whether it was added.
+ */
+export async function addFirewallFor(ctx, conn, ip) {
+  const host = serverHost(conn.server);
+  const r = await ctx.task(
+    `firewall rule on ${host} for ${ip}`,
+    async (signal) => {
+      const added = await addFirewallRule(conn.server, ip, { run: ctx.az, signal });
+      return [`${added.rule} on ${added.server} (resource group ${added.group}) lets ${ip} in. It can take a few seconds to apply.`];
+    },
+    { label: 'Adding the firewall rule' },
+  );
+  return r.ok;
+}
+
+/**
+ * /firewall [connection]: lets this machine through the Azure SQL server's firewall (the connection
+ * on screen, else the one the firewall last turned away). The address is the one that error gave,
+ * else api.ipify.org's answer.
+ */
+export async function firewall(ctx, name) {
+  const blocked = ctx.firewallBlocked;
+  const conn = name ? ctx.config.connections.find((c) => c.name.toLowerCase() === name.trim().toLowerCase()) : (ctx.session?.conn ?? blocked?.conn);
+  if (!conn) return ctx.note(name ? `No connection called ${name}.` : 'Name the connection: /firewall <connection>', 'error');
+  if (!firewallable(conn)) return ctx.note(`${conn.name} isn't Azure SQL: only an Azure SQL server has a firewall Trawl can open.`, 'error');
+  let ip = blocked?.ip;
+  if (!ip) {
+    const r = await ctx.task('find this machine’s address', async (signal) => {
+      ip = await ctx.publicIp({ signal });
+      return [`${ip} (from api.ipify.org)`];
+    }, { label: 'Finding the address', quiet: true });
+    if (!r.ok) return ctx.note(`Couldn't find this machine's address: ${firstLine(r.error?.message)}`, 'error');
+  }
+  const ok = await addFirewallFor(ctx, conn, ip);
+  if (ok && ctx.session?.conn.name !== conn.name) ctx.note(`/connect ${conn.name} when it has applied.`);
+  return ok;
 }
 
 export async function forgetConnection(ctx, name) {

@@ -962,3 +962,107 @@ test('/password saves one, /folder files a connection, and the window title foll
   assert.equal(saved.connections.find((c) => c.name === 'club-sql').folder, 'Clubs/Lisbon');
   app.unmount();
 });
+
+// Azure SQL on a pretend server: az login (no password) or a SQL login whose password is "right", and
+// a firewall that turns 203.0.113.7 away until `az` has made its rule.
+const BLOCKED = "Cannot open server 'clubs' requested by the login. Client with IP address '203.0.113.7' is not allowed to access the server.  To enable access, use the Azure Management Portal or run sp_set_firewall_rule on the master database to create a firewall rule for this IP address or address range.";
+function fakeAzure({ firewall = false } = {}) {
+  const az = { calls: [], rules: new Set(), opened: [] };
+  az.run = async (args) => {
+    az.calls.push(args.slice(0, 4).join(' '));
+    if (args[2] === 'list') return '[{"g": "rg-clubs", "n": "clubs"}]';
+    if (args[3] === 'create') az.rules.add(args[args.indexOf('--start-ip-address') + 1]);
+    return '';
+  };
+  az.open = async (conn, opts) => {
+    az.opened.push(conn.name);
+    if (firewall && !az.rules.has('203.0.113.7')) throw new DbError(BLOCKED);
+    return conn.auth === 'azure-cli' ? demoSession({ ...conn, demo: true }, { database: opts.database }) : fakeOpen(conn, opts);
+  };
+  return az;
+}
+const savedConnections = () => JSON.parse(readFileSync(join(process.env.TRAWL_HOME, 'config.json'), 'utf8')).connections;
+
+test('--azure-sql adds the connection /add would and connects, or connects to the one already saved', async () => {
+  const azure = fakeAzure();
+  const spec = { server: 'tcp:clubs.database.windows.net,1433', database: 'ClubA', prod: true, folder: 'Azure' };
+  let app = startWith([...DEMO_CONNECTIONS], { azureSql: spec, open: azure.open, az: azure.run });
+  await until(() => frame().includes('Clubs') && frame().includes('Added clubs-ClubA in Azure/ (production, read-only)'), 'added and connected');
+  assert.match(frame(), /clubs-ClubA .* PROD +read-only/);
+  assert.match(frame(), /clubs\.database\.windows\.net\/ClubA · 6 objects · read-only/);
+  assert.deepEqual(savedConnections().find((c) => c.name === 'clubs-ClubA'), { name: 'clubs-ClubA', server: 'clubs.database.windows.net', database: 'ClubA', auth: 'azure-cli', prod: true, folder: 'Azure' });
+  app.unmount();
+  // The same server and database again (another spelling of the server): no second connection.
+  const before = savedConnections();
+  app = startWith(before, { azureSql: { server: 'CLUBS.database.windows.net', database: 'cluba' }, open: azure.open, az: azure.run });
+  await until(() => frame().includes('Clubs') && frame().includes('Trawl  │  clubs-ClubA'), 'connected to the saved one');
+  assert.doesNotMatch(frame(), /Added/);
+  assert.equal(savedConnections().filter((c) => c.server === 'clubs.database.windows.net').length, 1);
+  assert.deepEqual(azure.opened, ['clubs-ClubA', 'clubs-ClubA']);
+  assert.deepEqual(azure.calls, [], 'no firewall, so az was never asked');
+  app.unmount();
+});
+
+test('--azure-sql --user signs in with the password saved under its --name, moved along when the name was taken', async () => {
+  const azure = fakeAzure();
+  // As Sonar does: trawl store-password app-login, then --name app-login.
+  const credentials = memoryCredentials({ 'app-login': 'right' });
+  const taken = { name: 'app-login', server: 'elsewhere.database.windows.net', auth: 'azure-cli' };
+  const app = startWith([taken], { azureSql: { server: 'clubs.database.windows.net', database: 'ClubA', user: 'sa', name: 'app-login' }, open: azure.open, az: azure.run, credentials });
+  await until(() => frame().includes('Clubs') && frame().includes('Added app-login-2'), 'connected with the saved password');
+  assert.doesNotMatch(frame(), /Password for/);
+  assert.equal(credentials.saved.get('app-login-2'), 'right');
+  assert.deepEqual(savedConnections().find((c) => c.name === 'app-login-2'), { name: 'app-login-2', server: 'clubs.database.windows.net', database: 'ClubA', auth: 'sql', user: 'sa' });
+  app.unmount();
+});
+
+test("an Azure SQL firewall that turns this machine away offers a rule through az, then connects; /firewall adds one on demand", async () => {
+  const azure = fakeAzure({ firewall: true });
+  const CLUBS = { name: 'clubs', server: 'clubs.database.windows.net', database: 'ClubA', auth: 'azure-cli' };
+  let app = startWith([CLUBS], { initialConnection: 'clubs', open: azure.open, az: azure.run, publicIp: async () => '198.51.100.4', firewallWaits: [0, 0] });
+  await until(() => frame().includes('Add a firewall rule on clubs.database.windows.net for 203.0.113.7?'), 'the question');
+  assert.match(frame(), /Client with IP address '203\.0\.113\.7' is not/);
+  app.stdin.write('1');
+  await until(() => frame().includes('Clubs') && frame().includes('trawl-203-0-113-7 on clubs (resource group rg-clubs) lets 203.0.113.7 in'), 'the rule, and connected');
+  assert.deepEqual(azure.calls, ['sql server list --query', 'sql server firewall-rule create']);
+  assert.deepEqual(azure.opened, ['clubs', 'clubs']);
+  app.unmount();
+
+  // A rule that hasn't applied after the tries says so, and asks nothing more.
+  const slow = fakeAzure({ firewall: true });
+  const run = slow.run;
+  slow.run = async (args) => (args[3] === 'create' ? (slow.calls.push('create, not applied yet'), '') : run(args));
+  app = startWith([CLUBS], { initialConnection: 'clubs', open: slow.open, az: slow.run, firewallWaits: [0, 0, 0] });
+  await until(() => frame().includes('Add a firewall rule'), 'the question');
+  app.stdin.write('1');
+  await until(() => frame().includes('the firewall still turns 203.0.113.7 away'), 'given up');
+  assert.deepEqual(slow.opened, ['clubs', 'clubs', 'clubs', 'clubs'], 'once, then three tries after the rule');
+  assert.doesNotMatch(frame(), /Add a firewall rule/);
+  app.unmount();
+
+  // No leaves the firewall alone.
+  const shut = fakeAzure({ firewall: true });
+  app = startWith([CLUBS], { initialConnection: 'clubs', open: shut.open, az: shut.run, firewallWaits: [0, 0] });
+  await until(() => frame().includes('Add a firewall rule'), 'the question again');
+  app.stdin.write('2');
+  await until(() => !frame().includes('Add a firewall rule'), 'declined');
+  assert.deepEqual(shut.calls, []);
+  // /firewall then adds it with the address the error gave.
+  await type(app.stdin, '/firewall');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('lets 203.0.113.7 in') && frame().includes('/connect clubs when it has applied'), 'the rule on demand');
+  app.unmount();
+
+  // With no error to go by, the address is looked up; a connection that isn't Azure SQL is refused.
+  const quiet = fakeAzure();
+  app = startWith([CLUBS, ...DEMO_CONNECTIONS], { open: quiet.open, az: quiet.run, publicIp: async () => '198.51.100.4' });
+  await until(() => frame().includes('Connections'), 'the connections');
+  await type(app.stdin, '/firewall clubs');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('trawl-198-51-100-4 on clubs'), 'the looked-up address');
+  assert.ok(quiet.rules.has('198.51.100.4'));
+  await type(app.stdin, '/firewall demo');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes("demo isn't Azure SQL"), 'the refusal');
+  app.unmount();
+});

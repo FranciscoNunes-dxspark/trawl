@@ -1,6 +1,6 @@
 import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { accept, completeAt, ident, signatureAt, tablesIn } from '../src/complete.js';
+import { accept, completeAt, ident, lastToken, signatureAt, tablesIn } from '../src/complete.js';
 import { demoSession } from '../src/demo.js';
 import { SCHEMA_SQL, buildSchema } from '../src/schema.js';
 
@@ -149,4 +149,25 @@ test('signatureAt: the syntax of the call the cursor is in, and which argument i
   assert.equal(sig('EXEC dbo.usp_RecalculateTable @Season = 1, |'), 'dbo.usp_RecalculateTable(@Season int, @DryRun bit) @1');
   const opt = signatureAt(at('SELECT CONVERT(|'), schema).params;
   assert.deepEqual(opt.map((p) => p.optional), [false, false, true]);
+});
+
+test('the token before the cursor is the last word, or else the last other character, before spaces and masked text', () => {
+  const pieces = ['SELECT', ' ', '\n', '\t', '\u0001', ',', '(', 'a1', '@v', '#t', '$', '.', ' ', 'é', '*'];
+  let seed = 5;
+  const next = (n) => (seed = (seed * 1103515245 + 12345) % 2147483648) % n;
+  for (let i = 0; i < 2000; i++) {
+    let text = '';
+    for (let k = next(8); k > 0; k--) text += pieces[next(pieces.length)];
+    assert.equal(lastToken(text), text.match(/([\w@#$]+|[^\s\u0001])[\s\u0001]*$/)?.[1], JSON.stringify(text));
+  }
+});
+
+test('suggestions are the same asked again, in either case, and for another schema', () => {
+  const first = offered('SELECT * FROM dbo.Clubs c WHERE c|');
+  assert.deepEqual(offered('SELECT * FROM dbo.Clubs c WHERE c|'), first);
+  assert.ok(offered('SELECT * FROM dbo.Clubs c WHERE se|').includes('select'));
+  assert.ok(offered('SELECT * FROM dbo.Clubs c WHERE SE|').includes('SELECT'));
+  const other = { objects: [{ schema: 'x', name: 'Clubbers', kind: 'table', columns: [] }], foreignKeys: [] };
+  assert.deepEqual(completeAt(at('SELECT * FROM Cl|'), other).items.map((i) => i.insert), ['x.Clubbers']);
+  assert.deepEqual(offered('SELECT * FROM Cl|'), ['dbo.Clubs']);
 });

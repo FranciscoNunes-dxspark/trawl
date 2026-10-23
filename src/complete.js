@@ -187,6 +187,49 @@ export function signatureAt(editor, schema) {
 
 const lineStartOffset = (lines, row) => lines.slice(0, row).reduce((n, l) => n + l.length + 1, 0);
 
+// What an item is matched on, in lower case: kept for the items made once per schema (or for good).
+const lowered = new WeakMap();
+function keysOf(item) {
+  let keys = lowered.get(item);
+  if (!keys) lowered.set(item, (keys = (item.match ?? [item.label]).map((s) => s.toLowerCase())));
+  return keys;
+}
+
+// The lists made from a schema (its tables as items, its schemas' names), made once per schema and
+// kind of list: the schema doesn't change once read, and there can be thousands of objects in it.
+const perSchema = new WeakMap();
+function once(schema, key, make) {
+  let lists = perSchema.get(schema);
+  if (!lists) perSchema.set(schema, (lists = new Map()));
+  if (!lists.has(key)) lists.set(key, make());
+  return lists.get(key);
+}
+// The keywords and functions offered, in upper case or (when typing in lower case) lower.
+const wordItems = new Map();
+function wordsAndFunctions(lower) {
+  if (!wordItems.has(lower)) {
+    const cased = (k) => (lower ? k.toLowerCase() : k);
+    wordItems.set(lower, [
+      ...WORDS.map((k) => ({ label: cased(k), insert: cased(k), match: [k], kind: 'keyword', detail: 'keyword' })),
+      ...FUNCTIONS.map((f) => ({ label: `${cased(f)}()`, insert: `${cased(f)}(`, match: [f], kind: 'function', detail: 'function' })),
+    ]);
+  }
+  return wordItems.get(lower);
+}
+
+// The last word, or else the last other character, before any spaces and masked runs at the end of
+// `m`: what /([\w@#$]+|[^\s\u0001])[\s\u0001]*$/ finds, without trying it at every position of a long text.
+export function lastToken(m) {
+  let end = m.length;
+  while (end > 0 && SPACE.test(m[end - 1])) end--;
+  if (!end) return undefined;
+  let start = end - 1;
+  if (WORD_CHAR.test(m[start])) while (start > 0 && WORD_CHAR.test(m[start - 1])) start--;
+  return m.slice(start, end);
+}
+const SPACE = /[\s\u0001]/;
+const WORD_CHAR = /[\w@#$]/;
+
 // Prefix matches first, in the order the candidates came (the context put the likeliest first),
 // then names that contain the text, for two letters or more. Keywords only match a prefix.
 function rank(items, word) {
@@ -195,7 +238,7 @@ function rank(items, word) {
   const starts = [];
   const contains = [];
   for (const it of items) {
-    const keys = (it.match ?? [it.label]).map((s) => s.toLowerCase());
+    const keys = keysOf(it);
     if (keys.some((s) => s.startsWith(q))) starts.push(it);
     else if (q.length >= 2 && it.kind !== 'keyword' && it.kind !== 'function' && keys.some((s) => s.includes(q))) contains.push(it);
   }
@@ -243,7 +286,7 @@ export function completeAt(editor, schema, { force = false } = {}) {
   if (star && schema) {
     const starAt = col - star[1].length - 1;
     const pre = m.slice(0, lineStartOffset(lines, row) + starAt);
-    const prev = pre.match(/([\w@#$]+|[^\s\u0001])[\s\u0001]*$/)?.[1].toUpperCase();
+    const prev = lastToken(pre)?.toUpperCase();
     const clause = [...pre.matchAll(/\b(SELECT|FROM|WHERE|JOIN|ON|GROUP|ORDER|HAVING|SET|VALUES)\b/gi)].at(-1)?.[1].toUpperCase();
     const listStart = prev === 'SELECT' || prev === 'DISTINCT' || prev === ',' || /\bTOP\s*\(?\s*\d+\s*\)?[\s\u0001]*$/i.test(pre);
     if (clause !== 'SELECT' || !listStart) return { from: col, word, items: [] };
@@ -265,7 +308,7 @@ export function completeAt(editor, schema, { force = false } = {}) {
 
   const qualifier = head.slice(0, from).match(new RegExp(String.raw`((?:${NAME}\.)+)$`))?.[1] ?? '';
   const before = m.slice(0, at - qualifier.length);
-  const prev = before.match(/([\w@#$]+|[^\s\u0001])[\s\u0001]*$/)?.[1].toUpperCase() ?? '';
+  const prev = lastToken(before)?.toUpperCase() ?? '';
   const clause = [...before.matchAll(/\b(SELECT|FROM|WHERE|JOIN|ON|GROUP|ORDER|HAVING|SET|VALUES)\b/gi)].at(-1)?.[1].toUpperCase();
   // Before anything is typed, only where it's clear what comes next (FROM's tables, ON's joins).
   if (!word && !qualifier && !force && !OPENS_LIST.has(prev)) return { from, word, items: [] };
@@ -291,8 +334,10 @@ export function completeAt(editor, schema, { force = false } = {}) {
     detail: `${o.schema} · ${o.kind}`,
   });
   const ofKind = (kinds, list = objects) => list.filter((o) => kinds.includes(o.kind));
-  const schemaItems = () =>
-    [...new Set(objects.map((o) => o.schema))].map((s) => ({ label: s, insert: `${ident(s)}.`, kind: 'schema', detail: 'schema' }));
+  const schemaNames = () => (schema ? once(schema, 'schemas', () => [...new Set(objects.map((o) => o.schema))]) : []);
+  const schemaItems = () => once(schema, 'schema items', () => schemaNames().map((s) => ({ label: s, insert: `${ident(s)}.`, kind: 'schema', detail: 'schema' })));
+  // A schema's tables (or procedures) as items, qualified with their schema.
+  const objectItems = (kinds) => once(schema, `${kinds}:${bracket}`, () => ofKind(kinds).map((o) => objectItem(o, true)));
   const wanted = prev === 'EXEC' || prev === 'EXECUTE' ? ['procedure'] : ['table', 'view', 'function'];
 
   let items;
@@ -303,7 +348,7 @@ export function completeAt(editor, schema, { force = false } = {}) {
     const inScope =
       parts.length === 1 &&
       (scope.find((t) => t.alias?.toLowerCase() === last) ?? scope.find((t) => !t.alias && t.object?.name.toLowerCase() === last));
-    const schemaName = [...new Set(objects.map((o) => o.schema))].find((s) => s.toLowerCase() === last);
+    const schemaName = schemaNames().find((s) => s.toLowerCase() === last);
     const object = inScope ? inScope.object : !schemaName && findObject(schema, parts.slice(-2).join('.'));
     if (object) items = columnsOf(object, object.name);
     else if (schemaName) items = ofKind(wanted, objects.filter((o) => o.schema === schemaName)).map((o) => objectItem(o, false));
@@ -311,7 +356,7 @@ export function completeAt(editor, schema, { force = false } = {}) {
   } else if (prev === 'USE') {
     items = (schema?.databases ?? []).map((d) => ({ label: d, insert: name(d), kind: 'database', detail: 'database' }));
   } else if (TAKES_TABLE.has(prev) || prev === 'EXEC' || prev === 'EXECUTE' || (prev === ',' && clause === 'FROM')) {
-    items = [...ofKind(wanted).map((o) => objectItem(o, true)), ...schemaItems()];
+    items = [...(schema ? objectItems(wanted) : []), ...(schema ? schemaItems() : [])];
   } else {
     // Anywhere else: the columns of the tables in this statement, then keywords and functions,
     // then tables. A column in more than one of them comes with its alias, to say which.
@@ -326,13 +371,11 @@ export function completeAt(editor, schema, { force = false } = {}) {
     });
     const seen = new Set();
     const lower = /[a-z]/.test(typed) && typed === typed.toLowerCase();
-    const cased = (k) => (lower ? k.toLowerCase() : k);
     items = [
       ...joins,
       ...columns.filter((c) => !seen.has(c.label) && seen.add(c.label)),
-      ...(bracket ? [] : WORDS.map((k) => ({ label: cased(k), insert: cased(k), match: [k], kind: 'keyword', detail: 'keyword' }))),
-      ...(bracket ? [] : FUNCTIONS.map((f) => ({ label: `${cased(f)}()`, insert: `${cased(f)}(`, match: [f], kind: 'function', detail: 'function' }))),
-      ...ofKind(['table', 'view']).map((o) => objectItem(o, true)),
+      ...(bracket ? [] : wordsAndFunctions(lower)),
+      ...(schema ? objectItems(['table', 'view']) : []),
     ];
   }
   if (!word && !qualifier && !force && prev === 'ON') items = joins;

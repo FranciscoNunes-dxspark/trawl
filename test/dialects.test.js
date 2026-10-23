@@ -47,6 +47,19 @@ test('scripts split at ; outside strings, comments, quoted names and dollar-quot
   assert.deepEqual(splitScript(my, MY).map((s) => s.text), ["SELECT 'it\\'s; here' # a; comment", 'SELECT `x;y` FROM t']);
 });
 
+test("MySQL's DELIMITER lines change where statements end, as the mysql client's do, and aren't sent", () => {
+  const script = "-- make it\nDROP PROCEDURE IF EXISTS p;\nDELIMITER $$\nCREATE PROCEDURE p()\nBEGIN\n  SELECT 1; SELECT '$$';\nEND$$\ndelimiter ;\nCALL p();\nDELIMITER //\nSELECT 2//\n";
+  assert.deepEqual(splitScript(script, MY).map((s) => [s.line, s.text]), [
+    [1, '-- make it\nDROP PROCEDURE IF EXISTS p'],
+    [4, "CREATE PROCEDURE p()\nBEGIN\n  SELECT 1; SELECT '$$';\nEND"],
+    [9, 'CALL p()'],
+    [11, 'SELECT 2'],
+  ]);
+  // Only at the start of a statement: inside one, or in a string, it's just a word.
+  assert.deepEqual(splitScript("SELECT 1 AS x\ndelimiter $$;\nSELECT 'DELIMITER $$'", MY).map((s) => s.text), ['SELECT 1 AS x\ndelimiter $$', "SELECT 'DELIMITER $$'"]);
+  assert.equal(splitScript('DELIMITER $$\nSELECT 1$$', PG).length, 1, "Postgres has no DELIMITER");
+});
+
 test('Postgres and MySQL statements that write are writes, but REPLACE() is a function', () => {
   assert.equal(classifyScript('COPY t FROM stdin', { dialect: 'postgres' }).write, true);
   assert.equal(classifyScript('CALL refresh_all()', { dialect: 'mysql' }).write, true);

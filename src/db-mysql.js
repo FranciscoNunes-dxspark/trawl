@@ -1,7 +1,6 @@
 // MySQL (and MariaDB) behind the same session interface as db.js's SQL Server one, through mysql2
-// (plain JavaScript). A script runs a statement at a time (dialects.js splitScript; DELIMITER isn't
-// understood), each result set cut at the row limit after it has arrived. esc cancels with KILL QUERY
-// from a second connection.
+// (plain JavaScript). A script runs a statement at a time (dialects.js splitScript, which follows
+// DELIMITER lines). esc cancels with KILL QUERY from a second connection.
 import mysql from 'mysql2/promise';
 import { DbError, connectionLost, ended, localSocket, runScript } from './db.js';
 import { DIALECTS, splitScript } from './dialects.js';

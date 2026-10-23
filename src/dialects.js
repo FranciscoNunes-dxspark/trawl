@@ -426,7 +426,10 @@ export function definitionSqlFor(dialect, o) {
 /**
  * Splits a Postgres or MySQL script into the statements a driver sends one at a time: at each `;`
  * outside comments, strings, quoted names and (Postgres) $tag$ bodies. MySQL's # comments and
- * backslash escapes count too. Each is { text, line, repeat: 1 }, as splitBatches gives SQL Server's.
+ * backslash escapes count too, and so does its client's `DELIMITER` line, at the start of a
+ * statement: `DELIMITER $$` makes statements end at `$$` (and not at `;`, so a routine's body
+ * stays whole) until `DELIMITER ;`. The DELIMITER lines themselves aren't sent. Each is
+ * { text, line, repeat: 1 }, as splitBatches gives SQL Server's.
  */
 export function splitScript(text, dialect) {
   const src = String(text ?? '').replace(/\r\n?/g, '\n');
@@ -434,19 +437,32 @@ export function splitScript(text, dialect) {
   const out = [];
   let start = 0;
   let i = 0;
-  const flush = (end) => {
+  let delimiter = ';';
+  // The statement from `start` up to `end`, and the next one starts at `next` (after its delimiter).
+  const flush = (end, next = end) => {
     const piece = src.slice(start, end);
     const code = piece.replace(/--[^\n]*|\/\*[\s\S]*?\*\/|;/g, '').trim();
     if (code && !(mysql && /^(#[^\n]*\s*)+$/.test(code))) {
       const lead = piece.search(/\S/);
       out.push({ text: piece.trim().replace(/;$/, '').trim(), line: src.slice(0, start + lead).split('\n').length, repeat: 1 });
     }
-    start = end;
+    start = next;
   };
+  // Nothing but blanks and comments since the last statement ended, and `i` starts its line.
+  const atStatementStart = () => (i === 0 || /\n[ \t]*$/.test(src.slice(0, i))) && !src.slice(start, i).replace(/--[^\n]*|#[^\n]*|\/\*[\s\S]*?\*\//g, '').trim();
   while (i < src.length) {
     const ch = src[i];
     const next = src[i + 1];
-    if ((ch === '-' && next === '-') || (mysql && ch === '#')) {
+    const custom = mysql && (ch === 'd' || ch === 'D') && /^delimiter[ \t]+\S/i.test(src.slice(i, i + 12)) ? src.slice(i).match(/^delimiter[ \t]+(\S+)[^\n]*/i) : null;
+    if (custom && atStatementStart()) {
+      flush(i);
+      delimiter = custom[1];
+      i += custom[0].length;
+      start = i;
+    } else if (mysql && delimiter !== ';' && src.startsWith(delimiter, i)) {
+      flush(i, i + delimiter.length);
+      i += delimiter.length;
+    } else if ((ch === '-' && next === '-') || (mysql && ch === '#')) {
       const end = src.indexOf('\n', i);
       i = end < 0 ? src.length : end;
     } else if (ch === '/' && next === '*') {
@@ -473,7 +489,7 @@ export function splitScript(text, dialect) {
         const end = src.indexOf(tag[0], i + tag[0].length);
         i = end < 0 ? src.length : end + tag[0].length;
       } else i++;
-    } else if (ch === ';') {
+    } else if (ch === ';' && delimiter === ';') {
       i++;
       flush(i);
     } else i++;

@@ -465,43 +465,67 @@ const FUNCTION_NAMES = new Set([
 /**
  * Splits a script into coloured runs per line: { text, kind } with kind 'keyword', 'function',
  * 'string', 'comment', 'number', 'variable' or null. Comments and strings spanning lines stay coloured.
+ * With `from` and `to` only those lines (from inclusive, to exclusive) are worked out, the others
+ * left out of the array: the console colours the lines on screen, not the whole text on every key.
  */
-export function highlight(text) {
+export function highlight(text, { from = 0, to = Infinity } = {}) {
   const src = normalise(text);
   const m = mask(src);
-  // What each masked run is, from the character it starts with.
-  const kinds = new Array(src.length).fill(null);
-  for (let i = 0; i < src.length; ) {
+  // The offsets the lines asked for cover: [a, b), b at the end of the last one.
+  let a = 0;
+  for (let line = 0; line < from; line++) {
+    const nl = src.indexOf('\n', a);
+    if (nl < 0) return [];
+    a = nl + 1;
+  }
+  let b = a;
+  for (let line = from; line < to; line++) {
+    const nl = src.indexOf('\n', b);
+    if (nl < 0) {
+      b = src.length;
+      break;
+    }
+    b = line + 1 < to ? nl + 1 : nl;
+  }
+  // What each masked run is, from the character it starts with (which may be before `a`).
+  const kinds = new Array(b - a).fill(null);
+  for (let i = a; i < b; ) {
     if (m[i] !== FILL) {
       i++;
       continue;
     }
-    const kind = src[i] === '-' || src[i] === '/' ? 'comment' : src[i] === "'" ? 'string' : null;
+    let s = i;
+    while (s > 0 && m[s - 1] === FILL) s--;
+    const kind = src[s] === '-' || src[s] === '/' ? 'comment' : src[s] === "'" ? 'string' : null;
     let j = i;
-    while (j < src.length && m[j] === FILL) kinds[j++] = kind;
+    while (j < b && m[j] === FILL) kinds[j++ - a] = kind;
     i = j;
   }
-  for (const t of m.matchAll(/[@#]?[A-Za-z_][\w$#@]*|\b\d+(\.\d+)?\b/g)) {
+  const words = /[@#]?[A-Za-z_][\w$#@]*|\b\d+(\.\d+)?\b/g;
+  words.lastIndex = a;
+  for (let t; (t = words.exec(m)) && t.index < b; ) {
     const w = t[0];
     const upper = w.toUpperCase();
     // A built-in's name with a parenthesis after it, but not a dotted name's last part (x.value( is XML's).
     const called = FUNCTION_NAMES.has(upper) && m[t.index - 1] !== '.' && /^\s*\(/.test(m.slice(t.index + w.length, t.index + w.length + 20));
     const kind = /^\d/.test(w) ? 'number' : w.startsWith('@') ? 'variable' : called ? 'function' : KEYWORDS.has(upper) ? 'keyword' : null;
-    if (kind) for (let k = 0; k < w.length; k++) kinds[t.index + k] = kind;
+    if (kind) for (let k = 0; k < w.length; k++) kinds[t.index - a + k] = kind;
   }
   // N'…' is a string too.
-  for (let i = 0; i + 1 < src.length; i++) if ((src[i] === 'N' || src[i] === 'n') && kinds[i + 1] === 'string' && src[i + 1] === "'") kinds[i] = 'string';
+  for (let i = a; i + 1 < b; i++) if ((src[i] === 'N' || src[i] === 'n') && kinds[i + 1 - a] === 'string' && src[i + 1] === "'") kinds[i - a] = 'string';
   const out = [];
-  let off = 0;
-  for (const line of src.split('\n')) {
+  for (let row = from, off = a; row < to; row++) {
+    const nl = src.indexOf('\n', off);
+    const end = nl < 0 ? src.length : nl;
     const runs = [];
-    for (let k = 0; k < line.length; k++) {
-      const kind = kinds[off + k];
-      if (runs.length && runs.at(-1).kind === kind) runs.at(-1).text += line[k];
-      else runs.push({ text: line[k], kind });
+    for (let k = off; k < end; k++) {
+      const kind = kinds[k - a];
+      if (runs.length && runs.at(-1).kind === kind) runs.at(-1).text += src[k];
+      else runs.push({ text: src[k], kind });
     }
-    out.push(runs);
-    off += line.length + 1;
+    out[row] = runs;
+    if (nl < 0) break;
+    off = nl + 1;
   }
   return out;
 }

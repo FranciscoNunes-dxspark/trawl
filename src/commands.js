@@ -7,7 +7,7 @@ import { objectName } from './schema.js';
 // `complete` names the list offered while typing the first argument.
 export const COMMANDS = [
   { name: 'connect', args: '<name>', desc: 'Connect to a saved connection', complete: 'connections', run: (ctx, s) => a.connect(ctx, s) },
-  { name: 'add', args: '<name> <server> [database] [--kind postgres|mysql] [--user u] [--folder f] [--prod] [--ssh user@host]', desc: 'Save a connection (SQL Server, az login unless --user)', run: (ctx, s) => a.addConnection(ctx, s) },
+  { name: 'add', args: '<name> <server> [database] [--kind postgres|mysql] [--user u] [--folder f] [--prod] [--trust-cert] [--ssh user@host]', desc: 'Save a connection (SQL Server, az login unless --user)', run: (ctx, s) => a.addConnection(ctx, s) },
   { name: 'azure-sql', args: '<server> [database] [--name n] [--user u] [--prod] [--folder f] [--password-from rg/app[/slot]] [--subscription id]', desc: 'Connect to an Azure SQL database: the saved connection to it, else one saved as /add would (Sonar copies these)', run: (ctx, s) => a.azureSql(ctx, s) },
   { name: 'import', args: 'datagrip [folder]', desc: 'Add your DataGrip data sources as connections, in their folders', run: (ctx, s) => a.importConnections(ctx, s) },
   { name: 'import-csv', args: '<file.csv> <table> [--run]', desc: 'A CSV file as INSERTs into a table, by its header: into a console tab to read (--run runs it)', run: (ctx, s) => a.importCsv(ctx, s) },

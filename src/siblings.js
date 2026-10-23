@@ -1,29 +1,10 @@
-// Trawl's side of the family (family.js is the part every sibling shares): what it hands the others,
-// what it does with what they hand it, the databases a project's files name, and Glim's mood in the
-// family's words. Pure.
-import { databaseOf, describeContext, quoteArg, shareLine, takeLine } from './family.js';
+// Trawl's side of the family (family.js is the part every sibling shares, the names, who takes what and
+// Trawl's lines among it): what it hands the others, what it does with what they hand it, the databases
+// a project's files name, and Glim's mood in the family's words. Pure.
+import { APP_NAMES, PET_NAMES, databaseOf, quoteArg, shareLine, takeLine, trawlLine } from './family.js';
 import { serverHost } from './azure.js';
 import { DEMO_CONNECTIONS } from './connections.js';
 import { valueLiteral } from './edit.js';
-
-/** The siblings' names as people say them, and their mascots'. */
-export const APPS = { splice: 'Splice', trawl: 'Trawl', sonar: 'Sonar', bosun: 'Bosun', hail: 'Hail' };
-export const PETS = { splice: 'Twig', trawl: 'Glim', sonar: 'Ping', bosun: 'Squawk', hail: 'Hoot' };
-
-/** What the log says once a line is copied for `app` ('Hail'): the line, or for a /take what it holds. */
-export function handOverText(app, line, context = null) {
-  return `Copied for ${app}: paste it into ${app}'s prompt\n${context ? describeContext(context) : line}`;
-}
-
-// Who takes the contexts Trawl doesn't.
-const TAKERS = { request: ['Hail'], commit: ['Splice'], file: ['Splice'], exception: ['Splice', 'Sonar'], logline: ['Splice', 'Hail'] };
-
-/** What Trawl says about a context of a kind it doesn't take: whose it is. */
-export function notForTrawl({ kind, data }) {
-  const who = TAKERS[kind] ?? [];
-  const what = describeContext({ kind, data });
-  return who.length ? `That's ${/^[aeiou]/i.test(what) ? 'an' : 'a'} ${what}, for ${who.join(' or ')}: paste it into ${who.join("'s or ")}'s prompt instead.` : `Trawl doesn't take a ${kind}.`;
-}
 
 /**
  * What this project offers the siblings (family.js projectAt's answer): [{ app, line, detail }],
@@ -31,9 +12,9 @@ export function notForTrawl({ kind, data }) {
  */
 export function familyOffers(project) {
   const out = [];
-  if (project.repo) out.push({ app: 'Splice', line: shareLine('open', [project.repo]), detail: `the repository ${project.repo}` });
-  if (project.crew) out.push({ app: 'Bosun', line: shareLine('move', [project.dir]), detail: `run the project's processes in ${project.dir}` });
-  for (const f of project.httpFiles ?? []) out.push({ app: 'Hail', line: shareLine('open', [f]), detail: `the requests in ${f}` });
+  if (project.repo) out.push({ app: 'splice', line: shareLine('open', [project.repo]), detail: `the repository ${project.repo}` });
+  if (project.crew) out.push({ app: 'bosun', line: shareLine('move', [project.dir]), detail: `run the project's processes in ${project.dir}` });
+  for (const f of project.httpFiles ?? []) out.push({ app: 'hail', line: shareLine('open', [f]), detail: `the requests in ${f}` });
   return out;
 }
 
@@ -56,18 +37,18 @@ export function projectNote(found) {
 }
 
 /**
- * The /add arguments for a project's database (a projectAt entry): named after its key (made unique
- * among `connections` and the demo's), the server as /add takes it (host,port for SQL Server,
- * host:port for the others), its database and login. No --user signs in with az login.
+ * The line that saves a project's database (a projectAt entry), family.js's trawlLine: named after its
+ * key (made unique among `connections` and the demo's), `/azure-sql … --name <name>` for Azure SQL
+ * signing in with Entra, else `/add` with the server as /add takes it, its database, login and
+ * --trust-cert when its connection string trusts the server's certificate. No --user signs in with az.
  */
-export function addArgsFor(db, connections) {
+export function projectLine(db, connections) {
   const wanted = String(db.name).replace(/[^\w.-]+/g, '-').replace(/^-+|-+$/g, '') || 'project';
   const taken = new Set([...connections, ...DEMO_CONNECTIONS].map((c) => c.name.toLowerCase()));
   let name = wanted;
   for (let n = 2; taken.has(name.toLowerCase()); n++) name = `${wanted}-${n}`;
-  const server = db.port ? (db.kind === 'sqlserver' ? `${db.server},${db.port}` : `${db.server}:${db.port}`) : db.server;
-  const args = [name, server, ...(db.database ? [db.database] : []), ...(db.kind !== 'sqlserver' ? ['--kind', db.kind] : []), ...(db.user && !db.entra ? ['--user', db.user] : [])];
-  return args.map(quoteArg).join(' ');
+  const line = trawlLine(db, name);
+  return line.startsWith('/azure-sql ') ? `${line} --name ${quoteArg(name)}` : line;
 }
 
 /** The saved connection a /take query was for: to its server and database, else to its server; or null. */
@@ -152,7 +133,7 @@ export function moodsToShow(moods, seen = new Set()) {
 
 /** Glim's one line about a sibling's mood: "Ping says: production has 12 new exceptions". */
 export function reactionText({ app, mood, reason }) {
-  const who = PETS[app] ?? APPS[app] ?? app;
+  const who = PET_NAMES[app] ?? APP_NAMES[app] ?? app;
   return reason ? `${who} says: ${reason}` : `${who} is ${mood}`;
 }
 

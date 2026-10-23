@@ -10,7 +10,7 @@ import { render } from 'ink-testing-library';
 import { DEMO_CONNECTIONS, parseAddArgs } from '../src/connections.js';
 import { memoryCredentials } from '../src/credentials.js';
 import { projectAt } from '../src/family.js';
-import { addArgsFor, newDatabases, projectNote, savedFor } from '../src/siblings.js';
+import { newDatabases, projectLine, projectNote, savedFor } from '../src/siblings.js';
 import { App } from '../src/ui/App.jsx';
 
 const KEYS = { enter: '\r', esc: '\x1b' };
@@ -70,10 +70,12 @@ test('the databases not saved yet, the note about them, and the /add each become
   assert.equal(projectNote(found), 'Found 2 databases in appsettings.Development.json and .env: /project to add them.');
   assert.equal(projectNote(found.slice(0, 1)), 'Found a database in appsettings.Development.json: /project to add it.');
   assert.equal(projectNote([]), null);
-  assert.equal(addArgsFor(found[0], saved), 'Default db.example.com,1433 Shop --user app');
-  assert.equal(addArgsFor(found[1], saved), 'DATABASE_URL pg.local:5433 web --kind postgres --user web');
-  assert.equal(addArgsFor(p.databases.find((d) => d.name === 'Reports'), [...saved, { name: 'Reports' }]), 'Reports-2 reports.example.com Reports');
-  const conn = parseAddArgs(addArgsFor(found[0], saved));
+  assert.equal(projectLine(found[0], saved), '/add Default db.example.com,1433 Shop --user app');
+  assert.equal(projectLine(found[1], saved), '/add DATABASE_URL pg.local:5433 web --kind postgres --user web');
+  assert.equal(projectLine(p.databases.find((d) => d.name === 'Reports'), [...saved, { name: 'Reports' }]), '/add Reports-2 reports.example.com Reports');
+  assert.equal(projectLine({ ...found[0], trustCert: true }, saved), '/add Default db.example.com,1433 Shop --user app --trust-cert');
+  assert.equal(projectLine({ name: 'Cloud', kind: 'sqlserver', server: 'shop.database.windows.net', database: 'Shop', entra: true }, saved), '/azure-sql shop.database.windows.net Shop --name Cloud');
+  const conn = parseAddArgs(projectLine(found[0], saved).slice('/add '.length));
   assert.deepEqual([conn.server, conn.database, conn.user, conn.auth], ['db.example.com,1433', 'Shop', 'app', 'sql']);
 });
 

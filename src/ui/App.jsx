@@ -45,7 +45,7 @@ import { COMPILED, VERSION } from '../version.js';
 import { worthNotifying } from '../notify.js';
 import { changedCells, untilMatch, untilText } from '../watch.js';
 import { dueWarning, locksText, openFor, warnMinutes, warningTitle } from '../transactions.js';
-import { decodeContext, projectAt, readMoods, repoRoot, writeMood } from '../family.js';
+import { decodeContext, pastedLine, projectAt, readMoods, repoRoot, writeMood } from '../family.js';
 import { familyMood, moodsToShow, newDatabases, projectNote, reactionText } from '../siblings.js';
 
 const VIEWS = [
@@ -1469,10 +1469,9 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     if (input.length > 1 && a.openDropped(ctx, input)) return;
     // A command pasted over a view (as a sibling copies them), or a bare family:v1:… context: into the
     // prompt, to read and run with ↵.
-    if (input.length > 1) {
-      const pasted = input.replace(/\x1b\[20[01]~/g, '').replace(/[\r\n]+$/, '').replace(/[\r\n]+/g, ' ');
-      if (pasted.trimStart().startsWith('/') || decodeContext(pasted)) return prefill(pasted.trim());
-    }
+    // (A terminal ends a pasted line with \r, which the family's rule takes as a \n.)
+    const pasted = pastedLine(input.replace(/\r$/, '\n'));
+    if (pasted) return prefill(pasted);
     if (input === '/' || input === ':') return prefill('/');
     if (input === '!') return prefill('!');
     if (input === '?') return ctx.showHelp();

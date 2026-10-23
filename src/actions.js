@@ -35,8 +35,8 @@ import { LANGUAGE_NAMES, LANGUAGES, languageOf, scaffold } from './scaffold.js';
 import { UNDO_ROWS, reverseScript, snapshotOf, snapshotRows, snapshotSummary, undoPlan, withSnapshot } from './undo.js';
 import { loadUndo, saveUndo } from './config.js';
 import { relTime } from './text.js';
-import { contextIn, projectAt, quoteArg, takeLine } from './family.js';
-import { addArgsFor, connectionForQuery, familyOffers, handOverText, newDatabases, notForTrawl, placeText, queryContext, rowsContext, rowsScript } from './siblings.js';
+import { APP_NAMES, TAKEN_BY, contextIn, copiedNote, notMine, projectAt, quoteArg, takeLine } from './family.js';
+import { connectionForQuery, familyOffers, newDatabases, placeText, projectLine, queryContext, rowsContext, rowsScript } from './siblings.js';
 import { API_LANGUAGES, API_SYSTEM, apiFileName, apiLanguage, apiPrompt, apiRequest, parseApi, projectLanguage } from './api.js';
 import { copyRefusal, copyScript, foreignKeysFrom, insertOrder, insertedRows, keyTuples, maskRows, parentSql, parseCopyRowsArgs, rowKey, rowsSql, selfOrder, tupleKey } from './copyrows.js';
 import { rehearsalRefusal, rehearsalSteps, rehearsalText, rowsAffected } from './rehearse.js';
@@ -2168,11 +2168,11 @@ export function scaffoldObject(ctx, rest) {
 // The family: what Trawl hands Splice, Sonar, Bosun and Hail (a command line copied to paste into
 // their prompt), and what it takes from them (/take). Nothing secret goes into a line.
 
-/** Copies `line` for `app` ('Hail') and says so in the log: the line, or for a /take what it holds. */
-export async function handOver(ctx, app, line, context = null) {
+/** Copies `line` for `apps` ('hail', or a list) and says so in the log: the line, or for a /take what it holds. */
+export async function handOver(ctx, apps, line) {
   try {
     const via = await ctx.copyText(line);
-    ctx.note(`${handOverText(app, line, context)}${via === 'terminal' ? ' (copied through the terminal, which has to allow it)' : ''}`, 'ok');
+    ctx.note(`${copiedNote(apps, line)}${via === 'terminal' ? ' (copied through the terminal, which has to allow it)' : ''}`, 'ok');
   } catch (e) {
     ctx.note(`Couldn't copy: ${firstLine(e.message)}`, 'error');
   }
@@ -2189,7 +2189,7 @@ export async function take(ctx, rest) {
   if (!c) return ctx.note("That isn't a line one of the family copied: /take takes the family:v1:… that Splice, Sonar, Bosun or Hail puts on the clipboard.", 'error');
   if (c.kind === 'query') return takeQuery(ctx, c.data);
   if (c.kind === 'rows') return takeRows(ctx, c.data);
-  ctx.note(notForTrawl(c), 'error');
+  ctx.note(notMine('trawl', c), 'error');
 }
 
 // A console tab of its own (`base`, made unique) holding `text`, on screen.
@@ -2235,8 +2235,8 @@ export async function share(ctx, rest = '') {
   if (what === 'query' || (!what && ctx.view !== 'results')) {
     const pick = consolePick(ctx);
     if (!pick?.text.trim()) return ctx.note('Nothing to share: put the cursor on a statement in the console (or select it).', 'error');
-    const { line, context } = queryContext(pick.text, place);
-    return handOver(ctx, 'Trawl', line, context);
+    const { line } = queryContext(pick.text, place);
+    return handOver(ctx, TAKEN_BY.query, line);
   }
   const res = ctx.results;
   const set = ctx.currentSet();
@@ -2244,8 +2244,8 @@ export async function share(ctx, rest = '') {
   const indexes = what === 'all' ? set.rows.map((_, i) => i) : ctx.resultRow?.set === set && ctx.resultRow.row != null && set.rows[ctx.resultRow.row] ? [ctx.resultRow.row] : [0];
   const table = res?.edit?.table ?? res?.source?.table ?? null;
   const from = res?.conn && res.conn === s?.conn.name ? place : { database: res?.database ?? null };
-  const { line, context, hidden } = rowsContext(set, indexes, { ...from, table: table ? objectName(table) : null });
-  await handOver(ctx, 'Hail', line, context);
+  const { line, hidden } = rowsContext(set, indexes, { ...from, table: table ? objectName(table) : null });
+  await handOver(ctx, TAKEN_BY.rows, line);
   if (hidden.length) ctx.note(`Left out of it: ${hidden.join(', ')}, which look${hidden.length === 1 ? 's' : ''} like ${hidden.length === 1 ? 'it holds a secret' : 'they hold secrets'}.`);
 }
 
@@ -2258,7 +2258,7 @@ export function family(ctx) {
     title: `What ${basename(dir) || dir} offers the family`,
     hint: '↵ copy it',
     empty: `Nothing in ${dir} for the others: no git repository (Splice), nothing to run (Bosun), no .http files (Hail).`,
-    items: offers.map((o) => ({ label: o.app, detail: o.line, text: `${o.detail[0].toUpperCase()}${o.detail.slice(1)}.\n\n${o.line}\n\n↵ copies it, to paste into ${o.app}'s prompt.`, offer: o })),
+    items: offers.map((o) => ({ label: APP_NAMES[o.app], detail: o.line, text: `${o.detail[0].toUpperCase()}${o.detail.slice(1)}.\n\n${o.line}\n\n↵ copies it, to paste into ${APP_NAMES[o.app]}'s prompt.`, offer: o })),
     keys: { return: (it) => handOver(ctx, it.offer.app, it.offer.line) },
   });
 }
@@ -2288,7 +2288,7 @@ export function project(ctx) {
         `Signs in   ${db.user && !db.entra ? `as ${db.user}` : 'with your az login'}`,
         ...(db.password ? ['', `The file holds its password: Trawl asks before keeping it in ${ctx.credentials.name} (never in its config).`] : []),
         '',
-        `↵ adds it: /add ${addArgsFor(db, ctx.config.connections)}`,
+        `↵ adds it: ${projectLine(db, ctx.config.connections)}`,
       ].join('\n'),
       db,
     })),
@@ -2299,7 +2299,8 @@ export function project(ctx) {
 async function addProjectDatabase(ctx, db) {
   let conn;
   try {
-    conn = parseAddArgs(addArgsFor(db, ctx.config.connections));
+    const [, command, rest] = /^\/(\S+) (.*)$/.exec(projectLine(db, ctx.config.connections));
+    conn = command === 'azure-sql' ? azureSqlConnection(ctx.config.connections, parseAzureSqlArgs(rest)) : parseAddArgs(rest);
   } catch (e) {
     return ctx.note(e.message, 'error');
   }
@@ -2361,7 +2362,7 @@ export async function api(ctx, rest = '') {
   ctx.rememberOutput(title, answer.code);
   ctx.showText(title, answer.code, { hint: 's save to a file', keys: { s: () => saveApi(ctx, answer, language) } });
   const request = apiRequest(answer, { name: `${answer.method} ${answer.path}` });
-  await handOver(ctx, 'Hail', takeLine('request', request), { kind: 'request', data: request });
+  await handOver(ctx, TAKEN_BY.request, takeLine('request', request));
 }
 
 async function saveApi(ctx, answer, language) {

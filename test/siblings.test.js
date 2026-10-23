@@ -9,7 +9,7 @@ import React from 'react';
 import { render } from 'ink-testing-library';
 import { DEMO_CONNECTIONS } from '../src/connections.js';
 import { contextIn, projectAt, readMoods, takeLine, writeMood } from '../src/family.js';
-import { connectionForQuery, familyMood, familyOffers, handOverText, moodsToShow, notForTrawl, reactionText, rowsContext, rowsScript } from '../src/siblings.js';
+import { connectionForQuery, familyMood, familyOffers, moodsToShow, reactionText, rowsContext, rowsScript } from '../src/siblings.js';
 import { App } from '../src/ui/App.jsx';
 
 const KEYS = { enter: '\r', esc: '\x1b', down: '\x1b[B' };
@@ -48,18 +48,14 @@ const command = async (app, text) => {
   app.stdin.write(KEYS.enter);
 };
 
-test('handing over: what the log says, whose a context is, and what a project offers', () => {
-  assert.equal(handOverText('Splice', '/open C:\\repo'), "Copied for Splice: paste it into Splice's prompt\n/open C:\\repo");
-  assert.equal(handOverText('Hail', 'x', { kind: 'request', data: { method: 'GET', url: '{{host}}/a' } }), "Copied for Hail: paste it into Hail's prompt\nrequest GET {{host}}/a");
-  assert.equal(notForTrawl({ kind: 'request', data: { method: 'GET', url: 'https://x' } }), "That's a request GET https://x, for Hail: paste it into Hail's prompt instead.");
-  assert.match(notForTrawl({ kind: 'exception', data: { type: 'E' } }), /^That's an exception E, for Splice or Sonar: paste it into Splice's or Sonar's prompt instead\.$/);
+test('what a project offers the others', () => {
   const dir = mkdtempSync(join(base, 'proj-'));
   mkdirSync(join(dir, '.git'));
   writeFileSync(join(dir, 'package.json'), JSON.stringify({ scripts: { dev: 'node a.js' } }));
   mkdirSync(join(dir, 'http'));
   writeFileSync(join(dir, 'http', 'api.http'), 'GET https://x\n');
   const offers = familyOffers(projectAt(dir));
-  assert.deepEqual(offers.map((o) => o.app), ['Splice', 'Bosun', 'Hail']);
+  assert.deepEqual(offers.map((o) => o.app), ['splice', 'bosun', 'hail']);
   assert.equal(offers[0].line, `/open ${dir.includes(' ') ? `"${dir}"` : dir}`);
   assert.equal(offers[1].line.split(' ')[0], '/move');
   assert.match(offers[2].line, /^\/open .*api\.http$/);
@@ -102,7 +98,7 @@ test('/take query puts the SQL in a console tab on its connection; /take rows an
   await until(() => frame().includes("(9, N'New FC')"), 'the rows as an INSERT');
   assert.match(frame(), /\[3 rows\]/);
   await command(app, `take ${takeLine('commit', { hash: 'abc1234def', subject: 'Fix it' })}`);
-  await until(() => frame().includes("That's a commit abc1234def Fix it, for Splice"), 'whose it is');
+  await until(() => frame().includes("That's commit abc1234def Fix it, for Splice or Sonar"), 'whose it is');
   app.unmount();
 });
 
@@ -115,7 +111,7 @@ test('t in Results copies the row as /take rows for Hail; t in the console the s
   app.stdin.write('j');
   await until(() => /❯ +2 /.test(frame()), 'the cursor on the second club');
   app.stdin.write('t');
-  await until(() => frame().includes("Copied for Hail: paste it into Hail's prompt"), 'the row copied');
+  await until(() => frame().includes("Copied for Trawl or Hail: paste it into one's prompt"), 'the row copied');
   assert.match(frame(), /1 row of dbo\.Clubs/);
   assert.deepEqual(contextIn(copied.at(-1)).data, { server: 'demo', database: 'ClubA', table: 'dbo.Clubs', columns: ['Id', 'Name', 'Country', 'Founded', 'Active'], rows: [[2, 'Atlético Norte', 'ES', '1921-09-01', true]] });
   await command(app, 'share all');

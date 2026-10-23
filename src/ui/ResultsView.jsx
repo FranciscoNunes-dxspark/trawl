@@ -22,6 +22,18 @@ function useOnUnmount(ref) {
   useEffect(() => () => ref.current(), []);
 }
 
+/**
+ * A key for the grid of each result set, so a new one draws its rows afresh: React's development build
+ * keeps, for as long as a row stays mounted, where it was first made, and with it the render that held
+ * the result set it was made for.
+ */
+const gridKeys = new WeakMap();
+let lastGridKey = 0;
+function gridKey(set) {
+  if (!gridKeys.has(set)) gridKeys.set(set, ++lastGridKey);
+  return gridKeys.get(set);
+}
+
 /** Column widths from the header and the first rows, so wide text doesn't push everything off screen. */
 export function columnWidths(set, sample = 200) {
   return set.columns.map((c, i) => {
@@ -376,7 +388,7 @@ export function ResultsView({ results, changes, setIndex, view, ctx, width, heig
   return (
     <Panel title={title} hint={parts.join(' · ')} width={width} height={height} focused={active}>
       {set ? (
-        <Box flexDirection="column">
+        <Box key={gridKey(set)} flexDirection="column">
           <Row
             pointer={false}
             width={innerW}

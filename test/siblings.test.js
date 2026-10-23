@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import React from 'react';
 import { render } from 'ink-testing-library';
 import { DEMO_CONNECTIONS } from '../src/connections.js';
-import { contextIn, projectAt, readMoods, takeLine, writeMood } from '../src/family.js';
+import { contextIn, projectAt, readMoods, shareLine, takeLine, writeMood } from '../src/family.js';
 import { connectionForQuery, familyMood, familyOffers, moodsToShow, reactionText, rowsContext, rowsScript } from '../src/siblings.js';
 import { App } from '../src/ui/App.jsx';
 
@@ -56,7 +56,8 @@ test('what a project offers the others', () => {
   writeFileSync(join(dir, 'http', 'api.http'), 'GET https://x\n');
   const offers = familyOffers(projectAt(dir));
   assert.deepEqual(offers.map((o) => o.app), ['splice', 'bosun', 'hail']);
-  assert.equal(offers[0].line, `/open ${dir.includes(' ') ? `"${dir}"` : dir}`);
+  // Quoted when it has to be: a space, or Windows' backslashes.
+  assert.equal(offers[0].line, shareLine('open', [dir]));
   assert.equal(offers[1].line.split(' ')[0], '/move');
   assert.match(offers[2].line, /^\/open .*api\.http$/);
 });
@@ -161,7 +162,7 @@ test('/family lists what the project offers the others, and ↵ copies the line'
   assert.doesNotMatch(frame(), /Bosun/);
   app.stdin.write(KEYS.enter);
   await until(() => frame().includes("Copied for Splice: paste it into Splice's prompt"), 'copied for Splice');
-  assert.equal(copied.at(-1), `/open ${dir}`);
+  assert.equal(copied.at(-1), shareLine('open', [dir]));
   app.unmount();
 });
 

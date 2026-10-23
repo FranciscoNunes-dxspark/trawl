@@ -1,7 +1,7 @@
 // Selecting text with the mouse. While Trawl asks for the mouse the terminal can't select by itself,
 // so Trawl does it: it keeps the last frame Ink drew, works out which cells a drag covers, paints them
 // in reverse video and copies their text. Pure, so it's tested without a terminal; mouse.js uses it.
-import { stringWidth } from './text.js';
+import { oneByOne, stringWidth } from './text.js';
 
 const ANSI = /\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
 export const stripAnsi = (s) => s.replace(ANSI, '');
@@ -21,7 +21,8 @@ const graphemes = new Intl.Segmenter();
 function cells(plain) {
   const out = [];
   let col = 0;
-  for (const { segment } of graphemes.segment(plain)) {
+  // Where no character joins the next, each is a cell, without the cost of segmenting.
+  for (const segment of oneByOne(plain) ? plain : Array.from(graphemes.segment(plain), (g) => g.segment)) {
     const w = stringWidth(segment);
     out.push({ text: segment, col, w });
     col += w;

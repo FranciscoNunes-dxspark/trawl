@@ -1,11 +1,37 @@
+diff --git a/node_modules/ink/build/measure-text.js b/node_modules/ink/build/measure-text.js
+index 6934dc5..32bc825 100644
+--- a/node_modules/ink/build/measure-text.js
++++ b/node_modules/ink/build/measure-text.js
+@@ -1,5 +1,8 @@
+-import widestLine from 'widest-line';
++import { widestLine } from './text-width.js';
++// Bounded (patched in by the family): paging through rows of text measures new text on every frame, so
++// past its limit the cache starts again, as output.js's do.
+ const cache = new Map();
++const LIMIT = 10000;
+ const measureText = (text) => {
+     if (text.length === 0) {
+         return {
+@@ -14,6 +17,9 @@ const measureText = (text) => {
+     const width = widestLine(text);
+     const height = text.split('\n').length;
+     const dimensions = { width, height };
++    if (cache.size >= LIMIT) {
++        cache.clear();
++    }
+     cache.set(text, dimensions);
+     return dimensions;
+ };
 diff --git a/node_modules/ink/build/output.js b/node_modules/ink/build/output.js
-index 471e055..fa270c8 100644
+index 471e055..e3669ba 100644
 --- a/node_modules/ink/build/output.js
 +++ b/node_modules/ink/build/output.js
-@@ -1,6 +1,18 @@
+@@ -1,6 +1,51 @@
  import sliceAnsi from 'slice-ansi';
- import stringWidth from 'string-width';
- import { styledCharsFromTokens, styledCharsToString, tokenize, } from '@alcalzone/ansi-tokenize';
+-import stringWidth from 'string-width';
+-import { styledCharsFromTokens, styledCharsToString, tokenize, } from '@alcalzone/ansi-tokenize';
++import { lineWidth } from './text-width.js';
++import { ansiCodesToString, diffAnsiCodes, styledCharsFromTokens, tokenize, } from '@alcalzone/ansi-tokenize';
 +// Kept from frame to frame (patched in by Trawl: most lines are the same as in the frame before),
 +// and emptied when one grows past its limit. A line's styled characters are an object each, so
 +// fewer of those are kept: a screen is a few dozen lines, and a keystroke changes a handful.
@@ -18,10 +44,43 @@ index 471e055..fa270c8 100644
 +    map.set(key, value);
 +    return value;
 +};
++// styledCharsToString, without working out the codes between two characters of the same style
++// (most of a row): their styles are the same code objects, from the same line or none.
++const sameStyles = (a, b) => {
++    if (a === b) {
++        return true;
++    }
++    if (a.length !== b.length) {
++        return false;
++    }
++    for (let i = 0; i < a.length; i++) {
++        if (a[i] !== b[i]) {
++            return false;
++        }
++    }
++    return true;
++};
++const rowToString = (chars) => {
++    let ret = '';
++    for (let i = 0; i < chars.length; i++) {
++        const char = chars[i];
++        if (i === 0) {
++            ret += ansiCodesToString(char.styles);
++        }
++        else if (!sameStyles(chars[i - 1].styles, char.styles)) {
++            ret += ansiCodesToString(diffAnsiCodes(chars[i - 1].styles, char.styles));
++        }
++        ret += char.value;
++        if (i === chars.length - 1 && char.styles.length > 0) {
++            ret += ansiCodesToString(diffAnsiCodes(char.styles, []));
++        }
++    }
++    return ret;
++};
  class OutputCaches {
      widths = new Map();
      blockWidths = new Map();
-@@ -8,16 +20,14 @@ class OutputCaches {
+@@ -8,16 +53,14 @@ class OutputCaches {
      getStyledChars(line) {
          let cached = this.styledChars.get(line);
          if (cached === undefined) {
@@ -36,11 +95,11 @@ index 471e055..fa270c8 100644
          if (cached === undefined) {
 -            cached = stringWidth(text);
 -            this.widths.set(text, cached);
-+            cached = remember(this.widths, text, stringWidth(text));
++            cached = remember(this.widths, text, lineWidth(text));
          }
          return cached;
      }
-@@ -28,17 +38,17 @@ class OutputCaches {
+@@ -28,17 +71,17 @@ class OutputCaches {
              for (const line of text.split('\n')) {
                  lineWidth = Math.max(lineWidth, this.getStringWidth(line));
              }
@@ -61,3 +120,127 @@ index 471e055..fa270c8 100644
      constructor(options) {
          const { width, height } = options;
          this.width = width;
+@@ -118,7 +161,8 @@ export default class Output {
+                             const from = x < clip.x1 ? clip.x1 - x : 0;
+                             const width = this.caches.getStringWidth(line);
+                             const to = x + width > clip.x2 ? clip.x2 - x : width;
+-                            return sliceAnsi(line, from, to);
++                            // A line inside the clip stays as it is.
++                            return from === 0 && to === width ? line : sliceAnsi(line, from, to);
+                         });
+                         if (x < clip.x1) {
+                             x = clip.x1;
+@@ -149,7 +193,10 @@ export default class Output {
+                     for (const character of characters) {
+                         currentLine[offsetX] = character;
+                         // Determine printed width using string-width to align with measurement
+-                        const characterWidth = Math.max(1, this.caches.getStringWidth(character.value));
++                        const value = character.value;
++                        const characterWidth = value.length === 1 && value >= ' ' && value <= '~'
++                            ? 1
++                            : Math.max(1, this.caches.getStringWidth(value));
+                         // For multi-column characters, clear following cells to avoid stray spaces/artifacts
+                         if (characterWidth > 1) {
+                             for (let index = 1; index < characterWidth; index++) {
+@@ -171,7 +218,7 @@ export default class Output {
+             .map(line => {
+             // See https://github.com/vadimdemedes/ink/pull/564#issuecomment-1637022742
+             const lineWithoutEmptyItems = line.filter(item => item !== undefined);
+-            return styledCharsToString(lineWithoutEmptyItems).trimEnd();
++            return rowToString(lineWithoutEmptyItems).trimEnd();
+         })
+             .join('\n');
+         return {
+diff --git a/node_modules/ink/build/render-node-to-output.js b/node_modules/ink/build/render-node-to-output.js
+index f00a278..a5865fa 100644
+--- a/node_modules/ink/build/render-node-to-output.js
++++ b/node_modules/ink/build/render-node-to-output.js
+@@ -1,4 +1,3 @@
+-import widestLine from 'widest-line';
+ import indentString from 'indent-string';
+ import Yoga from 'yoga-layout';
+ import wrapText from './wrap-text.js';
+@@ -90,7 +89,8 @@ const renderNodeToOutput = (node, output, options) => {
+         if (node.nodeName === 'ink-text') {
+             let text = squashTextNodes(node);
+             if (text.length > 0) {
+-                const currentWidth = widestLine(text);
++                // Measured once per text, not on every frame (patched in by the family).
++                const currentWidth = output.caches.getWidestLine(text);
+                 const maxWidth = getMaxWidth(yogaNode);
+                 if (currentWidth > maxWidth) {
+                     const textWrap = node.style.textWrap ?? 'wrap';
+diff --git a/node_modules/ink/build/text-width.js b/node_modules/ink/build/text-width.js
+new file mode 100644
+index 0000000..702dff4
+--- /dev/null
++++ b/node_modules/ink/build/text-width.js
+@@ -0,0 +1,38 @@
++import stringWidth from 'string-width';
++// Columns a line takes up (patched in by the family). Most lines are printable ASCII, maybe coloured,
++// where that is their length without the colour codes. Lines of characters that never join the next
++// (the apps' text.js SIMPLE: Latin, box drawing, arrows, CJK, single emoji...) are as wide as their
++// characters, each measured once; string-width measures the rest whole.
++const ASCII = /^[\x20-\x7e]*$/;
++const SIMPLE = /^[\x20-\x7e\xa0-\u02ff\u0370-\u0482\u2010-\u2027\u2030-\u205e\u2070-\u20cf\u2100-\u27bf\u2800-\u2bff\u3000-\u3029\u3030-\u303f\u3041-\u3098\u309b-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uff01-\uff9d\u{1f300}-\u{1f3fa}\u{1f400}-\u{1faff}]*$/u;
++const SGR = /\x1b\[[\d;:]*m/g;
++const chars = new Map();
++const plainWidth = (text) => {
++    if (ASCII.test(text)) {
++        return text.length;
++    }
++    if (!SIMPLE.test(text)) {
++        return undefined;
++    }
++    let width = 0;
++    for (const char of text) {
++        let w = chars.get(char);
++        if (w === undefined) {
++            chars.set(char, (w = stringWidth(char)));
++        }
++        width += w;
++    }
++    return width;
++};
++export const lineWidth = (line) => {
++    const width = plainWidth(line.includes('\x1b') ? line.replace(SGR, '') : line);
++    return width === undefined ? stringWidth(line) : width;
++};
++/** widest-line's answer: the widest of the text's lines. */
++export const widestLine = (text) => {
++    let width = 0;
++    for (const line of text.split('\n')) {
++        width = Math.max(width, lineWidth(line));
++    }
++    return width;
++};
+diff --git a/node_modules/ink/build/wrap-text.js b/node_modules/ink/build/wrap-text.js
+index 7cee4b8..aaa8ce5 100644
+--- a/node_modules/ink/build/wrap-text.js
++++ b/node_modules/ink/build/wrap-text.js
+@@ -1,9 +1,11 @@
+ import wrapAnsi from 'wrap-ansi';
+ import cliTruncate from 'cli-truncate';
+-const cache = {};
++// Bounded (patched in by the family), as measure-text.js's.
++const cache = new Map();
++const LIMIT = 10000;
+ const wrapText = (text, maxWidth, wrapType) => {
+     const cacheKey = text + String(maxWidth) + String(wrapType);
+-    const cachedText = cache[cacheKey];
++    const cachedText = cache.get(cacheKey);
+     if (cachedText) {
+         return cachedText;
+     }
+@@ -24,7 +26,10 @@ const wrapText = (text, maxWidth, wrapType) => {
+         }
+         wrappedText = cliTruncate(text, maxWidth, { position });
+     }
+-    cache[cacheKey] = wrappedText;
++    if (cache.size >= LIMIT) {
++        cache.clear();
++    }
++    cache.set(cacheKey, wrappedText);
+     return wrappedText;
+ };
+ export default wrapText;

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { encodeContext, decodeContext, describeContext, stackFrames, matchFrameFile, databaseOf, quoteArg, splitArgs, shareLine, takeLine, contextIn, copiedNote, notMine, pastedLine, trawlLine, TAKEN_BY, APP_NAMES, projectAt, writeMood, readMoods } from '../src/family.js';
+import { encodeContext, decodeContext, describeContext, stackFrames, matchFrameFile, databaseOf, quoteArg, splitArgs, shareLine, takeLine, contextIn, copiedNote, notMine, pastedLine, pathArg, trawlLine, TAKEN_BY, APP_NAMES, projectAt, writeMood, readMoods } from '../src/family.js';
 
 test('a context survives the round trip, and other text is not one', () => {
   const data = { method: 'POST', url: 'https://x/y?a=1', headers: { 'Content-Type': 'application/json' }, body: '{"é":1}' };
@@ -101,4 +101,13 @@ test('Trawl lines from connection strings', () => {
   assert.equal(trawlLine(databaseOf('Server=localhost,1433;Database=Shop;User ID=sa;Password=x;TrustServerCertificate=True'), 'shop'), '/add shop localhost,1433 Shop --user sa --trust-cert');
   assert.equal(trawlLine(databaseOf('postgres://me:pw@db.local:5432/shop'), 'DATABASE_URL'), '/add DATABASE_URL db.local:5432 shop --kind postgres --user me');
   assert.doesNotMatch(trawlLine(databaseOf('mysql://u:secret@h/d'), 'x'), /secret/);
+});
+
+test('a pasted line ending in a carriage return, and quoted paths', () => {
+  assert.equal(pastedLine('/take x\r'), '/take x');
+  assert.equal(pastedLine('/move a\r\n'), '/move a');
+  assert.equal(pathArg(quoteArg('C:\\Team\\my shop')), 'C:\\Team\\my shop');
+  assert.equal(pathArg(quoteArg('/home/me/my shop')), '/home/me/my shop');
+  assert.equal(pathArg('"C:\\Team\\shop"'), 'C:\\Team\\shop');
+  assert.equal(pathArg('  plain  '), 'plain');
 });

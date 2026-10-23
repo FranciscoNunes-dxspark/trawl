@@ -29,6 +29,18 @@ export function splitArgs(s) {
   return out;
 }
 
+/**
+ * A path argument as a command takes it: one a sibling quoted with quoteArg (spaces, Windows
+ * backslashes) comes back as it was; a path typed in quotes by hand, with lone backslashes in it,
+ * just loses the quotes.
+ */
+export function pathArg(text) {
+  const s = String(text ?? '').trim();
+  const m = /^"((?:[^"\\]|\\.)*)"$/.exec(s);
+  if (!m) return s;
+  return /^(?:[^\\]|\\[\\"])*$/.test(m[1]) ? m[1].replace(/\\(.)/g, '$1') : m[1];
+}
+
 /** The command line `/command args…`, to paste into another app's prompt. */
 export const shareLine = (command, args = []) => [`/${command}`, ...args.map(quoteArg)].join(' ');
 
@@ -74,7 +86,7 @@ export function notMine(self, context) {
  * null. A view opens the prompt with it, not running it.
  */
 export function pastedLine(input) {
-  const s = String(input ?? '').replace(/\x1b\[20[01]~/g, '').replace(/\r?\n$/, '');
+  const s = String(input ?? '').replace(/\x1b\[20[01]~/g, '').replace(/[\r\n]+$/, '');
   if (s.length < 2 || /[\r\n]/.test(s)) return null;
   return s.startsWith('/') || decodeContext(s) ? s : null;
 }

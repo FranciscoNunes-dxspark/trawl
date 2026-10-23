@@ -1470,7 +1470,7 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     // A command pasted over a view (as a sibling copies them), or a bare family:v1:… context: into the
     // prompt, to read and run with ↵.
     // (A terminal ends a pasted line with \r, which the family's rule takes as a \n.)
-    const pasted = pastedLine(input.replace(/\r$/, '\n'));
+    const pasted = pastedLine(input);
     if (pasted) return prefill(pasted);
     if (input === '/' || input === ':') return prefill('/');
     if (input === '!') return prefill('!');

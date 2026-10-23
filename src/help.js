@@ -160,6 +160,13 @@ export const HELP = [
     ],
   },
   {
+    title: 'The family',
+    about: 'Splice (git), Sonar (Azure), Bosun (processes) and Hail (HTTP): each hands the others a command line to paste',
+    rows: [
+      ['/project', 'The databases appsettings*.json and .env files name that aren\'t saved yet: ↵ adds one (a password in the file is kept in the OS store, after asking)'],
+    ],
+  },
+  {
     title: 'Fan-out',
     about: 'one read-only query on every connection in a folder',
     rows: [

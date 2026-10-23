@@ -35,8 +35,8 @@ import { LANGUAGE_NAMES, LANGUAGES, languageOf, scaffold } from './scaffold.js';
 import { UNDO_ROWS, reverseScript, snapshotOf, snapshotRows, snapshotSummary, undoPlan, withSnapshot } from './undo.js';
 import { loadUndo, saveUndo } from './config.js';
 import { relTime } from './text.js';
-import { quoteArg, takeLine } from './family.js';
-import { handOverText } from './siblings.js';
+import { projectAt, quoteArg, takeLine } from './family.js';
+import { addArgsFor, handOverText, newDatabases } from './siblings.js';
 import { API_LANGUAGES, API_SYSTEM, apiFileName, apiLanguage, apiPrompt, apiRequest, parseApi, projectLanguage } from './api.js';
 import { copyRefusal, copyScript, foreignKeysFrom, insertOrder, insertedRows, keyTuples, maskRows, parentSql, parseCopyRowsArgs, rowKey, rowsSql, selfOrder, tupleKey } from './copyrows.js';
 import { rehearsalRefusal, rehearsalSteps, rehearsalText, rowsAffected } from './rehearse.js';
@@ -2176,6 +2176,63 @@ export async function handOver(ctx, app, line, context = null) {
   } catch (e) {
     ctx.note(`Couldn't copy: ${firstLine(e.message)}`, 'error');
   }
+}
+
+/**
+ * /project: the databases this project's files name (appsettings*.json's connection strings,
+ * DATABASE_URL-style lines in .env files) that no saved connection is to; ↵ saves one as /add would.
+ */
+export function project(ctx) {
+  const dir = ctx.projectDir;
+  const p = projectAt(dir);
+  if (!p.databases.length) return ctx.note(`No databases in ${dir}: Trawl looks at appsettings*.json's ConnectionStrings and DATABASE_URL-style lines in .env files.`);
+  const found = newDatabases(p, ctx.config.connections);
+  if (!found.length) return ctx.note(`The ${plural(p.databases.length, 'database')} in ${dir}'s files ${p.databases.length === 1 ? 'is' : 'are'} saved already.`);
+  ctx.showPicker({
+    title: `Databases in ${basename(dir) || dir}`,
+    hint: '↵ add it',
+    items: found.map((db) => ({
+      label: db.name,
+      detail: `${db.kind === 'sqlserver' ? '' : `${db.kind} `}${db.server}${db.port ? `:${db.port}` : ''}/${db.database ?? ''}  ${db.source}`,
+      text: [
+        `${db.source}: ${db.name}`,
+        '',
+        `Server     ${db.server}${db.port ? ` (port ${db.port})` : ''}`,
+        `Database   ${db.database ?? '(the login\'s default)'}`,
+        `Kind       ${dialectOf({ kind: db.kind }).label}`,
+        `Signs in   ${db.user && !db.entra ? `as ${db.user}` : 'with your az login'}`,
+        ...(db.password ? ['', `The file holds its password: Trawl asks before keeping it in ${ctx.credentials.name} (never in its config).`] : []),
+        '',
+        `↵ adds it: /add ${addArgsFor(db, ctx.config.connections)}`,
+      ].join('\n'),
+      db,
+    })),
+    keys: { return: (it) => addProjectDatabase(ctx, it.db) },
+  });
+}
+
+async function addProjectDatabase(ctx, db) {
+  let conn;
+  try {
+    conn = parseAddArgs(addArgsFor(db, ctx.config.connections));
+  } catch (e) {
+    return ctx.note(e.message, 'error');
+  }
+  saveConnection(ctx, conn);
+  if (!db.password || !conn.user) return conn;
+  const keep = await ctx.confirm({
+    title: `Keep the password ${db.source} has for ${conn.user} in ${ctx.credentials.name}?`,
+    detail: `For ${conn.name}, so connecting doesn't ask for it. It goes only there, never into Trawl's config.`,
+    options: YES_NO('Yes, keep it'),
+  });
+  if (!keep) return conn;
+  try {
+    await ctx.credentials.set(conn.name, { user: conn.user, password: db.password });
+    ctx.note(`Saved the password for ${conn.name} in ${ctx.credentials.name}.`, 'ok');
+  } catch (e) {
+    ctx.note(`Couldn't save the password in ${ctx.credentials.name}: ${firstLine(e.message)}`, 'error');
+  }
+  return conn;
 }
 
 /**

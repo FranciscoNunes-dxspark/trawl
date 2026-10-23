@@ -45,7 +45,8 @@ import { COMPILED, VERSION } from '../version.js';
 import { worthNotifying } from '../notify.js';
 import { changedCells, untilMatch, untilText } from '../watch.js';
 import { dueWarning, locksText, openFor, warnMinutes, warningTitle } from '../transactions.js';
-import { repoRoot } from '../family.js';
+import { projectAt, repoRoot } from '../family.js';
+import { newDatabases, projectNote } from '../siblings.js';
 
 const VIEWS = [
   { id: 'explorer', label: 'Explorer' },
@@ -1340,6 +1341,11 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
       ctx.rememberOutput('Your commands and keys', text);
     }
     if (initialFile) openFile(initialFile);
+    // Databases the project's own files name (appsettings, .env) that aren't saved yet.
+    try {
+      const found = projectNote(newDatabases(projectAt(ctx.projectDir), initialConfig.connections));
+      if (found) note(found);
+    } catch {}
     if (azureSql) return void a.azureSql(ctx, azureSql);
     const name = initialConnection ?? initialConfig.last;
     const conn = name && initialConfig.connections.find((c) => c.name === name);

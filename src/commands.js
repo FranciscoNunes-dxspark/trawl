@@ -70,6 +70,7 @@ export const COMMANDS = [
   { name: 'api', args: '[csharp|node|python|go]', desc: "Claude writes an HTTP endpoint that runs the console's statement, in the project's language (s saves it); copies a request for Hail", run: (ctx, s) => a.api(ctx, s) },
   { name: 'copy-rows', args: '<target> [table] [--where <condition>] [--no-mask]', desc: 'Copy rows (and the rows they refer to) to another connection, personal data made up; the script shows first (C in Results and the Explorer)', complete: 'connections', run: (ctx, s) => a.copyRowsTo(ctx, s) },
   { name: 'rehearse', args: '[file]', desc: 'Run a migration (the console, or a file) inside a transaction that is rolled back: each statement\'s time, rows and errors, and the locks it held', run: (ctx, s) => a.rehearse(ctx, s) },
+  { name: 'project', desc: "The databases this project's appsettings and .env files name that aren't saved yet: ↵ adds one", run: (ctx) => a.project(ctx) },
   { name: 'last', desc: 'Show the full output of the last run', run: (ctx) => ctx.showLast() },
   { name: 'refresh', desc: 'Reload the schema', run: (ctx) => ctx.refresh() },
   { name: 'help', desc: 'Keyboard shortcuts', run: (ctx) => ctx.showHelp() },

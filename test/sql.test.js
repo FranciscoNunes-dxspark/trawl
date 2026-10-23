@@ -13,6 +13,28 @@ test('mask hides comments, strings and quoted names but keeps offsets', () => {
   assert.equal(mask("'it''s'").replace(/\u0001/g, ''), '');
 });
 
+test('a long text masked again after an edit is masked as it would be from scratch', () => {
+  // Masking an unrelated long text first leaves nothing in common to start from.
+  const fresh = (text) => (mask('\u0002'.repeat(5000)), mask(text));
+  const unit = "SELECT 'a;b', [x]]y], \"q\" /* ; /* nested */ ; */ -- ;\nFROM t WHERE n = N'it''s' AND a-b > c/d;\n\n";
+  const base = unit.repeat(80);
+  const at = unit.length * 40;
+  const edits = ["'", "''", '[', ']', '/*', '*/', '-', '--', '\n', '*', 'x', "'abc", '"', ']]'];
+  for (const add of edits) {
+    for (const where of [0, 1, ...Array.from({ length: unit.length + 1 }, (_, k) => at + k), base.length - 1, base.length]) {
+      const after = base.slice(0, where) + add + base.slice(where);
+      const removed = base.slice(0, where) + base.slice(where + add.length);
+      const expected = [fresh(after), fresh(removed)];
+      mask(base);
+      assert.equal(mask(after), expected[0], `${JSON.stringify(add)} added at ${where}`);
+      mask(base);
+      assert.equal(mask(removed), expected[1], `${add.length} removed at ${where}`);
+      // And back, from the edited text to the first.
+      assert.equal(mask(base), fresh(base));
+    }
+  }
+});
+
 test('GO splits batches, with repeat counts, and not inside comments', () => {
   const b = splitBatches('SELECT 1\nGO\n/*\nGO\n*/\nSELECT 2\ngo 3\n\nGO\n');
   assert.deepEqual(b.map((x) => [x.text, x.line, x.repeat]), [

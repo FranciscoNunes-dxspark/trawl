@@ -8,15 +8,50 @@ const FILL = '\u0001';
 /** Masks comments (nested /* *\/ too), 'strings', "identifiers" and [identifiers] in `src`. */
 export function mask(src) {
   // As splitStatements, the last answer is kept: highlighting, splitting and completing all mask the same text.
-  if (src !== lastMask.src) lastMask = { src, masked: maskText(src) };
-  return lastMask.masked;
+  if (src === lastMask.src) return lastMask.masked;
+  if (src === lastLong.src) return (lastMask = lastLong).masked;
+  // A long text is most often the console's after one key: only the part around the change is masked again.
+  const masked = src.length >= LONG && lastLong.src != null ? remask(lastLong, src) : maskText(src).out;
+  lastMask = { src, masked };
+  if (src.length >= LONG) lastLong = lastMask;
+  return masked;
 }
 
 let lastMask = { src: null, masked: '' };
+// The last long text masked, which the next one is compared with; other masks in between (a statement,
+// the text before the cursor) don't push it out.
+let lastLong = { src: null, masked: '' };
+const LONG = 4096;
 
-function maskText(src) {
+/**
+ * Masks `src` again from `before`'s mask, `before.src` being a text that differs from it in one place.
+ * The mask of a character depends only on the text before it (and the character after), so up to the
+ * change it is the same; from the change it is worked out again until both texts are past it and at
+ * a character outside any masked run in both, after which the rest is the old mask's.
+ */
+function remask(before, src) {
+  const old = before.src;
+  const n = Math.min(old.length, src.length);
+  let p = 0;
+  while (p < n && old.charCodeAt(p) === src.charCodeAt(p)) p++;
+  let tail = 0;
+  while (tail < n - p && old.charCodeAt(old.length - 1 - tail) === src.charCodeAt(src.length - 1 - tail)) tail++;
+  const shift = src.length - old.length;
+  const changeEnd = src.length - tail;
+  // Back to where masking was outside a run, before the change and before the character it looked ahead to.
+  let q = Math.max(0, p - 1);
+  while (q > 0 && before.masked[q - 1] === FILL) q--;
+  const { out, at } = maskText(src, q, (i) => i - 1 >= changeEnd && before.masked[i - 1 - shift] !== FILL);
+  return before.masked.slice(0, q) + out + before.masked.slice(at - shift);
+}
+
+/**
+ * The mask of `src` from `from` (where masking is outside any run) on: { out, at }. With `stop`, it
+ * ends at the first `at` after a character outside any run for which stop(at) is true.
+ */
+function maskText(src, from = 0, stop = null) {
   let out = '';
-  let i = 0;
+  let i = from;
   const n = src.length;
   const fill = (from, to) => {
     out += FILL.repeat(to - from);
@@ -54,9 +89,10 @@ function maskText(src) {
     } else {
       out += ch;
       i++;
+      if (stop?.(i)) return { out, at: i };
     }
   }
-  return out;
+  return { out, at: n };
 }
 
 const GO_LINE = /^[ \t]*go(?:[ \t]+(\d+))?[ \t\u0001]*$/i;

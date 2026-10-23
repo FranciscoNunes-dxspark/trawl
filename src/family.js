@@ -38,6 +38,65 @@ export const takeLine = (kind, data) => shareLine('take', [encodeContext(kind, d
 /** The context in what was typed at a prompt (`/take family:v1:…`, or the context alone), or null. */
 export const contextIn = (line) => decodeContext(String(line ?? '').trim().replace(/^\/?take\s+/, ''));
 
+/** The apps' names as they're written, and their mascots'. */
+export const APP_NAMES = { splice: 'Splice', trawl: 'Trawl', sonar: 'Sonar', bosun: 'Bosun', hail: 'Hail' };
+export const PET_NAMES = { splice: 'Twig', trawl: 'Glim', sonar: 'Ping', bosun: 'Squawk', hail: 'Hoot' };
+
+/** Which apps take each kind of context with /take. */
+export const TAKEN_BY = {
+  exception: ['splice', 'sonar', 'bosun'],
+  request: ['hail'],
+  rows: ['trawl', 'hail'],
+  query: ['trawl'],
+  commit: ['splice', 'sonar'],
+  file: ['splice'],
+  logline: ['sonar', 'hail', 'bosun'],
+};
+
+const either = (apps) => apps.map((a) => APP_NAMES[a] ?? a).join(' or ');
+
+/** The log line for a share copied for `apps` (one app or a list), with the line or the context's description. */
+export function copiedNote(apps, line) {
+  const list = [].concat(apps);
+  const what = contextIn(line) ? describeContext(contextIn(line)) : line;
+  return `Copied for ${either(list)}: paste it into ${list.length === 1 ? `${APP_NAMES[list[0]] ?? list[0]}'s` : "one's"} prompt. ${what}`;
+}
+
+/** What `self` says when given a context it doesn't take. */
+export function notMine(self, context) {
+  const apps = (TAKEN_BY[context.kind] ?? []).filter((a) => a !== self);
+  return `That's ${describeContext(context)}${apps.length ? `, for ${either(apps)}: paste it into ${apps.length === 1 ? 'its' : "one's"} prompt instead` : ''}.`;
+}
+
+/**
+ * The paste rule: input that arrived at once while a view had the keys, as the prompt should take it
+ * (paste brackets and a trailing newline taken off), when it's a command line or a bare context; else
+ * null. A view opens the prompt with it, not running it.
+ */
+export function pastedLine(input) {
+  const s = String(input ?? '').replace(/\x1b\[20[01]~/g, '').replace(/\r?\n$/, '');
+  if (s.length < 2 || /[\r\n]/.test(s)) return null;
+  return s.startsWith('/') || decodeContext(s) ? s : null;
+}
+
+/**
+ * The line for Trawl's prompt that saves a connection to `db` (databaseOf's), named `name`:
+ * `/azure-sql` for an Azure SQL server signing in with Entra (no user, or Entra in the string), else
+ * `/add`, the port as Trawl writes it (host,port for SQL Server, host:port otherwise). Never a password.
+ */
+export function trawlLine(db, name) {
+  if (/\.database\.windows\.net$/i.test(db.server) && (!db.user || db.entra)) return shareLine('azure-sql', [db.server, ...(db.database ? [db.database] : [])]);
+  const server = db.port ? `${db.server}${db.kind === 'sqlserver' ? ',' : ':'}${db.port}` : db.server;
+  return shareLine('add', [
+    name,
+    server,
+    ...(db.database ? [db.database] : []),
+    ...(db.kind && db.kind !== 'sqlserver' ? ['--kind', db.kind] : []),
+    ...(db.user && !db.entra ? ['--user', db.user] : []),
+    ...(db.trustCert ? ['--trust-cert'] : []),
+  ]);
+}
+
 // Contexts, each one word:
 //   exception { app, message, type, frames: [{ file, line, method }], operationId, time, request? }
 //   request   { method, url, headers: { name: value }, body, name? }
@@ -149,7 +208,7 @@ export function databaseOf(text) {
     try {
       const u = new URL(s);
       const kind = /^postgres/i.test(url[1]) ? 'postgres' : /^(mysql|mariadb)/i.test(url[1]) ? 'mysql' : 'sqlserver';
-      return { kind, server: u.hostname, port: u.port ? Number(u.port) : undefined, database: decodeURIComponent(u.pathname.replace(/^\//, '')) || undefined, user: decodeURIComponent(u.username) || undefined, password: decodeURIComponent(u.password) || undefined, entra: false };
+      return { kind, server: u.hostname, port: u.port ? Number(u.port) : undefined, database: decodeURIComponent(u.pathname.replace(/^\//, '')) || undefined, user: decodeURIComponent(u.username) || undefined, password: decodeURIComponent(u.password) || undefined, entra: false, trustCert: false };
     } catch {
       return null;
     }
@@ -167,6 +226,7 @@ export function databaseOf(text) {
     user: f['user id'] ?? f.uid ?? f.user ?? f.username ?? undefined,
     password: f.password ?? f.pwd ?? undefined,
     entra: /active directory/i.test(f.authentication ?? '') || /^(sspi|true|yes)$/i.test(f['integrated security'] ?? f.trusted_connection ?? ''),
+    trustCert: /^(true|yes)$/i.test(f.trustservercertificate ?? f['trust server certificate'] ?? ''),
   };
 }
 
@@ -209,7 +269,7 @@ export function projectAt(dir) {
   try {
     pkg = JSON.parse(safeRead(join(root, 'package.json')) ?? 'null');
   } catch {}
-  const crew = has('bosun.json') || has('Procfile') || has('docker-compose.yml') || has('compose.yaml') || Boolean(pkg?.scripts?.dev || pkg?.scripts?.start);
+  const crew = has('bosun.json') || has('Procfile') || ['compose.yaml', 'compose.yml', 'docker-compose.yaml', 'docker-compose.yml'].some(has) || Boolean(pkg?.scripts?.dev || pkg?.scripts?.start);
   const databases = [];
   const add = (name, source, text) => {
     const db = databaseOf(text);

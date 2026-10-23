@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { encodeContext, decodeContext, describeContext, stackFrames, matchFrameFile, databaseOf, quoteArg, splitArgs, shareLine, takeLine, contextIn, projectAt, writeMood, readMoods } from '../src/family.js';
+import { encodeContext, decodeContext, describeContext, stackFrames, matchFrameFile, databaseOf, quoteArg, splitArgs, shareLine, takeLine, contextIn, copiedNote, notMine, pastedLine, trawlLine, TAKEN_BY, APP_NAMES, projectAt, writeMood, readMoods } from '../src/family.js';
 
 test('a context survives the round trip, and other text is not one', () => {
   const data = { method: 'POST', url: 'https://x/y?a=1', headers: { 'Content-Type': 'application/json' }, body: '{"é":1}' };
@@ -30,9 +30,9 @@ test('stack frames from .NET, Node and Python, and the checkout file they are', 
 });
 
 test('databases from connection strings and URLs', () => {
-  assert.deepEqual(databaseOf('Server=tcp:shop.database.windows.net,1433;Initial Catalog=Shop;User ID=app;Password=p;a=ss;Encrypt=True'), { kind: 'sqlserver', server: 'shop.database.windows.net', port: 1433, database: 'Shop', user: 'app', password: 'p;a=ss'.split(';')[0], entra: false });
+  assert.deepEqual(databaseOf('Server=tcp:shop.database.windows.net,1433;Initial Catalog=Shop;User ID=app;Password=p;a=ss;Encrypt=True'), { kind: 'sqlserver', server: 'shop.database.windows.net', port: 1433, database: 'Shop', user: 'app', password: 'p;a=ss'.split(';')[0], entra: false, trustCert: false });
   assert.equal(databaseOf('Server=x.database.windows.net;Database=D;Authentication=Active Directory Default').entra, true);
-  assert.deepEqual(databaseOf('postgres://me:s%40cret@db.local:5432/shop'), { kind: 'postgres', server: 'db.local', port: 5432, database: 'shop', user: 'me', password: 's@cret', entra: false });
+  assert.deepEqual(databaseOf('postgres://me:s%40cret@db.local:5432/shop'), { kind: 'postgres', server: 'db.local', port: 5432, database: 'shop', user: 'me', password: 's@cret', entra: false, trustCert: false });
   assert.equal(databaseOf('nothing here'), null);
 });
 
@@ -77,4 +77,28 @@ test('moods: each app reads the others, recent ones only', () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('who takes what, and what each says', () => {
+  for (const apps of Object.values(TAKEN_BY)) for (const a of apps) assert.ok(APP_NAMES[a]);
+  const take = takeLine('request', { method: 'GET', url: 'http://x/a' });
+  assert.equal(copiedNote('hail', take), "Copied for Hail: paste it into Hail's prompt. request GET http://x/a");
+  assert.equal(copiedNote(['sonar', 'hail'], '/x'), "Copied for Sonar or Hail: paste it into one's prompt. /x");
+  assert.equal(notMine('splice', contextIn(take)), "That's request GET http://x/a, for Hail: paste it into its prompt instead.");
+  assert.equal(notMine('trawl', { kind: 'logline', data: { process: 'api', text: 'x' } }), "That's api: x, for Sonar or Hail or Bosun: paste it into one's prompt instead.");
+});
+
+test('the paste rule', () => {
+  assert.equal(pastedLine('\x1b[200~/move ../shop\n\x1b[201~'), '/move ../shop');
+  assert.equal(pastedLine(takeLine('commit', { hash: 'a' }).slice('/take '.length)), takeLine('commit', { hash: 'a' }).slice('/take '.length));
+  assert.equal(pastedLine('/'), null);
+  assert.equal(pastedLine('hello'), null);
+  assert.equal(pastedLine('/a\n/b\n'), null);
+});
+
+test('Trawl lines from connection strings', () => {
+  assert.equal(trawlLine(databaseOf('Server=tcp:s.database.windows.net,1433;Database=Shop;Authentication=Active Directory Default'), 'shop'), '/azure-sql s.database.windows.net Shop');
+  assert.equal(trawlLine(databaseOf('Server=localhost,1433;Database=Shop;User ID=sa;Password=x;TrustServerCertificate=True'), 'shop'), '/add shop localhost,1433 Shop --user sa --trust-cert');
+  assert.equal(trawlLine(databaseOf('postgres://me:pw@db.local:5432/shop'), 'DATABASE_URL'), '/add DATABASE_URL db.local:5432 shop --kind postgres --user me');
+  assert.doesNotMatch(trawlLine(databaseOf('mysql://u:secret@h/d'), 'x'), /secret/);
 });

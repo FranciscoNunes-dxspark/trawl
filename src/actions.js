@@ -35,8 +35,8 @@ import { LANGUAGE_NAMES, LANGUAGES, languageOf, scaffold } from './scaffold.js';
 import { UNDO_ROWS, reverseScript, snapshotOf, snapshotRows, snapshotSummary, undoPlan, withSnapshot } from './undo.js';
 import { loadUndo, saveUndo } from './config.js';
 import { relTime } from './text.js';
-import { projectAt, quoteArg, takeLine } from './family.js';
-import { addArgsFor, handOverText, newDatabases } from './siblings.js';
+import { contextIn, projectAt, quoteArg, takeLine } from './family.js';
+import { addArgsFor, connectionForQuery, handOverText, newDatabases, placeText, queryContext, rowsContext, rowsScript } from './siblings.js';
 import { API_LANGUAGES, API_SYSTEM, apiFileName, apiLanguage, apiPrompt, apiRequest, parseApi, projectLanguage } from './api.js';
 import { copyRefusal, copyScript, foreignKeysFrom, insertOrder, insertedRows, keyTuples, maskRows, parentSql, parseCopyRowsArgs, rowKey, rowsSql, selfOrder, tupleKey } from './copyrows.js';
 import { rehearsalRefusal, rehearsalSteps, rehearsalText, rowsAffected } from './rehearse.js';
@@ -2176,6 +2176,77 @@ export async function handOver(ctx, app, line, context = null) {
   } catch (e) {
     ctx.note(`Couldn't copy: ${firstLine(e.message)}`, 'error');
   }
+}
+
+/**
+ * /take <context>: what a sibling copied for Trawl. A query goes into a console tab of its own, on
+ * the saved connection to its server and database when there is one; rows become an INSERT script
+ * there. Contexts for the other apps say whose they are.
+ */
+export async function take(ctx, rest) {
+  if (!String(rest ?? '').trim()) return ctx.prefill('/take ');
+  const c = contextIn(rest);
+  if (!c) return ctx.note("That isn't a line one of the family copied: /take takes the family:v1:… that Splice, Sonar, Bosun or Hail puts on the clipboard.", 'error');
+  if (c.kind === 'query') return takeQuery(ctx, c.data);
+  if (c.kind === 'rows') return takeRows(ctx, c.data);
+  ctx.note(`Trawl takes queries and rows; that's a ${c.kind}.`, 'error');
+}
+
+// A console tab of its own (`base`, made unique) holding `text`, on screen.
+function consoleTabWith(ctx, base, text) {
+  const name = freeName(ctx.consoleTabs.names.map((n) => ({ name: n })), base);
+  ctx.addConsoleTab(name);
+  ctx.setConsole(ed.fromText(text), { record: false });
+  return name;
+}
+
+async function takeQuery(ctx, data) {
+  const sql = String(data.sql ?? '').trim();
+  if (!sql) return ctx.note('That query came without any SQL.', 'error');
+  const where = placeText(data);
+  const head = data.server || data.database ? `-- Handed over, for ${where}. Nothing has run: ctrl+r runs it.\n` : '';
+  const tab = consoleTabWith(ctx, 'take', `${head}${sql}\n`);
+  const conn = connectionForQuery(ctx.config.connections, data);
+  const s = ctx.session;
+  if (!data.server) return ctx.note(`The query is in the console tab ${tab}: it didn't say which database it was for, so it runs on the one you're on.`, 'ok');
+  if (!conn) return ctx.note(`The query is in the console tab ${tab}. It was for ${where}, which no saved connection is to: /azure-sql or /add one, then ctrl+r.`, 'ok');
+  if (s && s.conn.name === conn.name && (!data.database || s.database?.toLowerCase() === data.database.toLowerCase())) return ctx.note(`The query is in the console tab ${tab}, on ${conn.name}, where it was for.`, 'ok');
+  ctx.note(`The query is in the console tab ${tab}. It was for ${where}: connecting to ${conn.name}.`, 'ok');
+  return connect(ctx, conn.name, { database: data.database && data.database !== conn.database ? data.database : undefined });
+}
+
+function takeRows(ctx, data) {
+  if (!Array.isArray(data.columns) || !Array.isArray(data.rows)) return ctx.note('Those rows came without their columns.', 'error');
+  const d = dialectOf(ctx.session);
+  const tab = consoleTabWith(ctx, 'rows', rowsScript(data, { quote: d.quote, kind: d.kind }));
+  ctx.note(`${plural(data.rows.length, 'row')}${data.table ? ` of ${data.table}` : ''} as an INSERT, in the console tab ${tab}: read it, then R runs it${data.table ? '' : ' (put the table\'s name in first)'}.`, 'ok');
+}
+
+/**
+ * /share (t in the console and Results): copies a /take line for the family. In Results, the row
+ * under the cursor (`all`: every row of the set) as `rows`, for Hail to send as a body or another
+ * Trawl to insert; elsewhere the console's statement as `query`. `query` and `rows` pick one.
+ */
+export async function share(ctx, rest = '') {
+  const what = String(rest).trim().toLowerCase();
+  if (what && !['query', 'rows', 'row', 'all'].includes(what)) return ctx.note('/share [query | rows | all]: the console\'s statement, the row under the cursor in Results, or all its rows.', 'error');
+  const s = ctx.session;
+  const place = s ? { server: s.conn.demo ? 'demo' : s.conn.server, database: s.database } : {};
+  if (what === 'query' || (!what && ctx.view !== 'results')) {
+    const pick = consolePick(ctx);
+    if (!pick?.text.trim()) return ctx.note('Nothing to share: put the cursor on a statement in the console (or select it).', 'error');
+    const { line, context } = queryContext(pick.text, place);
+    return handOver(ctx, 'Trawl', line, context);
+  }
+  const res = ctx.results;
+  const set = ctx.currentSet();
+  if (!set?.rows.length) return ctx.note('No rows to share: run a query first.', 'error');
+  const indexes = what === 'all' ? set.rows.map((_, i) => i) : ctx.resultRow?.set === set && ctx.resultRow.row != null && set.rows[ctx.resultRow.row] ? [ctx.resultRow.row] : [0];
+  const table = res?.edit?.table ?? res?.source?.table ?? null;
+  const from = res?.conn && res.conn === s?.conn.name ? place : { database: res?.database ?? null };
+  const { line, context, hidden } = rowsContext(set, indexes, { ...from, table: table ? objectName(table) : null });
+  await handOver(ctx, 'Hail', line, context);
+  if (hidden.length) ctx.note(`Left out of it: ${hidden.join(', ')}, which look${hidden.length === 1 ? 's' : ''} like ${hidden.length === 1 ? 'it holds a secret' : 'they hold secrets'}.`);
 }
 
 /**

@@ -68,7 +68,7 @@ const CTRL_P = '\x10';
 const HINTS = {
   explorer: '↵ first rows · d describe · s query it in the console · c CREATE script · C copy rows · /find filter',
   query: '↵ run statement · v select several · R run file · e edit in the console · /console',
-  results: 'h/l columns · o sort · f filter · ↵ record · v value · y/Y copy · F follow key · p pin · c compare · e edit · n NULL · d delete · a add · s save · x export · C copy rows',
+  results: 'h/l columns · o sort · f filter · ↵ record · v value · y/Y copy · F follow key · p pin · c compare · e edit · n NULL · d delete · a add · s save · x export · t share · C copy rows',
   history: '↵ run again · e edit in the console · ◆ ran by Claude',
   connections: '↵ connect · n new · p password · f folder · x forget',
   activity: 'R read again · ↵ full SQL · x kill · a idle sessions too · J jobs · Q top queries',
@@ -1062,6 +1062,10 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
       get watching() {
         return watchRef.current && { every: watchRef.current.every, run: watchRef.current.run, title: watchRef.current.title };
       },
+      // The view on screen ('results', 'query'…).
+      get view() {
+        return viewRef.current;
+      },
       // The project the family's commands look at: the open script's checkout (or its folder), else
       // the folder Trawl started in.
       get projectDir() {
@@ -1651,7 +1655,7 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
           : overlay
           ? 'j/k scroll · space page · esc close'
           : view === 'query' && queryMode === 'console'
-            ? '↵/i type · ctrl+r run statement · R run all · /save <file> · /open <file>'
+            ? '↵/i type · ctrl+r run statement · R run all · t share · /save <file> · /open <file>'
             : view === 'activity' && activityLists.show !== 'sessions'
               ? ACTIVITY_HINTS[activityLists.show]
               : HINTS[view];

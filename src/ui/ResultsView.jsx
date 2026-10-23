@@ -237,6 +237,7 @@ export function ResultsView({ results, changes, setIndex, view, ctx, width, heig
     else if (input === 'Y' && set?.rows[row]) ctx.copy(tsvText(set, { header: false, rows: [set.rows[row]] }), `row ${row + 1}, tab-separated`);
     else if (k.return && set?.rows[row]) ctx.showText(`Row ${row + 1} of ${set.rows.length}`, recordText(set, set.rows[row]));
     else if (input === 'a' && set) addRow();
+    else if (input === 't' && set) a.share(ctx);
     else if (input === 'C' && set) {
       const table = results.edit?.table ?? results.source?.table;
       if (!table) return ctx.note(`These rows aren't one table's, so there's nothing to copy from: /copy-rows <target> <table>.`, 'error');
@@ -318,6 +319,8 @@ export function ResultsView({ results, changes, setIndex, view, ctx, width, heig
     { top },
   );
 
+  // Where /share starts from: the row under the cursor, in the set on screen.
+  ctx.resultRow = set && shownRows[nav.index] != null ? { set, row: shownRows[nav.index] } : null;
   // Where /follow starts from: the cell under the cursor.
   ctx.resultCell = set && order[nav.index] != null && setIndex === 0 ? { row: order[nav.index], col: cur } : null;
 

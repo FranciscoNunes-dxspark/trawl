@@ -132,6 +132,7 @@ export function ConsoleView({ editor, tabs = ['console'], tab = 0, editing, ctx,
     if (input === '+') return a.consoleTab(ctx, 'new');
     // After every handler has had the S, or the prompt would take it as its first letter.
     if (input === 'S') return queueMicrotask(() => ctx.prefill('/snippet save '));
+    if (input === 't') return a.share(ctx, 'query');
     if (input === 'n' || input === 'N') return a.searchConsole(ctx, '', { back: input === 'N' });
     if (key.downArrow || input === 'j') return set(ed.move(editor, { rows: 1 }));
     if (key.upArrow || input === 'k') return set(ed.move(editor, { rows: -1 }));

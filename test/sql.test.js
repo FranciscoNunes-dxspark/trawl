@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { classify, classifyScript, countQuery, statisticsSummary, viewOrder, formatValue, mask, oneLine, quoteIdent, splitBatches, splitStatements, statementAt, toCsv, toJson, toMarkdown, withoutLeadingComments } from '../src/sql.js';
+import { classify, classifyScript, compareValues, countQuery, statisticsSummary, viewOrder, formatValue, mask, oneLine, quoteIdent, splitBatches, splitStatements, statementAt, toCsv, toJson, toMarkdown, withoutLeadingComments } from '../src/sql.js';
 
 const texts = (list) => list.map((s) => s.text);
 
@@ -42,6 +42,12 @@ test('statements split the same way across lines: a CATCH lines below its END, w
     ['CATCH SELECT 3\nSELECT a$b, @x#y, x1 FROM t WHERE CASE WHEN a = 1 THEN 2 END = 2;', 10, 11, 'CATCH SELECT 3'],
     ['UPDATE t SET x = (1;\n\n2);', 13, 15, 'UPDATE t SET x = (1;'],
   ]);
+});
+
+test('text sorts as localeCompare with numbers as numbers and case and accents ignored', () => {
+  const words = ['a', 'A', 'á', 'b', 'B2', 'b10', 'b9', 'é', 'e', 'Z', 'ß', 'ss', '', ' ', '10', '9', 'x-1', 'x_1', '{"a":1}', 'Ñ', 'n', 'İ', 'i'];
+  for (const a of words) for (const b of words) assert.equal(Math.sign(compareValues(a, b)), Math.sign(a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' })), `${a} ${b}`);
+  assert.deepEqual(['b10', 'B2', 'a', 'b9'].sort(compareValues), ['a', 'B2', 'b9', 'b10']);
 });
 
 test('GO splits batches, with repeat counts, and not inside comments', () => {

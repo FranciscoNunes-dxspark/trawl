@@ -605,8 +605,12 @@ export function compareValues(a, b) {
   if (a instanceof Date && b instanceof Date) return a - b;
   if ((typeof a === 'number' || typeof a === 'bigint') && (typeof b === 'number' || typeof b === 'bigint')) return a < b ? -1 : a > b ? 1 : 0;
   if (typeof a === 'boolean' && typeof b === 'boolean') return Number(a) - Number(b);
-  return formatValue(a).localeCompare(formatValue(b), undefined, { numeric: true, sensitivity: 'base' });
+  return TEXT_ORDER.compare(formatValue(a), formatValue(b));
 }
+
+// localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }), made once: localeCompare with
+// options sets up a collator on every call, which sorting 50,000 rows does a million times.
+const TEXT_ORDER = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
 
 /**
  * The order a result set's rows show in, as indexes into `set.rows`: only those with a value

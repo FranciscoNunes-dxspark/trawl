@@ -32,10 +32,8 @@ const LONG = 4096;
 function remask(before, src) {
   const old = before.src;
   const n = Math.min(old.length, src.length);
-  let p = 0;
-  while (p < n && old.charCodeAt(p) === src.charCodeAt(p)) p++;
-  let tail = 0;
-  while (tail < n - p && old.charCodeAt(old.length - 1 - tail) === src.charCodeAt(src.length - 1 - tail)) tail++;
+  const p = common(n, (k) => old.slice(0, k) === src.slice(0, k));
+  const tail = common(n - p, (k) => old.slice(old.length - k) === src.slice(src.length - k));
   const shift = src.length - old.length;
   const changeEnd = src.length - tail;
   // Back to where masking was outside a run, before the change and before the character it looked ahead to.
@@ -43,6 +41,19 @@ function remask(before, src) {
   while (q > 0 && before.masked[q - 1] === FILL) q--;
   const { out, at } = maskText(src, q, (i) => i - 1 >= changeEnd && before.masked[i - 1 - shift] !== FILL);
   return before.masked.slice(0, q) + out + before.masked.slice(at - shift);
+}
+
+// The most, up to `n`, for which same(k) holds, same being true up to some k and false after: how
+// many characters two texts have in common at the start or end, compared a block at a time.
+function common(n, same) {
+  let lo = 0;
+  let hi = n;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (same(mid)) lo = mid;
+    else hi = mid - 1;
+  }
+  return lo;
 }
 
 /**

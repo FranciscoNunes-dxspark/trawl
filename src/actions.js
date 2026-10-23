@@ -39,6 +39,8 @@ import { quoteArg, takeLine } from './family.js';
 import { handOverText } from './siblings.js';
 import { API_LANGUAGES, API_SYSTEM, apiFileName, apiLanguage, apiPrompt, apiRequest, parseApi, projectLanguage } from './api.js';
 import { copyRefusal, copyScript, foreignKeysFrom, insertOrder, insertedRows, keyTuples, maskRows, parentSql, parseCopyRowsArgs, rowKey, rowsSql, selfOrder, tupleKey } from './copyrows.js';
+import { rehearsalRefusal, rehearsalSteps, rehearsalText, rowsAffected } from './rehearse.js';
+import { locksText } from './transactions.js';
 import { applySqlcmd, bindVariables, classifyScript, countQuery, oneLine, scriptVariables, splitStatements, sqlcmdVariables, statementAt, toCsv, toJson, toMarkdown, withoutLeadingComments } from './sql.js';
 
 // A WHERE that still changes more rows than this is asked about too.
@@ -2396,4 +2398,88 @@ export async function copyRowsTo(ctx, rest) {
   );
   if (ran) ctx.recordRun({ sql: script, conn: target.name, database: ran.database, at: Date.now(), ok: done.ok, summary: ran.summary });
   return done;
+}
+
+/**
+ * /rehearse [file]: runs a migration (the file, else the console) inside a transaction that is always
+ * rolled back, a statement at a time, and reports each one's time, rows and error, and the locks it
+ * holds by the end. SQL Server and PostgreSQL roll DDL back; MySQL commits DDL implicitly, so a script
+ * with it is refused there. On production it asks first: the locks are real while it runs.
+ */
+export async function rehearse(ctx, rest = '') {
+  await ctx.stopWatch?.('another run');
+  if (!(await liveSession(ctx))) return;
+  const path = pathArg(rest);
+  let text;
+  let from = 'the console';
+  if (path) {
+    try {
+      text = await readFile(resolve(path), 'utf8');
+      from = basename(path);
+    } catch (e) {
+      return ctx.note(`Couldn't read ${path}: ${firstLine(e.message)}`, 'error');
+    }
+  } else text = ed.toText(ctx.console);
+  if (!text.trim()) return ctx.note(`Nothing to rehearse: ${path ? `${from} is empty` : 'the console is empty (or /rehearse <file.sql>)'}.`, 'error');
+  if (ctx.tranCount) return ctx.note('A transaction is open: /commit or /rollback it first. The rehearsal rolls back a transaction of its own, and would take yours with it.', 'error');
+  const s = ctx.session;
+  const d = dialectOf(s);
+  text = await withParameters(ctx, text);
+  if (text == null) return;
+  const steps = rehearsalSteps(text, d);
+  if (!steps.length) return ctx.note(`Nothing to rehearse in ${from}.`, 'error');
+  const refusal = rehearsalRefusal(steps, d);
+  if (refusal) return ctx.note(refusal, 'error');
+  if (s.conn.prod) {
+    const ok = await ctx.confirm({
+      title: `Rehearse ${from} on ${s.conn.name} (production)?`,
+      detail: 'It runs for real inside a transaction that is rolled back at the end, so nothing is kept. But while it runs it takes real locks, and other sessions wait for what it changes until the rollback.',
+      options: YES_NO('Yes, rehearse it'),
+      danger: true,
+    });
+    if (!ok) return;
+  }
+  const results = [];
+  let locks = [];
+  let totalMs = 0;
+  const r = await ctx.task(
+    `rehearse ${from} (rolled back)`,
+    async (signal) => {
+      const started = Date.now();
+      await s.run(d.begin, { signal });
+      try {
+        for (const step of steps) {
+          const t0 = Date.now();
+          try {
+            const res = await s.run(step.text, { signal, limit: 1000 });
+            results.push({ step, ms: res.ms ?? Date.now() - t0, rows: rowsAffected(res.messages), sets: res.sets.filter((x) => x.columns.length).length });
+          } catch (e) {
+            if (e.cancelled || e.lost || signal.aborted) throw e;
+            results.push({ step, ms: Date.now() - t0, error: `${e.line ? `Line ${step.line + e.line - 1}: ` : ''}${e.message}` });
+            break;
+          }
+        }
+        totalMs = Date.now() - started;
+        try {
+          locks = !(await s.tranCount()) ? ['None: the error ended the transaction, so nothing was held any more.'] : d.locksSql ? locksText((await s.run(d.locksSql, { signal, limit: 1000 })).sets) : ['Trawl can’t read them on this server.'];
+        } catch (e) {
+          if (e.cancelled) throw e;
+          locks = [d.locksUnavailable ?? `Couldn't read them: ${firstLine(e.message)}`];
+        }
+      } finally {
+        // Whatever happened, nothing it did is kept.
+        if (!s.closed && (await s.tranCount().catch(() => 1))) await s.run(d.rollback).catch(() => {});
+      }
+      const failed = results.find((x) => x.error);
+      return [`${results.filter((x) => !x.error).length} of ${plural(steps.length, 'statement')} ran${failed ? `; line ${failed.step.line} failed` : ''}, then it was all rolled back. The report is on screen (/last shows it again).`];
+    },
+    { label: 'Rehearsing (rolled back at the end)' },
+  );
+  ctx.recordRun({ sql: text, conn: s.conn.name, database: s.database, at: Date.now(), ok: r.ok && !results.some((x) => x.error), summary: `rehearsed, rolled back: ${results.filter((x) => !x.error).length} of ${steps.length} ran` });
+  if (!r.ok) return r;
+  const report = rehearsalText({ steps, results, locks, conn: s.conn.name, database: s.database, label: d.label, totalMs });
+  const title = `Rehearsal: ${from} on ${s.conn.name}`;
+  ctx.rememberOutput(title, report);
+  ctx.showText(title, report);
+  return r;
 }

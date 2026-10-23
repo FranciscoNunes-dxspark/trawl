@@ -66,6 +66,7 @@ export const HELP = [
       ['/tab …', '/tab <name or number> switch · /tab rename <name> · /tab close · /tab alone lists them\nclick a tab\'s name in the title to go to it · drop a .sql or .txt file on Trawl to open it in a tab'],
       ['S', 'Save the statement under the cursor (or the selection) as a snippet (/snippet save <name>)'],
       ['/api [language]', 'Claude writes an HTTP endpoint that runs the statement (C# if the project has a .csproj, Node if a package.json); s saves it, and a request for Hail is copied'],
+      ['/rehearse [file]', 'Run the console (or a file) inside a transaction that is always rolled back: each statement\'s time, rows and error, and the locks held at the end'],
     ],
   },
   {
@@ -151,6 +152,7 @@ export const HELP = [
     title: 'Schema in files, migrations, test data, code',
     rows: [
       ['/script-all <folder>', 'Every table (with its keys, defaults, checks and indexes), view, procedure, function and trigger in a file of its own: <schema>/Tables/<name>.sql, Views/, Procedures/, Functions/, Triggers/. The same bytes each time, so only changed objects\' files are written; files of objects that are gone are removed only after asking.'],
+      ['/rehearse [file]', 'A migration (the console, or a file) run inside a transaction that is always rolled back: each statement\'s time, rows and error, and the locks it held at the end. SQL Server and PostgreSQL; on MySQL only scripts without DDL (which it commits by itself). Asks first on production, where the locks are real while it runs'],
       ['/migrations <folder>', 'The folder\'s scripts against the history table: Flyway (V1__name.sql, its checksums), EF Core (listed only: its migrations are C#), DbUp (script names), or Trawl\'s own trawl_migrations (any .sql, by name). Applied, pending, changed, missing.'],
       ['R', 'On that list (or /migrations run [folder]): run the pending ones in order, each through the usual checks and recorded as the tool would; the first failure stops the rest'],
       ['/generate <table> [rows] [--seed n]', 'Made-up rows as INSERTs in a console tab (generate): values fit each column, names, emails, dates and amounts guessed from its name, foreign keys from the rows the other table has, keys kept unique. The same seed, the same rows. Nothing runs.'],

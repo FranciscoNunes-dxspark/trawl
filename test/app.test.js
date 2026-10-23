@@ -8,7 +8,7 @@ import React from 'react';
 import { render } from 'ink-testing-library';
 import { DEMO_CONNECTIONS } from '../src/connections.js';
 import { memoryCredentials } from '../src/credentials.js';
-import { DbError, untrustedCert } from '../src/db.js';
+import { DbError, findPassword, signIn, untrustedCert } from '../src/db.js';
 import { demoSession } from '../src/demo.js';
 import { applyTheme, theme } from '../src/theme.js';
 import { App } from '../src/ui/App.jsx';
@@ -963,8 +963,9 @@ test('/password saves one, /folder files a connection, and the window title foll
   app.unmount();
 });
 
-// Azure SQL on a pretend server: az login (no password) or a SQL login whose password is "right", and
-// a firewall that turns 203.0.113.7 away until `az` has made its rule.
+// Azure SQL on a pretend server: az login (no password) or a SQL login whose password is "right" (the
+// password lookup and its retry are db.js's own, App Service included), an App Service whose connection
+// string holds it, and a firewall that turns 203.0.113.7 away until `az` has made its rule.
 const BLOCKED = "Cannot open server 'clubs' requested by the login. Client with IP address '203.0.113.7' is not allowed to access the server.  To enable access, use the Azure Management Portal or run sp_set_firewall_rule on the master database to create a firewall rule for this IP address or address range.";
 function fakeAzure({ firewall = false } = {}) {
   const az = { calls: [], rules: new Set(), opened: [] };
@@ -972,12 +973,21 @@ function fakeAzure({ firewall = false } = {}) {
     az.calls.push(args.slice(0, 4).join(' '));
     if (args[2] === 'list') return '[{"g": "rg-clubs", "n": "clubs"}]';
     if (args[3] === 'create') az.rules.add(args[args.indexOf('--start-ip-address') + 1]);
+    if (args[2] === 'connection-string') return JSON.stringify([{ name: 'Clubs', type: 'SQLAzure', value: 'Server=tcp:clubs.database.windows.net,1433;Database=ClubA;User ID=app;Password=right;' }]);
+    if (args[2] === 'appsettings') return '[]';
     return '';
   };
   az.open = async (conn, opts) => {
     az.opened.push(conn.name);
     if (firewall && !az.rules.has('203.0.113.7')) throw new DbError(BLOCKED);
-    return conn.auth === 'azure-cli' ? demoSession({ ...conn, demo: true }, { database: opts.database }) : fakeOpen(conn, opts);
+    if (conn.auth === 'azure-cli') return demoSession({ ...conn, demo: true }, { database: opts.database });
+    return signIn(conn, opts, async (o) => {
+      const found = await findPassword(conn, o);
+      if (found.password !== 'right') throw Object.assign(new DbError("Login failed for user 'app'.", { needsPassword: true }), { passwordSource: found.from });
+      const s = demoSession({ ...conn, demo: true }, { database: o.database });
+      if (found.from === 'azure') s.freshPassword = found.password;
+      return s;
+    });
   };
   return az;
 }
@@ -1003,17 +1013,35 @@ test('--azure-sql adds the connection /add would and connects, or connects to th
   app.unmount();
 });
 
-test('--azure-sql --user signs in with the password saved under its --name, moved along when the name was taken', async () => {
+test('/azure-sql with --password-from reads the login’s password from the App Service through az, and keeps it', async () => {
   const azure = fakeAzure();
-  // As Sonar does: trawl store-password app-login, then --name app-login.
-  const credentials = memoryCredentials({ 'app-login': 'right' });
-  const taken = { name: 'app-login', server: 'elsewhere.database.windows.net', auth: 'azure-cli' };
-  const app = startWith([taken], { azureSql: { server: 'clubs.database.windows.net', database: 'ClubA', user: 'sa', name: 'app-login' }, open: azure.open, az: azure.run, credentials });
-  await until(() => frame().includes('Clubs') && frame().includes('Added app-login-2'), 'connected with the saved password');
-  assert.doesNotMatch(frame(), /Password for/);
-  assert.equal(credentials.saved.get('app-login-2'), 'right');
-  assert.deepEqual(savedConnections().find((c) => c.name === 'app-login-2'), { name: 'app-login-2', server: 'clubs.database.windows.net', database: 'ClubA', auth: 'sql', user: 'sa' });
+  const credentials = memoryCredentials();
+  const app = startWith([...DEMO_CONNECTIONS], { open: azure.open, az: azure.run, credentials });
+  await until(() => frame().includes('Connections'), 'the connections');
+  await type(app.stdin, '/azure-sql tcp:clubs.database.windows.net,1433 ClubA --user app --name clubs-app --password-from rg-clubs/clubs-api/staging --subscription s1');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('Clubs') && frame().includes('Read the password for clubs-app from clubs-api and saved it in memory'), 'connected with the App Service’s password');
+  assert.doesNotMatch(frame(), /Password for|right/, 'never asked, never shown');
+  assert.equal(credentials.saved.get('clubs-app'), 'right');
+  assert.deepEqual(savedConnections().find((c) => c.name === 'clubs-app'), {
+    name: 'clubs-app',
+    server: 'clubs.database.windows.net',
+    database: 'ClubA',
+    auth: 'sql',
+    user: 'app',
+    passwordFrom: { subscription: 's1', resourceGroup: 'rg-clubs', app: 'clubs-api', slot: 'staging' },
+  });
+  assert.deepEqual(azure.calls, ['webapp config connection-string list', 'webapp config appsettings list']);
   app.unmount();
+
+  // Rotated: the stored password is turned down, so the App Service's is read again before asking.
+  const later = fakeAzure();
+  const old = memoryCredentials({ 'clubs-app': 'last-month' });
+  const again = startWith(savedConnections(), { initialConnection: 'clubs-app', open: later.open, az: later.run, credentials: old });
+  await until(() => frame().includes('Clubs') && frame().includes('Read the password for clubs-app'), 'connected after the rotation');
+  assert.doesNotMatch(frame(), /Password for/);
+  assert.equal(old.saved.get('clubs-app'), 'right');
+  again.unmount();
 });
 
 test("an Azure SQL firewall that turns this machine away offers a rule through az, then connects; /firewall adds one on demand", async () => {

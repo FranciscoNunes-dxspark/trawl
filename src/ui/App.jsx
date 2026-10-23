@@ -190,8 +190,8 @@ const DOUBLE_CLICK_MS = 400;
  * mouse.js's terminalMouse() from cli.jsx (missing where the terminal can't report it); tests pass their own.
  * `notify(title, body)` says a long run has finished (cli.jsx rings the terminal's bell and raises a
  * notification); without it, as in most tests, nothing is said. `azureSql` is `trawl --azure-sql`'s
- * { server, database, user, name, prod, folder }: that connection, found or added, instead of the last
- * one. `az(args, { signal })` runs the Azure CLI (azure.js) and `publicIp({ signal })` finds this
+ * spec (connections.js azureSqlSpec): that connection, found or added as /azure-sql does, instead of
+ * the last one. `az(args, { signal })` runs the Azure CLI (azure.js) and `publicIp({ signal })` finds this
  * machine's address, for an Azure SQL firewall; `firewallWaits` are the pauses (ms) before each try
  * to connect again once a rule is added. The tests pass their own, so nothing reaches Azure.
  */
@@ -493,7 +493,7 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     old.close();
     let s;
     try {
-      s = await open(old.conn, { database: old.database ?? old.conn.database, signal, password: typed.current.get(old.conn.name), credentials });
+      s = await open(old.conn, { database: old.database ?? old.conn.database, signal, password: typed.current.get(old.conn.name), credentials, az });
     } catch (e) {
       if (!e.cancelled) e.message = `Couldn't reconnect to ${old.conn.name}: ${e.message}`;
       throw e;
@@ -564,7 +564,7 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
               if (signal.aborted) throw new DbError('Cancelled', { cancelled: true });
             }
             try {
-              s = await open(conn, { database, signal, password, credentials });
+              s = await open(conn, { database, signal, password, credentials, az });
               break;
             } catch (e) {
               if (!afterFirewall || i + 1 >= firewallWaits.length || !firewallBlock(e) || signal.aborted) throw e;
@@ -573,6 +573,15 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
         } catch (e) {
           if (e.needsPassword && password == null && !/login failed/i.test(e.message)) e.message = `${conn.name} needs the password for ${conn.user}.`;
           throw e;
+        }
+        // A password read from the App Service (passwordFrom) that signed in is kept, as a typed one is.
+        const fresh = s.freshPassword;
+        delete s.freshPassword;
+        if (fresh != null) {
+          credentials.set(conn.name, { user: conn.user, password: fresh }).then(
+            () => note(`Read the password for ${conn.name} from ${conn.passwordFrom.app} and saved it in ${credentials.name}.`, 'ok'),
+            (e) => note(`Couldn't save the password in ${credentials.name}: ${firstLine(e.message)}`, 'error'),
+          );
         }
         watchEnd(s);
         setSession(s);
@@ -1082,7 +1091,7 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     },
     currentSet: () => resultsRef.current?.sets[resultIndexRef.current] ?? null,
     // A session of its own on another connection (fan-out, schema diff); the caller closes it.
-    openSession: (conn, opts = {}) => open(conn, { credentials, password: typed.current.get(conn.name), ...opts }),
+    openSession: (conn, opts = {}) => open(conn, { credentials, az, password: typed.current.get(conn.name), ...opts }),
     // Results that didn't come from running SQL on this session: fan-out's merged rows, a comparison.
     present: (res) => {
       showResults({ id: nextId.current++, error: null, messages: [], ...res });
@@ -1320,7 +1329,7 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
       ctx.rememberOutput('Your commands and keys', text);
     }
     if (initialFile) openFile(initialFile);
-    if (azureSql) return void a.openAzureSql(ctx, azureSql);
+    if (azureSql) return void a.azureSql(ctx, azureSql);
     const name = initialConnection ?? initialConfig.last;
     const conn = name && initialConfig.connections.find((c) => c.name === name);
     if (conn) connect(conn);

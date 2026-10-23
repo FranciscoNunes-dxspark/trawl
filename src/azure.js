@@ -94,3 +94,64 @@ export async function publicIp({ signal, fetch = globalThis.fetch } = {}) {
   if (!isIp(ip)) throw new Error(`api.ipify.org answered something that isn't an address: ${ip.slice(0, 60)}`);
   return ip;
 }
+
+/** An ADO.NET connection string ("Server=…;Database=…;User ID=…;Password=…") as { key: value }, keys lower case. */
+export function parseConnectionString(text) {
+  const out = {};
+  // Values may be quoted ("…" or '…', a doubled quote inside standing for one) to hold a ;.
+  const re = /\s*([^=;]+?)\s*=\s*("(?:[^"]|"")*"|'(?:[^']|'')*'|[^;]*)\s*(?:;|$)/gy;
+  let m;
+  while (re.lastIndex < text.length && (m = re.exec(text))) {
+    if (!m[0]) break;
+    let v = m[2].trim();
+    if (/^".*"$/s.test(v)) v = v.slice(1, -1).replace(/""/g, '"');
+    else if (/^'.*'$/s.test(v)) v = v.slice(1, -1).replace(/''/g, "'");
+    out[m[1].trim().toLowerCase()] = v;
+  }
+  return out;
+}
+
+const pick = (cs, keys) => keys.map((k) => cs[k]).find((v) => v != null);
+// Azure SQL's older logins are written user@server; the part before the @ is the login.
+const loginOf = (u) => String(u ?? '').replace(/@[^@]*$/, '').toLowerCase();
+
+/**
+ * The password in an App Service's connection strings or app settings (`from`: { subscription,
+ * resourceGroup, app, slot }) for `conn`: the first connection string whose server, database and
+ * user are the connection's. null when none matches; throws with az's words when az fails. The
+ * password is only returned, never written anywhere.
+ */
+export async function passwordFromApp(conn, from, { run = az, signal } = {}) {
+  const target = ['-g', from.resourceGroup, '-n', from.app, ...(from.slot ? ['--slot', from.slot] : []), ...(from.subscription ? ['--subscription', from.subscription] : []), '-o', 'json'];
+  const values = [];
+  for (const what of ['connection-string', 'appsettings']) {
+    const out = await run(['webapp', 'config', what, 'list', ...target], { signal });
+    let list;
+    try {
+      list = JSON.parse(out || '[]');
+    } catch {
+      throw new Error(`az webapp config ${what} list said something Trawl can't read.`);
+    }
+    for (const item of Array.isArray(list) ? list : []) if (typeof item?.value === 'string') values.push(item.value);
+  }
+  const host = serverHost(conn.server);
+  const same = (x, y) => String(x ?? '').toLowerCase() === String(y ?? '').toLowerCase();
+  for (const value of values) {
+    if (!/=/.test(value)) continue;
+    const cs = parseConnectionString(value);
+    const server = pick(cs, ['server', 'data source', 'address', 'addr', 'network address']);
+    const database = pick(cs, ['database', 'initial catalog']);
+    const user = pick(cs, ['user id', 'uid', 'user', 'username', 'user name']);
+    const password = pick(cs, ['password', 'pwd']);
+    if (password && server && serverHost(server) === host && same(database, conn.database) && loginOf(user) === loginOf(conn.user)) return password;
+  }
+  return null;
+}
+
+/** "rg/app" or "rg/app/slot" (/azure-sql --password-from) as { resourceGroup, app, slot }; throws when it isn't one. */
+export function parsePasswordFrom(text, subscription) {
+  const parts = String(text ?? '').split('/');
+  if (parts.length < 2 || parts.length > 3 || parts.some((p) => !/^[\w.()-]+$/.test(p))) throw new Error(`--password-from is <resource-group>/<app>[/<slot>]: "${text}" isn't one.`);
+  const [resourceGroup, app, slot] = parts;
+  return { ...(subscription ? { subscription } : {}), resourceGroup, app, ...(slot ? { slot } : {}) };
+}

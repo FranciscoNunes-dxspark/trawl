@@ -3,7 +3,7 @@
 import { mkdirSync, readFileSync, readdirSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import { basename, dirname, extname, join, resolve } from 'node:path';
-import { ADD_USAGE, azureSqlAddArgs, cleanFolder, commitMode, describeConn, findAzureSql, isReadOnly, parseAddArgs, splitArgs, sshText } from './connections.js';
+import { ADD_USAGE, azureSqlConnection, cleanFolder, commitMode, describeConn, findAzureSql, isReadOnly, parseAddArgs, parseAzureSqlArgs, splitArgs, sshText } from './connections.js';
 import { addFirewallRule, serverHost } from './azure.js';
 import { csvInsertScript, parseCsv } from './csv.js';
 import * as ed from './editor.js';
@@ -410,31 +410,40 @@ export function addConnection(ctx, rest) {
   } catch (e) {
     return ctx.note(e.message, 'error');
   }
+  return saveConnection(ctx, conn);
+}
+
+/** Saves `conn` (in place of one with its name) and says how it signs in. Returns it. */
+function saveConnection(ctx, conn) {
   const replaced = ctx.config.connections.some((c) => c.name.toLowerCase() === conn.name.toLowerCase());
   ctx.setConfig((c) => ({ ...c, connections: [...c.connections.filter((x) => x.name.toLowerCase() !== conn.name.toLowerCase()), conn] }));
-  const signIn = conn.auth === 'azure-cli' ? 'Signs in with your az login.' : conn.passwordEnv ? `Password from $${conn.passwordEnv}.` : `Asks for the password when you connect, and keeps it in ${ctx.credentials.name}.`;
+  const signIn = conn.auth === 'azure-cli' ? 'Signs in with your az login.' : conn.passwordFrom ? `Reads the password from ${conn.passwordFrom.app}${conn.passwordFrom.slot ? `/${conn.passwordFrom.slot}` : ''}'s connection strings through az, and keeps it in ${ctx.credentials.name}.` : conn.passwordEnv ? `Password from $${conn.passwordEnv}.` : `Asks for the password when you connect, and keeps it in ${ctx.credentials.name}.`;
   const tunnel = conn.ssh ? ` Through ssh ${sshText(conn.ssh)}, which signs in with a key or your ssh agent (no password prompt).` : '';
   ctx.note(`${replaced ? 'Updated' : 'Added'} ${conn.name}${conn.folder ? ` in ${conn.folder}/` : ''}${conn.prod ? ' (production, read-only)' : ''}. ${signIn}${tunnel} /connect ${conn.name}`, 'ok');
   return conn;
 }
 
 /**
- * `trawl --azure-sql <server> …` (cli.jsx; Sonar opens Azure SQL databases this way): connects to the
- * saved connection with the same server, database and login, or adds one as /add would and connects
- * to that. A login's password is looked for in the credential store under the connection's name
- * (Sonar saves it there first with `trawl store-password <name>`); one saved under the name asked for
- * moves with it when that name was taken.
+ * /azure-sql <server> [database] … (Sonar copies one for you to paste; trawl --azure-sql does the
+ * same): connects to the saved connection with the same server, database and login, or saves one as
+ * /add would and connects to that. --password-from (an App Service whose connection strings hold the
+ * login's password) is kept on the connection, the saved one's too.
  */
-export async function openAzureSql(ctx, spec) {
+export async function azureSql(ctx, rest) {
+  if (typeof rest !== 'object' && !String(rest ?? '').trim()) return ctx.prefill('/azure-sql ');
+  let spec;
+  try {
+    spec = typeof rest === 'string' ? parseAzureSqlArgs(rest) : rest;
+  } catch (e) {
+    return ctx.note(e.message, 'error');
+  }
   let conn = findAzureSql(ctx.config.connections, spec);
-  if (!conn) {
-    const { name, args } = azureSqlAddArgs(ctx.config.connections, spec);
-    conn = addConnection(ctx, args);
-    if (!conn) return false;
-    if (spec.user && spec.name && name.toLowerCase() !== spec.name.toLowerCase()) {
-      const pw = await ctx.credentials.get(spec.name).catch(() => null);
-      if (pw != null) await ctx.credentials.set(name, { user: spec.user, password: pw }).catch(() => {});
-    }
+  if (!conn) conn = saveConnection(ctx, azureSqlConnection(ctx.config.connections, spec));
+  else if (spec.passwordFrom && JSON.stringify(conn.passwordFrom) !== JSON.stringify(spec.passwordFrom)) {
+    const was = conn;
+    conn = { ...conn, passwordFrom: spec.passwordFrom };
+    ctx.setConfig((c) => ({ ...c, connections: c.connections.map((x) => (x === was || x.name === was.name ? conn : x)) }));
+    ctx.note(`${conn.name} reads its password from ${spec.passwordFrom.app}${spec.passwordFrom.slot ? `/${spec.passwordFrom.slot}` : ''} from now on, when the saved one is missing or turned down.`);
   }
   return ctx.connect(conn);
 }

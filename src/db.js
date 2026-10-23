@@ -4,7 +4,7 @@
 // db-mysql.js, and the demo driver (demo.js), all with the same session interface.
 import net from 'node:net';
 import { Connection, Request } from 'tedious';
-import { azureSqlToken } from './azure.js';
+import { az as runAz, azureSqlToken, passwordFromApp } from './azure.js';
 import { tediousConfig } from './connections.js';
 import { STORE_NAME, osCredentials } from './credentials.js';
 import { demoSession } from './demo.js';
@@ -87,16 +87,19 @@ function toDbError(err, lineOffset = 0) {
  * Opens a session on `conn` (in `database`, when given). Resolves with
  * { conn, database, run(text, { signal, limit }), tranCount(), close(), onEnd }.
  * A login's password is `password` when given, else its environment variable, else the one
- * saved in the OS credential store (`credentials`).
+ * saved in the OS credential store (`credentials`), else (`passwordFrom`) an App Service's connection
+ * strings, read through `az` (azure.js's runner; the tests pass their own). A stored one that's
+ * turned down is tried from `passwordFrom` too, as passwords get rotated. A session that signed in
+ * with a password from there has it as `freshPassword`, for the caller to keep in the store.
  */
-export async function connect(conn, { database = conn.database, signal, password, credentials = osCredentials, ssh } = {}) {
+export async function connect(conn, { database = conn.database, signal, password, credentials = osCredentials, ssh, az = runAz } = {}) {
   if (conn.demo) return demoSession(conn, { database });
-  if (!conn.ssh) return openDirect(conn, { database, signal, password, credentials });
+  if (!conn.ssh) return openDirect(conn, { database, signal, password, credentials, az });
   // Through an SSH tunnel (ssh.js): the driver talks to a port on this machine that ssh forwards.
   const tunnel = await openTunnel(conn, { signal, ...ssh });
   let s;
   try {
-    s = await openDirect(conn, { database, signal, password, credentials, tunnel });
+    s = await openDirect(conn, { database, signal, password, credentials, tunnel, az });
   } catch (e) {
     // ssh says why a forward it set up couldn't reach the server ("open failed: connect failed"),
     // sometimes a moment after the driver has given up.
@@ -116,26 +119,52 @@ export async function connect(conn, { database = conn.database, signal, password
   return s;
 }
 
-/** connect without the tunnel; `tunnel` ({ port, host, targetPort }) is one already open. */
-async function openDirect(conn, { database, signal, password, credentials, tunnel }) {
+/**
+ * connect without the tunnel; `tunnel` ({ port, host, targetPort }) is one already open. A stored
+ * password that's turned down is tried again from the connection's `passwordFrom`, when it has one.
+ */
+const openDirect = (conn, opts) => signIn(conn, opts, (o) => openOnce(conn, o));
+
+/**
+ * `attempt(opts)` (an open), and once more with the password from the connection's `passwordFrom`
+ * when it turned down the stored one. Exported for the tests.
+ */
+export async function signIn(conn, opts, attempt) {
+  try {
+    return await attempt(opts);
+  } catch (e) {
+    if (!(e.needsPassword && e.passwordSource === 'store' && conn.passwordFrom)) throw e;
+    const fresh = await passwordFromApp(conn, conn.passwordFrom, { run: opts.az, signal: opts.signal }).catch(() => null);
+    if (fresh == null) throw e;
+    return attempt({ ...opts, password: fresh, source: 'azure' });
+  }
+}
+
+async function openOnce(conn, { database, signal, password, credentials, tunnel, az, source }) {
   const dialect = dialectOf(conn);
+  const fresh = (s, found) => {
+    if (found.from === 'azure') s.freshPassword = found.password;
+    return s;
+  };
   // Postgres and MySQL go through their own adapters (db-postgres.js, db-mysql.js), loaded when first used.
   if (dialect.kind !== 'sqlserver') {
-    const found = await findPassword(conn, { password, credentials, signal });
+    const found = await findPassword(conn, { password, credentials, signal, az, source });
     const adapter = dialect.kind === 'postgres' ? await import('./db-postgres.js') : await import('./db-mysql.js');
     try {
-      return await adapter.open(conn, { database, password: found.password, signal, tunnel });
+      return fresh(await adapter.open(conn, { database, password: found.password, signal, tunnel }), found);
     } catch (e) {
       // A wrong password from the environment is yours to fix there; a saved or typed one is asked again.
       if (e.badLogin && found.from !== 'env') e.needsPassword = true;
+      e.passwordSource = found.from;
       throw e;
     }
   }
   const secrets = {};
   let from = 'given';
+  let found = { from };
   if (conn.auth === 'azure-cli') secrets.token = await azureSqlToken({ signal });
   else {
-    const found = await findPassword(conn, { password, credentials, signal });
+    found = await findPassword(conn, { password, credentials, signal, az, source });
     from = found.from;
     secrets.password = found.password;
   }
@@ -150,24 +179,32 @@ async function openDirect(conn, { database, signal, password, credentials, tunne
       const e = toDbError(err);
       // A wrong password from the environment is yours to fix there; a saved or typed one is asked again.
       if (secrets.password != null && from !== 'env' && /login failed/i.test(e.message)) e.needsPassword = true;
+      e.passwordSource = from;
       if (!conn.trustCert && untrustedCert(err)) e.untrustedCert = true;
       reject(e);
     });
   });
-  return tediousSession(conn, connection, database);
+  return fresh(tediousSession(conn, connection, database), found);
 }
 
 /**
  * A login's password: the one given, else its environment variable, else the one saved in the OS
- * credential store. { password, from } with `from` 'given', 'env' or 'store'; a DbError with
- * needsPassword when there's none.
+ * credential store, else the App Service `passwordFrom` names. { password, from } with `from` 'given',
+ * 'env', 'store' or 'azure' (`source` says where a given one came from); a DbError with needsPassword
+ * when there's none.
  */
-async function findPassword(conn, { password, credentials, signal }) {
-  if (password != null) return { password, from: 'given' };
+export async function findPassword(conn, { password, credentials, signal, az = runAz, source = 'given' }) {
+  if (password != null) return { password, from: source };
   if (conn.passwordEnv && process.env[conn.passwordEnv] != null) return { password: process.env[conn.passwordEnv], from: 'env' };
   let storeError = '';
   const pw = await credentials.get(conn.name, { signal }).catch((e) => ((storeError = ` (${e.message})`), null));
   if (pw != null) return { password: pw, from: 'store' };
+  if (conn.passwordFrom) {
+    const where = `${conn.passwordFrom.app}${conn.passwordFrom.slot ? `/${conn.passwordFrom.slot}` : ''}`;
+    const fromApp = await passwordFromApp(conn, conn.passwordFrom, { run: az, signal }).catch((e) => ((storeError += ` (${where}: ${String(e.message).split('\n')[0]})`), null));
+    if (fromApp != null) return { password: fromApp, from: 'azure' };
+    if (!storeError.includes(where)) storeError += ` (none in ${where}'s connection strings matches)`;
+  }
   const env = conn.passwordEnv ? `, or set $${conn.passwordEnv}` : '';
   throw new DbError(`No password saved for ${conn.user} on ${conn.name}${storeError}. Connect in Trawl once to enter it (it keeps it in ${STORE_NAME})${env}.`, { needsPassword: true });
 }

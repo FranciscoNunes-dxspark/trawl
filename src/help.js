@@ -171,6 +171,9 @@ export const HELP = [
       ['p', 'Password: saved in the OS credential store (Trawl also asks when you connect)'],
       ['f', 'Move to a folder (/folder <connection> [folder])'],
       ['x', 'Forget (and its saved password)'],
+      { heading: 'Azure SQL', about: 'through your az login' },
+      ['/azure-sql <server> [database] …', 'Connect to the saved connection to it (same server, database and login), else save one as /add would and connect; --password-from <rg>/<app>[/<slot>] reads a login\'s password from that App Service\'s connection strings. Sonar copies these for you'],
+      ['/firewall [connection]', 'Let this machine through the server\'s firewall (Trawl offers it when the firewall turns you away)'],
     ],
   },
   {

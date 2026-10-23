@@ -100,7 +100,7 @@ const hasCode = (masked) => /[^\s\u0001;]/.test(masked);
 
 function lineIndex(src) {
   const starts = [0];
-  for (let i = 0; i < src.length; i++) if (src[i] === '\n') starts.push(i + 1);
+  for (let i = src.indexOf('\n'); i >= 0; i = src.indexOf('\n', i + 1)) starts.push(i + 1);
   return (offset) => {
     let lo = 0;
     let hi = starts.length - 1;
@@ -169,6 +169,9 @@ export function splitStatements(text) {
 
 let lastSplit = { text: null, statements: [] };
 const WORD_AFTER = /[\s\u0001]*(\w+)/y;
+// [A-Za-z_@#], which starts a word, and [\w@#$], which goes on with one.
+const wordStart = (c) => (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 95 || c === 64 || c === 35;
+const wordChar = (c) => wordStart(c) || (c >= 48 && c <= 57) || c === 36;
 
 function split(text) {
   const src = normalise(text);
@@ -207,29 +210,38 @@ function split(text) {
     words = [];
   };
 
-  let off = 0;
-  for (const line of m.split('\n')) {
-    const lineStart = off;
-    off += line.length + 1;
-    if (GO_LINE.test(line)) {
+  // Line by line over the mask, a character code at a time: this runs over the whole console on every key.
+  for (let lineStart = 0; lineStart <= m.length; ) {
+    const nl = m.indexOf('\n', lineStart);
+    const lineEnd = nl < 0 ? m.length : nl;
+    const off = lineEnd + 1;
+    let first = lineStart;
+    while (first < lineEnd && (m.charCodeAt(first) === 32 || m.charCodeAt(first) === 9)) first++;
+    if (first < lineEnd && (m.charCodeAt(first) | 32) === 103 && GO_LINE.test(m.slice(lineStart, lineEnd))) {
       flush(lineStart);
       start = Math.min(off, src.length);
+      lineStart = off;
       continue;
     }
-    if (/^[ \t]*$/.test(line)) {
+    if (first === lineEnd) {
       if (!paren && !blocks.length && !whole) flush(lineStart);
+      lineStart = off;
       continue;
     }
-    for (let j = 0; j < line.length; j++) {
-      const ch = line[j];
-      if (ch === '(') paren++;
-      else if (ch === ')') paren = Math.max(0, paren - 1);
-      else if (ch === ';' && !paren && !blocks.length && !whole) flush(lineStart + j + 1);
-      else if (/[A-Za-z_@#]/.test(ch) && (j === 0 || !/[\w@#$]/.test(line[j - 1]))) {
-        const word = line.slice(j).match(/^[\w@#$]+/)[0];
-        const w = word.toUpperCase();
-        const after = lineStart + j + word.length;
-        j += word.length - 1;
+    for (let at = lineStart; at < lineEnd; at++) {
+      const c = m.charCodeAt(at);
+      if (c === 40) paren++;
+      else if (c === 41) paren = Math.max(0, paren - 1);
+      else if (c === 59 && !paren && !blocks.length && !whole) flush(at + 1);
+      else if (wordStart(c) && (at === lineStart || !wordChar(m.charCodeAt(at - 1)))) {
+        let after = at + 1;
+        while (after < lineEnd && wordChar(m.charCodeAt(after))) after++;
+        const length = after - at;
+        const from = at;
+        at = after - 1;
+        // Only the first four words and BEGIN, CASE and END matter.
+        if (words.length >= 4 && (length < 3 || length > 5)) continue;
+        const w = m.slice(from, after).toUpperCase();
         if (words.length < 4) {
           words.push(w);
           if (isModuleHeader(words)) whole = true;
@@ -244,13 +256,15 @@ function split(text) {
           if (next === 'CATCH') {
             const catchEnd = after + m.slice(after).search(/CATCH/i) + 'CATCH'.length;
             flush(catchEnd);
-            j = catchEnd - lineStart - 1;
+            at = catchEnd - 1;
+            if (at >= lineEnd) break;
             continue;
           }
           flush(after);
         }
       }
     }
+    lineStart = off;
   }
   flush(src.length);
   return out;

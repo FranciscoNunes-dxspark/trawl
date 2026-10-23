@@ -35,6 +35,15 @@ test('a long text masked again after an edit is masked as it would be from scrat
   }
 });
 
+test('statements split the same way across lines: a CATCH lines below its END, words after the fourth, a lower-case go', () => {
+  const sql = "BEGIN TRY\n  SELECT 1;\nEND\n  TRY\nBEGIN\n  CATCH\n  SELECT 2;\nEND\n\n  CATCH SELECT 3\nSELECT a$b, @x#y, x1 FROM t WHERE CASE WHEN a = 1 THEN 2 END = 2;\n  go 2\nUPDATE t SET x = (1;\n\n2);";
+  assert.deepEqual(splitStatements(sql).map((s) => [s.text, s.line, s.endLine, s.label]), [
+    ['BEGIN TRY\n  SELECT 1;\nEND\n  TRY\nBEGIN\n  CATCH\n  SELECT 2;\nEND\n\n  CATCH', 1, 10, 'BEGIN TRY'],
+    ['CATCH SELECT 3\nSELECT a$b, @x#y, x1 FROM t WHERE CASE WHEN a = 1 THEN 2 END = 2;', 10, 11, 'CATCH SELECT 3'],
+    ['UPDATE t SET x = (1;\n\n2);', 13, 15, 'UPDATE t SET x = (1;'],
+  ]);
+});
+
 test('GO splits batches, with repeat counts, and not inside comments', () => {
   const b = splitBatches('SELECT 1\nGO\n/*\nGO\n*/\nSELECT 2\ngo 3\n\nGO\n');
   assert.deepEqual(b.map((x) => [x.text, x.line, x.repeat]), [

@@ -5,8 +5,8 @@ import { DIALECTS, definitionSqlFor, dialectOf, kindOf, selectTopFor, splitScrip
 import { parseAddArgs, describeConn, hostPort } from '../src/connections.js';
 import { classifyScript } from '../src/sql.js';
 import { createTableScript } from '../src/schema.js';
-import { errorText, postgresSession, pgConfig, types } from '../src/db-postgres.js';
-import { mysqlSession, mysqlConfig, transactionAfter } from '../src/db-mysql.js';
+import { LimitedQuery, errorText, postgresSession, pgConfig, readsRows, types } from '../src/db-postgres.js';
+import { mysqlSession, mysqlConfig, streamQuery, transactionAfter } from '../src/db-mysql.js';
 import { saveRecovery, saveScript } from '../src/edit.js';
 
 const { postgres: PG, mysql: MY, sqlserver: MS } = DIALECTS;
@@ -109,6 +109,46 @@ test('the Postgres adapter runs a statement at a time, cuts at the limit, and sa
   assert.deepEqual([cfg.host, cfg.port, cfg.database, cfg.ssl], ['h', 6543, 'postgres', { rejectUnauthorized: false }]);
 });
 
+test('a Postgres read stops at the row limit: the portal hands over one row more, then is closed', async () => {
+  const sent = [];
+  const connection = {
+    stream: {},
+    parsedStatements: {},
+    submittedNamedStatements: {},
+    ...Object.fromEntries(['parse', 'bind', 'describe', 'execute', 'flush', 'sync', 'close'].map((m) => [m, (msg) => sent.push(msg?.rows ? `${m} ${msg.rows}` : msg?.type ? `${m} ${msg.type}` : m)])),
+  };
+  const answer = (q) => new Promise((resolve, reject) => (q.callback = (e, r) => (e ? reject(e) : resolve(r))));
+  const q = new LimitedQuery('SELECT g FROM big', 2);
+  const done = answer(q);
+  q.submit(connection);
+  assert.deepEqual(sent, ['parse', 'bind', 'describe P', 'execute 3', 'flush']);
+  q.handleRowDescription({ fields: [{ name: 'g', dataTypeID: 23, format: 'text' }] });
+  for (const g of ['1', '2', '3']) q.handleDataRow({ fields: [g] });
+  q.handlePortalSuspended(connection);
+  assert.deepEqual(sent.slice(5), ['close P', 'sync'], 'no second Execute: the rest are never read');
+  q.handleReadyForQuery(connection);
+  const res = await done;
+  assert.deepEqual(res.rows, [[1], [2], [3]]);
+  // An error before the end syncs, as the server waits for it; one after a short result doesn't again.
+  sent.length = 0;
+  const bad = new LimitedQuery('SELECT nope', 2);
+  const failed = answer(bad);
+  bad.submit(connection);
+  bad.handleError(Object.assign(new Error('column "nope" does not exist'), { code: '42703' }), connection);
+  await assert.rejects(failed, /nope/);
+  assert.equal(sent.at(-1), 'sync');
+  sent.length = 0;
+  const short = new LimitedQuery('SELECT 1', 5);
+  short.submit(connection);
+  short.handleCommandComplete({ text: 'SELECT 1' }, connection);
+  assert.deepEqual(sent.filter((m) => m === 'sync'), ['sync']);
+  // Only what reads rows takes the portal; the rest go as they are.
+  assert.equal(readsRows('-- the top\n(SELECT 1)'), true);
+  assert.equal(readsRows('WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d'), true);
+  assert.equal(readsRows('VACUUM t'), false);
+  assert.equal(readsRows('INSERT INTO t SELECT 1'), false);
+});
+
 test("a Postgres error keeps the server's DETAIL, HINT and CONTEXT, but not a DO block's own RAISE", () => {
   const dup = Object.assign(new Error('duplicate key value violates unique constraint "t_pkey"'), { detail: 'Key (id)=(1) already exists.' });
   assert.equal(errorText(dup), 'duplicate key value violates unique constraint "t_pkey"\nDETAIL: Key (id)=(1) already exists.');
@@ -150,6 +190,58 @@ test('the MySQL adapter maps rows and affected counts, follows transactions and 
   assert.equal(transactionAfter(1, 'ROLLBACK TO SAVEPOINT x'), 1);
   assert.equal(transactionAfter(1, 'create table t (x int)'), 0);
   assert.equal(mysqlConfig({ server: 'h', user: 'u' }).port, 3306);
+});
+
+// mysql2's own connection as far as streamQuery goes: each query answers with `events` (sent on the
+// next turn) and stops sending rows once KILL QUERY has been asked for, ending with error 1317.
+function fakeCore(script) {
+  const core = new EventEmitter();
+  core.kills = 0;
+  core.query = ({ sql }) => {
+    const q = new EventEmitter();
+    const events = script(sql);
+    setImmediate(async () => {
+      for (const [name, ...args] of events) {
+        if (core.kills && name === 'result' && Array.isArray(args[0])) {
+          q.emit('error', Object.assign(new Error('Query execution was interrupted'), { errno: 1317 }));
+          return q.emit('end');
+        }
+        q.emit(name, ...args);
+        await null;
+      }
+      q.emit('end');
+    });
+    return q;
+  };
+  return core;
+}
+
+test('a MySQL read stops at the row limit: KILL QUERY once one row more has come, and the rows read are the answer', async () => {
+  const cols = [{ name: 'id', columnType: 3 }];
+  const core = fakeCore(() => [['fields', cols], ...Array.from({ length: 1000 }, (_, i) => ['result', [i + 1]])]);
+  const stop = async () => void core.kills++;
+  const [rows, fields] = await streamQuery(core, 'SELECT id FROM big', 3, stop);
+  assert.deepEqual(rows, [[1], [2], [3], [4]]);
+  assert.equal(fields, cols);
+  assert.equal(core.kills, 1, 'stopped once');
+  // Through the session: the set is cut and the script stops, as on SQL Server.
+  const c = Object.assign(new EventEmitter(), { connection: fakeCore(() => [['fields', cols], ...Array.from({ length: 50 }, (_, i) => ['result', [i]])]), end: async () => {} });
+  const s = mysqlSession({ name: 'my', kind: 'mysql' }, c, { cancel: async () => void c.connection.kills++ });
+  const res = await s.run('SELECT id FROM big; SELECT 2', { limit: 2 });
+  assert.deepEqual([res.sets.length, res.sets[0].rows, res.sets[0].truncated, res.stopped], [1, [[0], [1]], true, true]);
+  // Writes, a CALL's several results, and errors come back as mysql2's promise API gives them.
+  const ok = { affectedRows: 2, warningStatus: 0 };
+  const more = fakeCore((sql) => (/^CALL/.test(sql) ? [['fields', cols], ['result', [7]], ['fields', undefined], ['result', ok]] : [['fields', undefined], ['result', ok]]));
+  assert.deepEqual(await streamQuery(more, 'DELETE FROM t', 5, stop), [ok, undefined]);
+  assert.deepEqual(await streamQuery(more, 'CALL p()', 5, stop), [[[[7]], ok], [cols, undefined]]);
+  const failing = fakeCore(() => [['error', Object.assign(new Error("Table 'x' doesn't exist"), { errno: 1146 })]]);
+  await assert.rejects(streamQuery(failing, 'SELECT * FROM x', 5, stop), (e) => e.errno === 1146);
+  // A connection that drops while a query runs rejects rather than waiting for ever.
+  const dropping = fakeCore(() => []);
+  dropping.query = () => new EventEmitter();
+  const waiting = streamQuery(dropping, 'SELECT SLEEP(100)', 5, stop);
+  dropping.emit('error', Object.assign(new Error('Connection lost'), { code: 'PROTOCOL_CONNECTION_LOST', fatal: true }));
+  await assert.rejects(waiting, (e) => e.code === 'PROTOCOL_CONNECTION_LOST');
 });
 
 test('a MySQL save fails on a statement that doesn’t affect exactly one row, and its transaction is rolled back', async () => {

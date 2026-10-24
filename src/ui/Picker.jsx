@@ -8,9 +8,10 @@ import { Lines, Panel, Row } from './parts.jsx';
 /**
  * Pick one from a list, an overlay over the view: `items` are { label, detail, text } (text shows on
  * the right), and `keys` maps a key ('return', or a letter) to what it does with the item picked.
- * The overlay closes before the key's action runs; esc or q closes it.
+ * The overlay closes before the key's action runs; esc or q closes it. The keys named in `free` work
+ * on an empty list too (their action gets null).
  */
-export function Picker({ title, hint, items, keys, empty, ctx, width, height, active, onClose }) {
+export function Picker({ title, hint, items, keys, free = [], empty, ctx, width, height, active, onClose }) {
   const split = width >= 90;
   const listW = split ? Math.floor(width * 0.45) : width;
   const sideW = width - listW;
@@ -24,10 +25,10 @@ export function Picker({ title, hint, items, keys, empty, ctx, width, height, ac
     if (nav.handle(input, key)) return;
     const action = key.return ? keys.return : keys[input];
     const picked = items[nav.current()];
-    if (!action || !picked) return;
+    if (!action || (!picked && !free.includes(input))) return;
     onClose();
     // After every handler has had this key, so the view under the overlay doesn't take it too.
-    queueMicrotask(() => action(picked));
+    queueMicrotask(() => action(picked ?? null));
   };
   useInput(handle, { isActive: active });
   useMouse(ctx, (e) => {

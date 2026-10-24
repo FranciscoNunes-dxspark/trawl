@@ -37,7 +37,8 @@ import { configDir, loadUndo, saveUndo } from './config.js';
 import { hostname } from 'node:os';
 import { AZURE_SQL_NOTE, BACKUP_INFO_SQL, absoluteOnServer, backupPath, backupRefusal, backupSql, dumpCommand, fileSafe, loadCommand, multiUserSql, notInstalled, onThisMachine, parseBackupArgs, restoreFilesSql, restoreHeaderSql, restoreMoves, restoreSql, stamp, toolsFor } from './backup.js';
 import { relTime } from './text.js';
-import { APP_NAMES, TAKEN_BY, contextIn, copiedNote, notMine, pathArg as familyPath, projectAt, quoteArg, takeLine } from './family.js';
+import { APP_NAMES, TAKEN_BY, contextIn, copiedNote, familyDir, notMine, pathArg as familyPath, projectAt, projectWiring, quoteArg, readActivity, takeLine } from './family.js';
+import { timelineItems, wiringText } from './timeline.js';
 import { connectionForQuery, familyOffers, newDatabases, placeText, projectLine, queryContext, rowsContext, rowsScript } from './siblings.js';
 import { API_LANGUAGES, API_SYSTEM, apiFileName, apiLanguage, apiPrompt, apiRequest, parseApi, projectLanguage } from './api.js';
 import { copyRefusal, copyScript, foreignKeysFrom, insertOrder, insertedRows, keyTuples, maskRows, parentSql, parseCopyRowsArgs, rowKey, rowsSql, selfOrder, tupleKey } from './copyrows.js';
@@ -2645,7 +2646,7 @@ export async function copyRowsTo(ctx, rest) {
         s = await ctx.openSession(target, { signal });
         const out = await s.run(script, { signal, limit: 1 });
         const inserted = insertedRows(out.messages);
-        ran = { database: s.database, summary: `${inserted} of ${rows} rows inserted (/copy-rows)` };
+        ran = { database: s.database, summary: `${inserted} of ${rows} rows inserted (/copy-rows)`, inserted };
         return [`${plural(inserted, 'row')} went in${rows - inserted ? `; ${plural(rows - inserted, 'row')} ${rows - inserted === 1 ? 'was' : 'were'} there already` : ''}.`];
       } catch (e) {
         if (e.needsPassword) e.message = `${target.name} needs its password: connect to it once in Trawl to save it, then copy again.`;
@@ -2661,6 +2662,7 @@ export async function copyRowsTo(ctx, rest) {
     { label: `Copying to ${target.name}` },
   );
   if (ran) ctx.recordRun({ sql: script, conn: target.name, database: ran.database, at: Date.now(), ok: done.ok, summary: ran.summary });
+  if (done.ok) ctx.logActivity?.(`/copy-rows ${objectName(obj)} from ${session.conn.name}/${session.database} to ${target.name}${ran.database ? `/${ran.database}` : ''} · ${plural(ran.inserted, 'row')} inserted${args.mask ? ', personal data made up' : ''}`, { kind: 'copy' });
   return done;
 }
 
@@ -2780,6 +2782,7 @@ export async function backup(ctx, rest = '') {
   const here = onThisMachine(t.conn, info.machine, hostname());
   const r = await ctx.query(backupSql(database, path), {
     title: `BACKUP DATABASE ${database} (copy-only)`,
+    activity: false,
     // A name in the backup folder is all /restore needs; a path elsewhere is typed whole.
     notes: [`The backup is ${here ? 'on this machine' : `on the server${info.machine ? ` (${info.machine})` : ''}, not this machine`}: ${path}`, `/restore ${typedPath(t.args.file && absoluteOnServer(t.args.file) ? path : path.split(/[\\/]/).at(-1))} puts it back (--as <database> beside it).`],
   });
@@ -2829,7 +2832,7 @@ export async function restore(ctx, rest = '') {
   const before = session.database;
   const moves = restoreMoves(files, target, info);
   const back = `\nUSE ${dialectOf(session).quote(before)};`;
-  const r = await ctx.query(restoreSql({ target, path, moves, replace }) + back, { title: `RESTORE DATABASE ${target}${replace ? ' (replacing it)' : ''}`, notes: moves.map((m) => `${m.logical} → ${m.to}`) });
+  const r = await ctx.query(restoreSql({ target, path, moves, replace }) + back, { title: `RESTORE DATABASE ${target}${replace ? ' (replacing it)' : ''}`, activity: false, notes: moves.map((m) => `${m.logical} → ${m.to}`) });
   if (r?.ok) {
     ctx.logActivity?.(`RESTORE DATABASE ${target} on ${t.conn.name}${replace ? ', replacing it' : ''}`, { kind: 'restore' });
     return r;
@@ -2966,4 +2969,37 @@ async function loadWithTool(ctx, { args, conn, kind }) {
   }
   ctx.refresh();
   return r;
+}
+
+// ---------------------------------------------------------------------------------------------------
+// The family's activity log and a project's wiring.
+
+/**
+ * /timeline: what the five apps did that changed something (family.js readActivity), newest first;
+ * `p` switches between this project's and everything, ↵ shows an entry whole.
+ */
+export function timeline(ctx, { all = false } = {}) {
+  const dir = ctx.familyHome ?? familyDir();
+  const project = ctx.projectDir;
+  const entries = readActivity({ dir, project: all ? undefined : project, limit: 500 });
+  const where = all ? 'all projects' : basename(project) || project;
+  ctx.showPicker({
+    title: `The family's timeline · ${where}`,
+    hint: `↵ the whole entry · p ${all ? 'this project only' : 'all projects'}`,
+    empty: all ? `Nothing yet: the family's apps add what they do that changes something (a write, a push, a restart) to ${dir}.` : `Nothing for ${project} yet: p shows every project's.`,
+    items: timelineItems(entries),
+    keys: {
+      return: (it) => ctx.showText(`${it.label.trim()}: ${it.detail}`.slice(0, 80), it.text),
+      p: () => timeline(ctx, { all: !all }),
+    },
+    free: ['p'],
+  });
+}
+
+/** /wiring: what the project points at (addresses, hosts, ports, connection strings), by file, secrets masked. */
+export function wiring(ctx) {
+  const dir = ctx.projectDir;
+  const text = wiringText(dir, projectWiring(dir));
+  ctx.rememberOutput(`Wiring: ${basename(dir) || dir}`, text);
+  ctx.showText(`Wiring: ${basename(dir) || dir}`, text);
 }

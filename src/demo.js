@@ -2,7 +2,7 @@
 // it knows the catalog queries (/grep's, /uses's and /script-all's too), a Flyway history for
 // /migrations, SELECT [TOP (n)] … FROM a table, simple SELECT lists, USE,
 // the copies of rows kept for undo and the locks an open transaction holds, /copy-rows' reads and script,
-// transactions, WAITFOR DELAY (to try cancelling), RAISERROR/THROW, SHOWPLAN_TEXT and STATISTICS
+// transactions, BACKUP and RESTORE (remembering which database each file was of, for the run), WAITFOR DELAY (to try cancelling), RAISERROR/THROW, SHOWPLAN_TEXT and STATISTICS
 // PROFILE (made-up plans of a table scan), a few other sessions for the
 // Activity view (and KILL for them), SQL Agent jobs (and sp_start_job), the top queries, /health's
 // findings, /sizes and a couple of deadlocks, and counts what writes would touch without changing
@@ -93,6 +93,9 @@ function makeDatabase(club, { extraLanguage = true, drifted = false } = {}) {
 
 // ClubB is one language short, so comparing the two shows a difference.
 const DATABASES = { master: { tables: [], triggers: [], foreignKeys: [], indexes: [], defaults: [], checks: [] }, ClubA: makeDatabase('Club A'), ClubB: makeDatabase('Club B', { extraLanguage: false, drifted: true }) };
+
+// The backups /backup made in this run: the file's path (lower-cased) → { database, at }.
+const BACKUPS = new Map();
 
 const set = (names, rows, types = []) => ({ columns: names.map((name, i) => ({ name, type: types[i] ?? '' })), rows, truncated: false });
 
@@ -633,6 +636,28 @@ async function runStatement(session, text, line, state, { signal, limit = 500, d
     for (const o of session.others) if (o.blockedBy === id) Object.assign(o, { blockedBy: 0, status: 'running', wait: null, waitMs: null });
     return;
   }
+  // /backup and /restore: the demo keeps which database each backup file was of, for this run.
+  if ((m = s.match(/^BACKUP\s+DATABASE\s+\[((?:[^\]]|\]\])+)\]\s+TO\s+DISK\s*=\s*N'((?:[^']|'')*)'/i))) {
+    const name = m[1].replace(/]]/g, ']');
+    if (!DATABASES[name]) fail(`Database '${name}' does not exist. Make sure that the name is entered correctly.`, 911);
+    BACKUPS.set(m[2].replace(/''/g, "'").toLowerCase(), { database: name, at: new Date() });
+    state.messages.push(`Processed 520 pages for database '${name}', file '${name}' on file 1.`, `Processed 2 pages for database '${name}', file '${name}_log' on file 1.`, 'BACKUP DATABASE successfully processed 522 pages in 0.043 seconds (94.7 MB/sec).');
+    return;
+  }
+  if ((m = s.match(/^RESTORE\s+(HEADERONLY|FILELISTONLY|DATABASE\s+\[((?:[^\]]|\]\])+)\])\s+FROM\s+DISK\s*=\s*N'((?:[^']|'')*)'/i))) {
+    const path = m[3].replace(/''/g, "'");
+    const b = BACKUPS.get(path.toLowerCase());
+    if (!b) fail(`Cannot open backup device '${path}'. Operating system error 2(The system cannot find the file specified.).`, 3201);
+    const what = m[1].toUpperCase();
+    if (what === 'HEADERONLY') return void state.sets.push(set(['BackupName', 'BackupType', 'DatabaseName', 'BackupFinishDate', 'ServerName'], [[null, 1, b.database, b.at, 'DEMO']]));
+    if (what === 'FILELISTONLY') return void state.sets.push(set(['LogicalName', 'PhysicalName', 'Type', 'FileGroupName'], [[b.database, `C:\\Program Files\\Microsoft SQL Server\\MSSQL16.MSSQLSERVER\\MSSQL\\DATA\\${b.database}.mdf`, 'D', 'PRIMARY'], [`${b.database}_log`, `C:\\Program Files\\Microsoft SQL Server\\MSSQL16.MSSQLSERVER\\MSSQL\\DATA\\${b.database}_log.ldf`, 'L', null]]));
+    const target = m[2].replace(/]]/g, ']');
+    if (DATABASES[target] && !/\bREPLACE\b/i.test(s)) fail(`The backup set holds a backup of a database other than the existing '${target}' database.`, 3154);
+    // The demo's restored database is the backed-up one's tables.
+    DATABASES[target] = DATABASES[b.database];
+    state.messages.push(`Processed 520 pages for database '${target}', file '${b.database}' on file 1.`, `RESTORE DATABASE successfully processed 522 pages in 0.051 seconds (79.9 MB/sec).`);
+    return;
+  }
   if ((m = s.match(/^EXEC(?:UTE)?\s+msdb\.dbo\.sp_start_job\s+@job_name\s*=\s*N?'((?:[^']|'')*)'$/i))) {
     const name = m[1].replace(/''/g, "'");
     const job = session.jobs.find((j) => j.name === name);
@@ -731,6 +756,7 @@ export function demoSession(conn, { database } = {}) {
             state.sets.push(set(['schema', 'name', 'definition'], db.tables.filter((t) => t.definition).map((t) => [t.schema, t.name, t.definition])));
             return void state.sets.push(set(['schema', 'object', 'name', 'is_unique', 'type_desc', 'filter_definition', 'columns', 'included'], db.indexes.map(([name, table, unique, columns]) => ['dbo', table, name, unique, 'NONCLUSTERED', null, columns, null])));
           }
+          if (batch.startsWith('-- trawl:backup-info')) return void state.sets.push(set(['backup_path', 'data_path', 'log_path', 'engine_edition', 'machine'], [['C:\\Program Files\\Microsoft SQL Server\\MSSQL16.MSSQLSERVER\\MSSQL\\Backup', 'C:\\Program Files\\Microsoft SQL Server\\MSSQL16.MSSQLSERVER\\MSSQL\\DATA\\', 'C:\\Program Files\\Microsoft SQL Server\\MSSQL16.MSSQLSERVER\\MSSQL\\DATA\\', session.conn.engineEdition ?? 3, 'DEMO']]));
           if (batch.startsWith('-- trawl:activity')) return void state.sets.push(...activitySets(session));
           if (batch.startsWith('-- trawl:script-extras')) return void state.sets.push(...scriptExtrasSets(session.database));
           if (/-- trawl:migration/.test(batch)) return migrationBatch(session, batch, state);

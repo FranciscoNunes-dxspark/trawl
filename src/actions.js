@@ -33,9 +33,11 @@ import { TOOLS, createPlainSql, historySql, migrationStatus, nextRank, parseFlyw
 import { generateScript, refValuesSql } from './generate.js';
 import { LANGUAGE_NAMES, LANGUAGES, languageOf, scaffold } from './scaffold.js';
 import { UNDO_ROWS, reverseScript, snapshotOf, snapshotRows, snapshotSummary, undoPlan, withSnapshot } from './undo.js';
-import { loadUndo, saveUndo } from './config.js';
+import { configDir, loadUndo, saveUndo } from './config.js';
+import { hostname } from 'node:os';
+import { AZURE_SQL_NOTE, BACKUP_INFO_SQL, absoluteOnServer, backupPath, backupRefusal, backupSql, dumpCommand, fileSafe, loadCommand, multiUserSql, notInstalled, onThisMachine, parseBackupArgs, restoreFilesSql, restoreHeaderSql, restoreMoves, restoreSql, stamp, toolsFor } from './backup.js';
 import { relTime } from './text.js';
-import { APP_NAMES, TAKEN_BY, contextIn, copiedNote, notMine, projectAt, quoteArg, takeLine } from './family.js';
+import { APP_NAMES, TAKEN_BY, contextIn, copiedNote, notMine, pathArg as familyPath, projectAt, quoteArg, takeLine } from './family.js';
 import { connectionForQuery, familyOffers, newDatabases, placeText, projectLine, queryContext, rowsContext, rowsScript } from './siblings.js';
 import { API_LANGUAGES, API_SYSTEM, apiFileName, apiLanguage, apiPrompt, apiRequest, parseApi, projectLanguage } from './api.js';
 import { copyRefusal, copyScript, foreignKeysFrom, insertOrder, insertedRows, keyTuples, maskRows, parentSql, parseCopyRowsArgs, rowKey, rowsSql, selfOrder, tupleKey } from './copyrows.js';
@@ -2743,5 +2745,225 @@ export async function rehearse(ctx, rest = '') {
   const title = `Rehearsal: ${from} on ${s.conn.name}`;
   ctx.rememberOutput(title, report);
   ctx.showText(title, report);
+  return r;
+}
+
+// ---------------------------------------------------------------------------------------------------
+// /backup and /restore (backup.js): on a connection that is neither production nor read-only.
+
+/** Where it stands before a backup or a restore: the connection, its kind, or null after saying why not. */
+function backupTarget(ctx, rest, { restore = false } = {}) {
+  // A path quoted by hand keeps its backslashes; one quoted by quoteArg comes back as it was.
+  const words = [...String(rest ?? '').matchAll(/"(?:[^"\\]|\\.)*"|\S+/g)].map((m) => familyPath(m[0]));
+  const args = parseBackupArgs(words, { restore });
+  if (args.reason) return void ctx.note(args.reason, 'error');
+  const { conn } = ctx.session;
+  const { kind } = dialectOf(ctx.session);
+  const refusal = backupRefusal(conn, kind);
+  if (refusal) return void ctx.note(refusal, 'error');
+  if (ctx.tranCount) return void ctx.note(`A transaction is open on ${conn.name}: /commit or /rollback it first (${restore ? 'RESTORE' : 'BACKUP'} can't run inside one).`, 'error');
+  return { args, conn, kind };
+}
+
+/** /backup [file]: the database you're in, to a file (on the server, for SQL Server). */
+export async function backup(ctx, rest = '') {
+  if (!(await liveSession(ctx))) return;
+  const t = backupTarget(ctx, rest);
+  if (!t) return;
+  const database = ctx.session.database;
+  if (t.kind !== 'sqlserver') return dumpWithTool(ctx, t, database);
+  const info = await serverInfo(ctx);
+  if (!info) return;
+  if (Number(info.engine_edition) === 5) return ctx.note(AZURE_SQL_NOTE, 'error');
+  const path = backupPath(info, database, t.args.file);
+  if (!path) return ctx.note(`${t.conn.name} didn't say where it keeps backups: give a whole path on the server, as /backup C:\\Backups\\${database}.bak.`, 'error');
+  const here = onThisMachine(t.conn, info.machine, hostname());
+  const r = await ctx.query(backupSql(database, path), {
+    title: `BACKUP DATABASE ${database} (copy-only)`,
+    // A name in the backup folder is all /restore needs; a path elsewhere is typed whole.
+    notes: [`The backup is ${here ? 'on this machine' : `on the server${info.machine ? ` (${info.machine})` : ''}, not this machine`}: ${path}`, `/restore ${typedPath(t.args.file && absoluteOnServer(t.args.file) ? path : path.split(/[\\/]/).at(-1))} puts it back (--as <database> beside it).`],
+  });
+  if (r?.ok) ctx.logActivity?.(`BACKUP DATABASE ${database} on ${t.conn.name}`, { kind: 'backup' });
+  return r;
+}
+
+/** /restore <file> [--as <database>]: a backup into a database, made or replaced (after asking). */
+export async function restore(ctx, rest = '') {
+  if (!(await liveSession(ctx))) return;
+  const t = backupTarget(ctx, rest, { restore: true });
+  if (!t) return;
+  if (t.kind !== 'sqlserver') return loadWithTool(ctx, t);
+  const info = await serverInfo(ctx);
+  if (!info) return;
+  if (Number(info.engine_edition) === 5) return ctx.note(AZURE_SQL_NOTE, 'error');
+  const path = backupPath(info, null, t.args.file);
+  if (!path) return ctx.note(`${t.conn.name} didn't say where it keeps backups: give the backup's whole path on the server.`, 'error');
+  const session = ctx.session;
+  let header = null;
+  let files = [];
+  const read = await ctx.task(
+    `read the backup ${path}`,
+    async (signal) => {
+      header = rowsOf((await session.run(restoreHeaderSql(path), { signal, limit: 100 })).sets.at(-1)).at(-1) ?? null;
+      files = rowsOf((await session.run(restoreFilesSql(path), { signal, limit: 1000 })).sets.at(-1));
+      return [];
+    },
+    { label: 'Reading the backup', quiet: true },
+  );
+  if (!read.ok) return;
+  const target = t.args.as ?? header?.DatabaseName;
+  if (!target) return ctx.note("The backup doesn't say which database it was: name one with --as <database>.", 'error');
+  const replace = (ctx.schema?.databases ?? []).some((d) => d.toLowerCase() === target.toLowerCase());
+  const of = `a backup of ${header?.DatabaseName ?? 'a database'}${header?.BackupFinishDate ? ` taken ${formatWhen(header.BackupFinishDate)}` : ''}`;
+  const ok = await ctx.confirm(
+    replace
+      ? {
+          title: `Replace ${target} on ${t.conn.name} with the backup?`,
+          detail: `Everything in ${target} now is lost, and its other sessions are put out (ROLLBACK IMMEDIATE). ${path}: ${of}.`,
+          options: YES_NO(`Yes, replace ${target}`),
+          danger: true,
+        }
+      : { title: `Restore the backup as a new database, ${target}?`, detail: `${path}: ${of}. Its files go in the server's data and log folders, named after ${target}.`, options: YES_NO('Yes, restore it') },
+  );
+  if (!ok) return;
+  const before = session.database;
+  const moves = restoreMoves(files, target, info);
+  const back = `\nUSE ${dialectOf(session).quote(before)};`;
+  const r = await ctx.query(restoreSql({ target, path, moves, replace }) + back, { title: `RESTORE DATABASE ${target}${replace ? ' (replacing it)' : ''}`, notes: moves.map((m) => `${m.logical} → ${m.to}`) });
+  if (r?.ok) {
+    ctx.logActivity?.(`RESTORE DATABASE ${target} on ${t.conn.name}${replace ? ', replacing it' : ''}`, { kind: 'restore' });
+    return r;
+  }
+  // A failed restore leaves the database for anyone again, and Trawl where it was.
+  await ctx.task(
+    'tidy up after the restore',
+    async (signal) => {
+      if (replace) await session.run(`USE master;\n${multiUserSql(target)}`, { signal }).catch(() => {});
+      if (session.database !== before) await session.run(`USE ${dialectOf(session).quote(before)};`, { signal }).catch(() => ctx.note(`Couldn't go back to ${before}: /use a database.`, 'error'));
+      return [];
+    },
+    { label: 'Tidying up after the restore', quiet: true },
+  );
+  ctx.refresh();
+  return r;
+}
+
+// A path as typed at the prompt: quoted when it has spaces (backslashes stay as they are).
+const typedPath = (p) => (/[\s"]/.test(p) ? `"${p}"` : p);
+
+const formatWhen = (v) => (v instanceof Date ? v.toISOString().slice(0, 16).replace('T', ' ') : String(v));
+
+/** SQL Server's default backup, data and log folders, its edition and its machine's name; null after saying why not. */
+async function serverInfo(ctx) {
+  let info = null;
+  const r = await ctx.task(
+    "read the server's backup folder",
+    async (signal) => {
+      info = rowsOf((await ctx.session.run(BACKUP_INFO_SQL, { signal, limit: 1 })).sets.at(-1))[0] ?? {};
+      return [];
+    },
+    { label: "Reading the server's backup folder", quiet: true },
+  );
+  return r.ok ? info : null;
+}
+
+/** The login's password for a tool's environment (never its command line), or undefined after saying why not. */
+async function toolPassword(ctx, conn) {
+  if (!conn.user) return null;
+  try {
+    return await ctx.passwordFor(conn);
+  } catch (e) {
+    ctx.note(firstLine(e.message), 'error');
+    return undefined;
+  }
+}
+
+const fileSize = (p) => {
+  try {
+    const n = statSync(p).size;
+    return n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`;
+  } catch {
+    return null;
+  }
+};
+
+async function runTool(ctx, tool, kind, command, env, { title, label, cwd }) {
+  const tools = toolsFor(kind);
+  return ctx.task(
+    title,
+    async (signal) => {
+      try {
+        await ctx.runProgram(command, { signal, env, cwd });
+      } catch (e) {
+        if (e.cancelled) throw e;
+        if (notInstalled(e)) throw new Error(`${tool} isn't installed, or isn't on PATH: it comes with ${tools.from}.`);
+        throw new Error(`${tool}: ${firstLine(e.message)}`);
+      }
+      return [];
+    },
+    { label },
+  );
+}
+
+async function dumpWithTool(ctx, { args, conn, kind }, database) {
+  const tools = toolsFor(kind);
+  const full = args.file ? resolve(pathArg(args.file)) : join(configDir(), 'backups', `${fileSafe(conn.name)}-${fileSafe(database)}-${stamp()}.${tools.ext}`);
+  const password = await toolPassword(ctx, conn);
+  if (password === undefined) return;
+  try {
+    mkdirSync(dirname(full), { recursive: true });
+  } catch (e) {
+    return ctx.note(`Couldn't make ${dirname(full)}: ${firstLine(e.message)}`, 'error');
+  }
+  const { command, env } = dumpCommand(conn, kind, { database, file: full, password });
+  const r = await runTool(ctx, tools.dump, kind, command, env, { title: `${tools.dump} ${database} on ${conn.name}`, label: `Backing up ${database} with ${tools.dump}`, cwd: dirname(full) });
+  if (!r.ok) {
+    // Half a dump is no backup.
+    try {
+      unlinkSync(full);
+    } catch {}
+    return r;
+  }
+  const size = fileSize(full);
+  ctx.note(`Backed up ${database} to ${full}${size ? ` (${size})` : ''}.\n/restore ${typedPath(full)} puts it back (--as <database> beside it).`, 'ok');
+  ctx.logActivity?.(`${tools.dump} ${database} on ${conn.name}`, { kind: 'backup' });
+  return r;
+}
+
+async function loadWithTool(ctx, { args, conn, kind }) {
+  const tools = toolsFor(kind);
+  const full = resolve(pathArg(args.file));
+  try {
+    statSync(full);
+  } catch {
+    return ctx.note(`No file ${full}.`, 'error');
+  }
+  const session = ctx.session;
+  const d = dialectOf(session);
+  const target = args.as ?? session.database;
+  const replace = (ctx.schema?.databases ?? []).some((x) => x.toLowerCase() === target.toLowerCase());
+  const what = kind === 'postgres' ? "what the backup has is dropped and made again from it (--clean); anything else in it stays" : 'its tables that the backup has are dropped and made again from it; anything else in it stays';
+  const ok = await ctx.confirm(
+    replace
+      ? { title: `Restore ${basename(full)} over ${target} on ${conn.name}?`, detail: `In ${target}, ${what}.`, options: YES_NO(`Yes, restore over ${target}`), danger: true }
+      : { title: `Make the database ${target} on ${conn.name} and restore ${basename(full)} into it?`, detail: `With ${tools.load}, from ${full}.`, options: YES_NO('Yes, restore it') },
+  );
+  if (!ok) return;
+  const password = await toolPassword(ctx, conn);
+  if (password === undefined) return;
+  if (!replace) {
+    const made = await ctx.task(`CREATE DATABASE ${target}`, async (signal) => {
+      await session.run(`CREATE DATABASE ${d.quote(target)};`, { signal });
+      return [];
+    });
+    if (!made.ok) return made;
+  }
+  const { command, env } = loadCommand(conn, kind, { database: target, file: full, password, replace });
+  const r = await runTool(ctx, tools.load, kind, command, env, { title: `${tools.load} ${basename(full)} into ${target} on ${conn.name}`, label: `Restoring ${target} with ${tools.load}`, cwd: dirname(full) });
+  if (r.ok) {
+    ctx.note(`Restored ${basename(full)} into ${target}.`, 'ok');
+    ctx.logActivity?.(`${tools.load} into ${target} on ${conn.name}${replace ? ', over what was there' : ''}`, { kind: 'restore' });
+  }
+  ctx.refresh();
   return r;
 }

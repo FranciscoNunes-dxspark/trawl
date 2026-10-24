@@ -10,7 +10,8 @@ import * as ed from '../editor.js';
 import { commitMode, describeConn, isReadOnly } from '../connections.js';
 import { copyToClipboard } from '../clipboard.js';
 import { osCredentials } from '../credentials.js';
-import { DbError, connect as openSession } from '../db.js';
+import { DbError, findPassword, connect as openSession } from '../db.js';
+import { run as runCommand } from '../run.js';
 import { changesText, editTarget, hasChanges, noChanges, readTarget } from '../edit.js';
 import { HELP } from '../help.js';
 import { commandsSection, sectionFor } from '../help-layout.js';
@@ -199,11 +200,12 @@ const DOUBLE_CLICK_MS = 400;
  * `projectDir` is the folder Trawl started in (the project /family, /project and /api look at), and
  * `familyHome` the family's folder for the mascots' moods (family.js familyDir): without it, as in the
  * tests that don't pass one, Glim's mood is neither written nor are the others' read, every
- * `moodEvery` ms.
+ * `moodEvery` ms. `runProgram(command, { signal, env, cwd })` starts another program (run.js run):
+ * /backup's and /restore's pg_dump, pg_restore, mysqldump and mysql, which tests stub.
  */
 const FIREWALL_WAITS = [0, 5000, 10000];
 
-export function App({ config: initialConfig, initialFile, initialConnection, checkLatest, installUpdate, askClaude = askClaudeCli, findDataSources, credentials = osCredentials, open = openSession, clipboard = copyToClipboard, setTitle, mouse, notify, azureSql, az = runAz, publicIp = findPublicIp, firewallWaits = FIREWALL_WAITS, projectDir = process.cwd(), familyHome = null, moodEvery = 30_000 }) {
+export function App({ config: initialConfig, initialFile, initialConnection, checkLatest, installUpdate, askClaude = askClaudeCli, findDataSources, credentials = osCredentials, open = openSession, clipboard = copyToClipboard, setTitle, mouse, notify, azureSql, az = runAz, publicIp = findPublicIp, firewallWaits = FIREWALL_WAITS, projectDir = process.cwd(), familyHome = null, moodEvery = 30_000, runProgram = runCommand }) {
   const { exit } = useApp();
   const { columns, rows } = useTerminalSize();
   const [config, setConfigState] = useState(initialConfig);
@@ -1133,6 +1135,11 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     credentials,
     az,
     publicIp,
+    // Another program, as run.js starts it (pg_dump for /backup): tests pass a stub.
+    runProgram,
+    // A login's password, as connecting finds it (typed this session, its variable, the OS store),
+    // for a tool's environment only.
+    passwordFor: async (conn) => (await findPassword(conn, { password: typed.current.get(conn.name), credentials, az })).password,
     // Whether this terminal can report the mouse at all (Settings says so).
     mouseAvailable: Boolean(mouse),
     // Puts text on the clipboard and says so; `what` is "the cell", "12 rows as CSV"…

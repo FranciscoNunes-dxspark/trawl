@@ -147,6 +147,14 @@ export const HELP = [
     ],
   },
   {
+    title: 'Backup and restore',
+    about: 'connections that are neither production nor read-only',
+    rows: [
+      ['/backup [file]', 'SQL Server: BACKUP DATABASE … WITH COPY_ONLY to the server\'s default backup folder (or a whole path on the server), and says where it went; Postgres: pg_dump -Fc, MySQL: mysqldump, to a file here (~/.trawl/backups unless named). esc cancels'],
+      ['/restore <file> [--as <database>]', 'The backup into the database it was of, or --as another: made new, or replaced after asking (SQL Server puts its other sessions out; files moved to the server\'s data folders); pg_restore and mysql for the others. Azure SQL Database has neither: export a .bacpac from the portal'],
+    ],
+  },
+  {
     title: 'CSV import',
     rows: [
       ['/import-csv <file.csv> <table> [--run]', 'The file\'s rows as INSERTs into the table, columns matched to its header (case, spaces and _ ignored; identity columns left out); comma, semicolon or tab, quotes and line breaks inside them. They open in a console tab to read; --run runs them (the usual checks apply).'],

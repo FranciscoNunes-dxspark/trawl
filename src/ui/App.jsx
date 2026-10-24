@@ -10,7 +10,8 @@ import * as ed from '../editor.js';
 import { commitMode, describeConn, isReadOnly } from '../connections.js';
 import { copyToClipboard } from '../clipboard.js';
 import { osCredentials } from '../credentials.js';
-import { DbError, connect as openSession } from '../db.js';
+import { DbError, findPassword, connect as openSession } from '../db.js';
+import { run as runCommand } from '../run.js';
 import { changesText, editTarget, hasChanges, noChanges, readTarget } from '../edit.js';
 import { HELP } from '../help.js';
 import { commandsSection, sectionFor } from '../help-layout.js';
@@ -45,7 +46,9 @@ import { COMPILED, VERSION } from '../version.js';
 import { worthNotifying } from '../notify.js';
 import { changedCells, untilMatch, untilText } from '../watch.js';
 import { dueWarning, locksText, openFor, warnMinutes, warningTitle } from '../transactions.js';
-import { decodeContext, pastedLine, projectAt, readMoods, repoRoot, writeMood } from '../family.js';
+import { decodeContext, logActivity, pastedLine, projectAt, readMoods, repoRoot, writeMood } from '../family.js';
+import { addPending, endText, endsTransaction, rowsChanged, writeKinds, writeText } from '../timeline.js';
+import { splitStatements as statementsOf } from '../sql.js';
 import { familyMood, moodsToShow, newDatabases, projectNote, reactionText } from '../siblings.js';
 
 const VIEWS = [
@@ -68,7 +71,7 @@ const CTRL_P = '\x10';
 const HINTS = {
   explorer: '↵ first rows · d describe · s query it in the console · c CREATE script · C copy rows · /find filter',
   query: '↵ run statement · v select several · R run file · e edit in the console · /console',
-  results: 'h/l columns · o sort · f filter · ↵ record · v value · y/Y copy · F follow key · p pin · c compare · e edit · n NULL · d delete · a add · s save · x export · t share · C copy rows',
+  results: 'h/l columns · o sort · f filter · ↵ record · v value · y/Y copy · F follow key · p pin · c compare · e edit · n NULL · d delete · a add · s save · x export · b chart · t share · C copy rows',
   history: '↵ run again · e edit in the console · ◆ ran by Claude',
   connections: '↵ connect · n new · p password · f folder · x forget',
   activity: 'R read again · ↵ full SQL · x kill · a idle sessions too · J jobs · Q top queries',
@@ -199,11 +202,12 @@ const DOUBLE_CLICK_MS = 400;
  * `projectDir` is the folder Trawl started in (the project /family, /project and /api look at), and
  * `familyHome` the family's folder for the mascots' moods (family.js familyDir): without it, as in the
  * tests that don't pass one, Glim's mood is neither written nor are the others' read, every
- * `moodEvery` ms.
+ * `moodEvery` ms. `runProgram(command, { signal, env, cwd })` starts another program (run.js run):
+ * /backup's and /restore's pg_dump, pg_restore, mysqldump and mysql, which tests stub.
  */
 const FIREWALL_WAITS = [0, 5000, 10000];
 
-export function App({ config: initialConfig, initialFile, initialConnection, checkLatest, installUpdate, askClaude = askClaudeCli, findDataSources, credentials = osCredentials, open = openSession, clipboard = copyToClipboard, setTitle, mouse, notify, azureSql, az = runAz, publicIp = findPublicIp, firewallWaits = FIREWALL_WAITS, projectDir = process.cwd(), familyHome = null, moodEvery = 30_000 }) {
+export function App({ config: initialConfig, initialFile, initialConnection, checkLatest, installUpdate, askClaude = askClaudeCli, findDataSources, credentials = osCredentials, open = openSession, clipboard = copyToClipboard, setTitle, mouse, notify, azureSql, az = runAz, publicIp = findPublicIp, firewallWaits = FIREWALL_WAITS, projectDir = process.cwd(), familyHome = null, moodEvery = 30_000, runProgram = runCommand }) {
   const { exit } = useApp();
   const { columns, rows } = useTerminalSize();
   const [config, setConfigState] = useState(initialConfig);
@@ -342,12 +346,39 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     schemaRef.current = s;
     setSchema(s);
   };
+  // The writes the open transaction holds, said in the family's activity log when it ends.
+  const pendingWrites = useRef(null);
+  // What Trawl did that changed something, in the family's activity log (only with familyHome).
+  const recordActivity = (text, { kind = 'info' } = {}) => {
+    if (familyHome) logActivity('trawl', { text, kind, project: ctxRef.current?.projectDir }, { dir: familyHome });
+  };
+  // After a run that worked: a write that took effect is logged (its kinds of statement, the
+  // connection, the rows; never its SQL), one in an open transaction waits for its COMMIT or
+  // ROLLBACK, which is logged with what it held.
+  const noteWrites = (sql, res, { s, open }) => {
+    const { kind } = dialectOf(s);
+    const kinds = writeKinds(sql, { dialect: kind });
+    const rows = rowsChanged(res?.messages);
+    if (open) {
+      if (kinds.length) pendingWrites.current = addPending(pendingWrites.current, kinds, rows);
+      return;
+    }
+    const where = `${s.conn.name}/${s.database}`;
+    const ender = statementsOf(sql).map((x) => endsTransaction(x.text)).filter(Boolean).at(-1);
+    const held = pendingWrites.current;
+    pendingWrites.current = null;
+    if (ender) return recordActivity(endText(ender, where, kinds.length ? addPending(held, kinds, rows) : held), { kind: ender.toLowerCase() });
+    if (kinds.length) recordActivity(writeText(kinds, where, rows), { kind: 'write' });
+  };
   const setTranCount = (n) => {
     if (n && !tranRef.current) {
       tranSince.current = Date.now();
       tranWarned.current = false;
     }
-    if (!n) tranSince.current = null;
+    if (!n) {
+      tranSince.current = null;
+      pendingWrites.current = null;
+    }
     tranRef.current = n;
     setTranCountState(n);
   };
@@ -672,8 +703,9 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
   // it when it went part-way, running it again only when that's safe (actions.js afterLostConnection).
   // `notes` are lines to add under a run that works (what /undo-write kept). `quiet` keeps it out of
   // the log, and `history: false` out of History (a /watch's runs after the first). `watch` ({ every,
-  // run, prev }) marks the results as a watch's, with the cells that changed since `prev`.
-  const query = async (sql, { title, wrapped = false, lineBase = 1, stay = false, keep = false, limit: raised, top = null, again = null, runner = null, recover = '', notes = [], quiet = false, history = true, watch = null } = {}) => {
+  // run, prev }) marks the results as a watch's, with the cells that changed since `prev`. `activity:
+  // false` leaves the family's activity log to the caller (/backup and /restore say it their way).
+  const query = async (sql, { title, wrapped = false, lineBase = 1, stay = false, keep = false, limit: raised, top = null, again = null, runner = null, recover = '', notes = [], quiet = false, history = true, watch = null, activity = true } = {}) => {
     // Any other run ends a /watch, so the two never overlap.
     if (!watch && watchRef.current) await stopWatch('another run');
     let s = sessionRef.current;
@@ -752,6 +784,7 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     if (s && sessionRef.current === s) {
       if (history) setConfig((c) => withRan(c, { sql, conn: s.conn.name, database: s.database, at: Date.now(), ok: r.ok, summary: firstLine(summary) }));
       const n = await s.tranCount().catch(() => tranRef.current);
+      if (r.ok && activity) noteWrites(sql, res, { s, open: n > 0 });
       if (n && !tranRef.current && wrapped) note(`Started a transaction (${s.conn.name} commits manually): /commit keeps the change, /rollback undoes it.`);
       setTranCount(n);
       if (r.ok && (CHANGES_SCHEMA.test(sql) || s.database !== schemaRef.current?.database)) loadSchema(s).catch(() => {});
@@ -1133,6 +1166,15 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     credentials,
     az,
     publicIp,
+    // A line in the family's activity log (/timeline), for what changed something: /backup, /copy-rows…
+    logActivity: (text, opts) => recordActivity(text, opts),
+    // The family's folder (FAMILY_HOME), when Trawl shares with the family.
+    familyHome,
+    // Another program, as run.js starts it (pg_dump for /backup): tests pass a stub.
+    runProgram,
+    // A login's password, as connecting finds it (typed this session, its variable, the OS store),
+    // for a tool's environment only.
+    passwordFor: async (conn) => (await findPassword(conn, { password: typed.current.get(conn.name), credentials, az })).password,
     // Whether this terminal can report the mouse at all (Settings says so).
     mouseAvailable: Boolean(mouse),
     // Puts text on the clipboard and says so; `what` is "the cell", "12 rows as CSV"…
@@ -1640,7 +1682,7 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
   } else if (overlay?.picker) {
     main = <Picker {...overlay.picker} ctx={ctx} width={W} height={mainH} active={focus === 'view' && !confirmReq} onClose={closeOnKey} />;
   } else if (overlay) {
-    main = <TextViewer {...overlay} ctx={ctx} width={W} height={mainH} active={focus === 'view' && (!confirmReq || confirmReq.scrollsOverlay)} pageOnly={Boolean(confirmReq)} onClose={closeOnKey} />;
+    main = <TextViewer key={overlay.title} {...overlay} ctx={ctx} width={W} height={mainH} active={focus === 'view' && (!confirmReq || confirmReq.scrollsOverlay)} pageOnly={Boolean(confirmReq)} onClose={closeOnKey} />;
   } else if (view === 'connections') {
     main = <ConnectionsView connections={config.connections} current={session?.conn} ctx={ctx} width={W} height={mainH} active={viewActive} />;
   } else if (view === 'query' && queryMode === 'console') {

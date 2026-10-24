@@ -75,6 +75,7 @@ export function ExplorerView({ schema, ctx, width, height, active, filter }) {
     else if (input === 's') ctx.startQuery(obj);
     else if (input === 'c') a.scriptObject(ctx, obj);
     else if (input === 'u') a.showUses(ctx, obj);
+    else if (input === 'D') a.diagram(ctx, `${obj.schema}.${obj.name}`);
     else if (input === 'C') obj.kind === 'table' ? a.pickCopyTarget(ctx, `${obj.schema}.${obj.name}`) : ctx.note(`${obj.schema}.${obj.name} is a ${obj.kind}: C copies a table's rows to another connection.`, 'error');
   };
   useInput(keys, { isActive: active });

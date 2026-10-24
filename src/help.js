@@ -37,6 +37,7 @@ export const HELP = [
       ['s', 'Start a query on it in the console'],
       ['c', 'Its CREATE script, into the console (a table\'s from the catalog; others\' from the server)'],
       ['u', 'What uses it and what it uses (/uses): views, routines, triggers, foreign keys, by kind'],
+      ['D', 'Diagram of its foreign keys (/diagram [table] [--depth n] [--mermaid]): boxes with the key columns, joined by lines, ▶ pointing at the table referred to; m there gives a Mermaid erDiagram (y copies it, s saves it)'],
       ['C', 'Copy the table\'s rows, and the rows they refer to, to another connection, personal data made up (/copy-rows)'],
       ['/find <text>', 'Filter by name'],
       ['/grep <text>', 'Search inside every view, procedure, function and trigger; ↵ its CREATE script, at the match'],
@@ -100,7 +101,8 @@ export const HELP = [
       ['[ ]', 'Previous, next result set'],
       ['↵', 'The row as a record, one column per line'],
       ['v', 'The whole value of the cell (/cell): JSON and XML laid out, long text wrapped, binary as hex'],
-      ['x', 'Export (/export <file.csv|file.json|file.md>)'],
+      ['x', 'Export: pick CSV, Excel, JSON or Markdown, then /export <file> is in the prompt to name it (.xlsx: every result set, a sheet each, numbers and dates as such)'],
+      ['b', 'Chart the result set (/chart [bars|line|histogram|scatter] [x] [y…]): a date and numbers draw a line over time, text and a number sorted bars, one number a histogram, two a scatter; esc back to the grid'],
       ['m', 'More rows: when the row limit cut the result off, run it again for another limit\'s worth (/more); the cursor, sort and filter stay'],
       ['o', 'Sort by the column: A to Z, then Z to A, then as it came (the query doesn\'t run again)'],
       ['f', 'Filter: only rows with a value containing the text (/filter <text>; empty shows them all)'],
@@ -145,6 +147,14 @@ export const HELP = [
     ],
   },
   {
+    title: 'Backup and restore',
+    about: 'connections that are neither production nor read-only',
+    rows: [
+      ['/backup [file]', 'SQL Server: BACKUP DATABASE … WITH COPY_ONLY to the server\'s default backup folder (or a whole path on the server), and says where it went; Postgres: pg_dump -Fc, MySQL: mysqldump, to a file here (~/.trawl/backups unless named). esc cancels'],
+      ['/restore <file> [--as <database>]', 'The backup into the database it was of, or --as another: made new, or replaced after asking (SQL Server puts its other sessions out; files moved to the server\'s data folders); pg_restore and mysql for the others. Azure SQL Database has neither: export a .bacpac from the portal'],
+    ],
+  },
+  {
     title: 'CSV import',
     rows: [
       ['/import-csv <file.csv> <table> [--run]', 'The file\'s rows as INSERTs into the table, columns matched to its header (case, spaces and _ ignored; identity columns left out); comma, semicolon or tab, quotes and line breaks inside them. They open in a console tab to read; --run runs them (the usual checks apply).'],
@@ -168,6 +178,8 @@ export const HELP = [
       ['/take <family:v1:…>', 'What a sibling copied: a query goes into a console tab (on the saved connection it was for), rows into an INSERT script; pasting the bare family:v1:… works too'],
       ['/share [query|rows|all]', 'Copy a /take line: the console\'s statement, or in Results the row under the cursor (all: every row); t in both'],
       ['/family', 'What this project offers the others: Splice /open <repo>, Bosun /move <dir>, Hail /open <file> per .http file; ↵ copies it'],
+      ['/timeline', 'What all five apps did that changed something, newest first (Trawl adds its writes that took effect, COMMIT and ROLLBACK, /copy-rows, /backup and /restore: the kinds of statement, the connection and the rows, never the SQL\'s values); p this project or all, ↵ an entry whole'],
+      ['/wiring', 'What this project points at, by file: appsettings*.json, .env files, Hail\'s http-client env files; addresses, hosts, ports and connection strings, secrets masked'],
       ['/project', 'The databases appsettings*.json and .env files name that aren\'t saved yet: ↵ adds one (a password in the file is kept in the OS store, after asking)'],
       ['paste', 'A command pasted over a view (not while typing) goes into the prompt, to run with ↵'],
       ['moods', 'Glim tells the others how it feels, and says in a line when one of them is worried, sad or happy (esc dismisses it); "Family moods" in Settings turns it off'],

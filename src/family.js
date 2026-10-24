@@ -1,7 +1,7 @@
 // What the sibling apps (splice, trawl, sonar, bosun, hail) share about each other: what one copies
-// for another, the project a folder is, and the mascots' moods. The same file in every app
-// (scripts/shared-check.js), so it names no app as "this".
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync, renameSync } from 'node:fs';
+// for another, the project a folder is and what it points at, the mascots' moods, and what each app
+// did. The same file in every app (scripts/shared-check.js), so it names no app as "this".
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync, renameSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
@@ -306,6 +306,76 @@ export function projectAt(dir) {
   return { dir: root, repo: repoRoot(root), crew, httpFiles: httpFilesIn(root), databases };
 }
 
+// Secrets never leave this file whole: values are masked before anything shows or keeps them.
+const SECRET_KEY = /pass(word)?|pwd|secret|token|api[-_]?key|access[-_]?key|account[-_]?key|private|credential|signature|sas\b/i;
+const SECRET_FIELD = /^(password|pwd|accountkey|sharedaccesskey|sharedaccesssignature|client ?secret|token|apikey|api key)$/i;
+export const MASK = '••••';
+
+/** `value` safe to show: passwords in URLs and connection strings masked, the whole value when its key names a secret. */
+export function maskValue(key, value) {
+  const s = String(value ?? '');
+  if (/^[a-z][a-z0-9+.-]*:\/\/[^/\s:@]*:[^@\s/]*@/i.test(s)) return s.replace(/^([a-z][a-z0-9+.-]*:\/\/[^/\s:@]*:)[^@\s/]*@/i, `$1${MASK}@`);
+  if (/[^=;]+=[^;]*;/.test(s) && /;|=/.test(s) && /(server|data source|host|endpoint|accountname)=/i.test(s))
+    return s.replace(/(^|;)\s*([^=;]+?)\s*=\s*([^;]*)/g, (m, sep, k, v) => (SECRET_FIELD.test(k.trim()) ? `${sep}${k}=${MASK}` : m));
+  if (/\bBearer\s+\S+/i.test(s)) return s.replace(/\b(Bearer\s+)\S+/gi, `$1${MASK}`);
+  return SECRET_KEY.test(String(key ?? '')) && s ? MASK : s;
+}
+
+/** Free text with what looks like a secret in it masked: key=value pairs named as secrets, bearer tokens, URL passwords. */
+export function redactSecrets(text) {
+  return String(text ?? '')
+    .replace(/([a-z][a-z0-9+.-]*:\/\/[^/\s:@]*:)[^@\s/]+@/gi, `$1${MASK}@`)
+    .replace(/\b(Bearer\s+)[A-Za-z0-9._~+/=-]+/gi, `$1${MASK}`)
+    .replace(/\b((?:pass(?:word)?|pwd|secret|token|api[-_]?key|accountkey|sharedaccesskey)\s*[=:]\s*)("[^"]*"|'[^']*'|[^\s;,&]+)/gi, `$1${MASK}`);
+}
+
+const WIRING_KEY = /url|uri|host|endpoint|connection|port|database|server|base[-_]?address|address|origin|domain|dsn/i;
+const looksWired = (key, value) => WIRING_KEY.test(key) || /^[a-z][a-z0-9+.-]*:\/\//i.test(value) || Boolean(databaseOf(value));
+
+/**
+ * What the project in `dir` points at, for one view in every app: [{ key, value, source }] from its
+ * appsettings*.json (every setting, by its section path), .env files and Hail's http-client env files
+ * (`env:name.key`), keeping addresses, hosts, ports and connection strings, every value through maskValue.
+ */
+export function projectWiring(dir) {
+  const root = resolve(dir);
+  const out = [];
+  const add = (key, value, source) => {
+    if (typeof value !== 'string' && typeof value !== 'number') return;
+    const v = String(value);
+    if (v && looksWired(key, v)) out.push({ key, value: maskValue(key, v), source });
+  };
+  const walk = (obj, prefix, source) => {
+    for (const [k, v] of Object.entries(obj ?? {})) {
+      const key = prefix ? `${prefix}:${k}` : k;
+      if (v && typeof v === 'object' && !Array.isArray(v)) walk(v, key, source);
+      else add(key, v, source);
+    }
+  };
+  let files = [];
+  try {
+    files = readdirSync(root);
+  } catch {}
+  for (const f of files.filter((f) => /^appsettings(\.[\w-]+)?\.json$/i.test(f))) {
+    try {
+      walk(JSON.parse(safeRead(join(root, f)).replace(/^﻿/, '')), '', f);
+    } catch {}
+  }
+  for (const f of files.filter((f) => /^\.env(\.[\w-]+)?$/.test(f) && !/\.example$/.test(f))) {
+    for (const line of (safeRead(join(root, f)) ?? '').split(/\r?\n/)) {
+      const m = /^\s*(?:export\s+)?([A-Za-z_][\w.]*)\s*=\s*(['"]?)(.*)\2\s*$/.exec(line);
+      if (m) add(m[1], m[3], f);
+    }
+  }
+  for (const f of ['http-client.env.json', 'http-client.private.env.json']) {
+    try {
+      const envs = JSON.parse(safeRead(join(root, f)) ?? 'null') ?? {};
+      for (const [env, vars] of Object.entries(envs)) if (vars && typeof vars === 'object') for (const [k, v] of Object.entries(vars)) add(`env:${env}.${k}`, v, f);
+    } catch {}
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------------------------------------------
 // Moods: each app writes how its mascot feels, and why, to one small file per app in the family's
 // folder (~/.family, or FAMILY_HOME), so the others can react to it.
@@ -335,4 +405,51 @@ export function readMoods(self, { dir = familyDir(), now = Date.now(), maxAge = 
     } catch {}
   }
   return out.sort((a, b) => b.at - a.at);
+}
+
+// ---------------------------------------------------------------------------------------------------
+// The family's activity: each app adds what it did that changes something (a push, a write to a
+// database, a restart, a crash) to one log in the family's folder, so any of them can show what
+// happened, in order, across all five. Nothing secret goes in: the text is passed through redactSecrets.
+
+const ACTIVITY_FILE = 'activity.jsonl';
+const ACTIVITY_MAX = 1024 * 1024;
+
+/** Adds `{ text, kind?, project? }` from `app` to the family's activity log; never throws. */
+export function logActivity(app, { text, kind = 'info', project } = {}, { dir = familyDir(), now = Date.now(), max = ACTIVITY_MAX } = {}) {
+  try {
+    mkdirSync(dir, { recursive: true });
+    const file = join(dir, ACTIVITY_FILE);
+    const line = JSON.stringify({ at: now, app, kind, text: redactSecrets(text).slice(0, 500), ...(project ? { project: resolve(project) } : {}) }) + '\n';
+    appendFileSync(file, line);
+    if (statSync(file).size > max) {
+      // Keep the newer half, from a whole line.
+      const kept = readFileSync(file, 'utf8').slice(-Math.floor(max / 2));
+      writeFileSync(`${file}.tmp`, kept.slice(kept.indexOf('\n') + 1));
+      renameSync(`${file}.tmp`, file);
+    }
+  } catch {}
+}
+
+/** The activity log, newest first: [{ at, app, kind, text, project? }], since `since` (ms), for `project` (and entries with none) when given, at most `limit`. */
+export function readActivity({ dir = familyDir(), since = 0, project, limit = 200 } = {}) {
+  let text = '';
+  try {
+    text = readFileSync(join(dir, ACTIVITY_FILE), 'utf8');
+  } catch {
+    return [];
+  }
+  const want = project ? resolve(project) : null;
+  const out = [];
+  const lines = text.split('\n');
+  for (let i = lines.length - 1; i >= 0 && out.length < limit; i--) {
+    if (!lines[i]) continue;
+    try {
+      const e = JSON.parse(lines[i]);
+      if (e.at < since) break;
+      if (want && e.project && e.project !== want) continue;
+      out.push(e);
+    } catch {}
+  }
+  return out;
 }

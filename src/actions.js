@@ -33,14 +33,21 @@ import { TOOLS, createPlainSql, historySql, migrationStatus, nextRank, parseFlyw
 import { generateScript, refValuesSql } from './generate.js';
 import { LANGUAGE_NAMES, LANGUAGES, languageOf, scaffold } from './scaffold.js';
 import { UNDO_ROWS, reverseScript, snapshotOf, snapshotRows, snapshotSummary, undoPlan, withSnapshot } from './undo.js';
-import { loadUndo, saveUndo } from './config.js';
+import { configDir, loadUndo, saveUndo } from './config.js';
+import { hostname } from 'node:os';
+import { AZURE_SQL_NOTE, BACKUP_INFO_SQL, absoluteOnServer, backupPath, backupRefusal, backupSql, dumpCommand, fileSafe, loadCommand, multiUserSql, notInstalled, onThisMachine, parseBackupArgs, restoreFilesSql, restoreHeaderSql, restoreMoves, restoreSql, stamp, toolsFor } from './backup.js';
 import { relTime } from './text.js';
-import { APP_NAMES, TAKEN_BY, contextIn, copiedNote, notMine, projectAt, quoteArg, takeLine } from './family.js';
+import { APP_NAMES, TAKEN_BY, contextIn, copiedNote, familyDir, notMine, pathArg as familyPath, projectAt, projectWiring, quoteArg, readActivity, takeLine } from './family.js';
+import { timelineItems, wiringText } from './timeline.js';
 import { connectionForQuery, familyOffers, newDatabases, placeText, projectLine, queryContext, rowsContext, rowsScript } from './siblings.js';
 import { API_LANGUAGES, API_SYSTEM, apiFileName, apiLanguage, apiPrompt, apiRequest, parseApi, projectLanguage } from './api.js';
 import { copyRefusal, copyScript, foreignKeysFrom, insertOrder, insertedRows, keyTuples, maskRows, parentSql, parseCopyRowsArgs, rowKey, rowsSql, selfOrder, tupleKey } from './copyrows.js';
 import { rehearsalRefusal, rehearsalSteps, rehearsalText, rowsAffected } from './rehearse.js';
 import { locksText } from './transactions.js';
+import { chartTitle, drawChart, planChart } from './chart.js';
+import { toXlsx } from './xlsx.js';
+import { diagramGraph, drawDiagram, mermaidDiagram, parseDiagramArgs } from './diagram.js';
+import { theme } from './theme.js';
 import { applySqlcmd, bindVariables, classifyScript, countQuery, oneLine, scriptVariables, splitStatements, sqlcmdVariables, statementAt, toCsv, toJson, toMarkdown, withoutLeadingComments } from './sql.js';
 
 // A WHERE that still changes more rows than this is asked about too.
@@ -1806,17 +1813,132 @@ export function copyResults(ctx, format) {
   return ctx.copy(text, f === 'tsv' ? `${n}, tab-separated` : f === 'insert' ? `${n} as INSERT statements${source ? '' : ` (into ${table}: rename it)`}` : f === 'md' ? `${n} as a Markdown table` : `${n} as ${f.toUpperCase()}`);
 }
 
+/**
+ * /diagram [table] [--depth n] [--mermaid] (D in the Explorer): the table's foreign keys out to n
+ * levels both ways (every table without one), as boxes and lines; m there (or --mermaid) gives the
+ * Mermaid erDiagram, to copy (y) or save (s).
+ */
+export function diagram(ctx, rest = '') {
+  if (!needSession(ctx)) return;
+  if (!ctx.schema) return ctx.note('The schema is still loading: try again in a moment.', 'error');
+  const args = parseDiagramArgs(splitArgs(rest ?? ''));
+  if (args.reason) return ctx.note(args.reason, 'error');
+  const graph = diagramGraph(ctx.schema, args.table, { depth: args.depth });
+  if (graph.reason) return ctx.note(graph.reason, 'error');
+  const label = graph.root ?? ctx.schema.database;
+  if (args.mermaid) return showMermaid(ctx, graph, label);
+  const tables = plural(graph.nodes.length, 'table');
+  const title = graph.root ? `${graph.root}: its keys ${plural(args.depth, 'level')} out both ways · ${tables}` : `Every table in ${label} · ${tables}`;
+  const colors = () => ({ line: theme.dim, box: theme.border, root: theme.accent, name: theme.table, pk: theme.number, fk: theme.view, text: undefined });
+  ctx.showText(title, '', { draw: (width) => drawDiagram(graph, { width, colors: colors() }), hint: '▶ points at the table referred to · m Mermaid', keys: { m: () => showMermaid(ctx, graph, label) } });
+}
+
+function showMermaid(ctx, graph, label) {
+  const text = mermaidDiagram(graph);
+  const again = () => showMermaid(ctx, graph, label);
+  ctx.rememberOutput(`Mermaid erDiagram: ${label}`, text);
+  ctx.showText(`Mermaid erDiagram: ${label}`, text, {
+    hint: 'y copy · s save',
+    keys: {
+      y: async () => {
+        await ctx.copy(text, 'the Mermaid diagram');
+        again();
+      },
+      s: async () => {
+        await saveText(ctx, text, { title: 'Save the Mermaid diagram as', value: `${label.replace(/[^\w.-]+/g, '_')}.mmd`, what: 'the Mermaid diagram' });
+        again();
+      },
+    },
+  });
+}
+
+/** Asks for a file name (in the project's folder unless a path is given) and writes `text` there, asking before replacing one. */
+async function saveText(ctx, text, { title, value, what }) {
+  const dir = ctx.projectDir;
+  const name = await ctx.askText({ title, detail: `A path in ${dir}, or one of your own.`, value });
+  if (!name?.trim()) return false;
+  const full = resolve(dir, pathArg(name));
+  try {
+    statSync(full);
+    const ok = await ctx.confirm({ title: `${basename(full)} is there already. Replace it?`, detail: full, options: YES_NO('Yes, replace it') });
+    if (!ok) return false;
+  } catch {}
+  try {
+    mkdirSync(dirname(full), { recursive: true });
+    await writeFile(full, text, 'utf8');
+    ctx.note(`Saved ${what} to ${full}.`, 'ok');
+    return true;
+  } catch (e) {
+    ctx.note(`Couldn't write ${full}: ${firstLine(e.message)}`, 'error');
+    return false;
+  }
+}
+
+const CHART_NAMES = { bars: 'Bars', line: 'Line', histogram: 'Histogram', scatter: 'Scatter' };
+
+/**
+ * /chart [type] [x] [y…] (b in Results): the result set on screen as a chart (chart.js), over the
+ * grid; esc goes back to it. The colours are the theme's, read as it draws.
+ */
+export function chart(ctx, rest = '') {
+  const set = ctx.currentSet();
+  const plan = planChart(set, splitArgs(rest ?? ''));
+  if (plan.reason) return ctx.note(plan.reason, 'error');
+  ctx.setView('results');
+  const draw = (width, height) => {
+    const colors = { axis: theme.border, label: theme.dim, negative: theme.del, series: [theme.accent, theme.number, theme.ok, theme.routine, theme.view, theme.warn] };
+    // Two lines under it say what it was drawn from; the chart takes the rest.
+    const { lines, about } = drawChart(set, plan, { width, height: Math.max(5, height - 3), colors });
+    return [...lines, '', ...wrap(about, Math.max(10, width)).slice(0, 2).map((l) => [{ text: l, color: theme.dim }])];
+  };
+  ctx.showText(`${CHART_NAMES[plan.type]}: ${chartTitle(set, plan)}`, '', { draw, hint: plan.picked ? '/chart <type> <x> <y…> picks another' : '' });
+}
+
 const EXPORTS = { '.csv': toCsv, '.json': toJson, '.md': toMarkdown, '.markdown': toMarkdown };
 
-/** Writes the result set on screen to a .csv, .json or .md (a Markdown table) file. */
+const EXPORT_CHOICES = [
+  { ext: 'csv', label: 'CSV', detail: 'comma-separated, a header line, for any spreadsheet or tool' },
+  { ext: 'xlsx', label: 'Excel', detail: 'a workbook: a sheet per result set, a bold header, numbers and dates as such' },
+  { ext: 'json', label: 'JSON', detail: 'an array of objects, one per row' },
+  { ext: 'md', label: 'Markdown', detail: 'a table, for a pull request or a wiki' },
+];
+
+/** x in Results: which kind of file, then /export with a name for it in the prompt, to change or run. */
+export function chooseExport(ctx) {
+  const set = ctx.currentSet();
+  if (!set) return ctx.note('Run a query first: there is nothing to export.', 'error');
+  const res = ctx.results;
+  const table = res?.edit?.table ?? res?.source?.table;
+  const base = table ? String(table.name).replace(/[^\w.-]+/g, '_') : 'results';
+  ctx.showPicker({
+    title: 'Export the result set as',
+    hint: '↵ /export with a name, to change or run',
+    items: EXPORT_CHOICES.map((c) => ({ label: c.label, detail: `${base}.${c.ext}`, text: `${c.detail}.\n\n/export ${base}.${c.ext}${c.ext === 'xlsx' && res.sets.length > 1 ? `\n\nAll ${res.sets.length} result sets, a sheet each.` : ''}`, choice: c })),
+    keys: { return: (it) => ctx.prefill(`/export ${base}.${it.choice.ext}`) },
+  });
+}
+
+/**
+ * Writes the result set on screen to a .csv, .json or .md (a Markdown table) file, or every result
+ * set of the run to an .xlsx workbook, a sheet each.
+ */
 export async function exportResults(ctx, path) {
   const set = ctx.currentSet();
   if (!set) return ctx.note('Run a query first: there is nothing to export.', 'error');
-  if (!path) return ctx.prefill('/export ');
-  const full = resolve(path);
-  const format = EXPORTS[extname(full).toLowerCase()];
-  if (!format) return ctx.note('Export to a .csv, .json or .md file.', 'error');
+  if (!path) return chooseExport(ctx);
+  const full = resolve(pathArg(path));
+  const ext = extname(full).toLowerCase();
+  const format = EXPORTS[ext];
+  if (!format && ext !== '.xlsx') return ctx.note('Export to a .csv, .xlsx, .json or .md file.', 'error');
   try {
+    if (ext === '.xlsx') {
+      const sets = ctx.results?.sets?.length ? ctx.results.sets : [set];
+      const table = ctx.results?.edit?.table ?? ctx.results?.source?.table;
+      await writeFile(full, toXlsx(sets, { names: sets.length === 1 && table ? [table.name] : undefined }));
+      const cut = sets.filter((s) => s.truncated).length;
+      const rows = sets.map((s) => plural(s.rows.length, 'row')).join(', ');
+      return ctx.note(`Wrote ${sets.length === 1 ? rows : `${sets.length} sheets (${rows})`} to ${full}${cut ? ` (the row limit cut ${sets.length === 1 ? 'it' : `${cut} of them`} off: raise /limit for more)` : ''}`, 'ok');
+    }
     await writeFile(full, format(set), 'utf8');
     ctx.note(`Wrote ${set.rows.length} row${set.rows.length === 1 ? '' : 's'} to ${full}${set.truncated ? ` (only the first ${set.rows.length}: raise /limit for more)` : ''}`, 'ok');
   } catch (e) {
@@ -2524,7 +2646,7 @@ export async function copyRowsTo(ctx, rest) {
         s = await ctx.openSession(target, { signal });
         const out = await s.run(script, { signal, limit: 1 });
         const inserted = insertedRows(out.messages);
-        ran = { database: s.database, summary: `${inserted} of ${rows} rows inserted (/copy-rows)` };
+        ran = { database: s.database, summary: `${inserted} of ${rows} rows inserted (/copy-rows)`, inserted };
         return [`${plural(inserted, 'row')} went in${rows - inserted ? `; ${plural(rows - inserted, 'row')} ${rows - inserted === 1 ? 'was' : 'were'} there already` : ''}.`];
       } catch (e) {
         if (e.needsPassword) e.message = `${target.name} needs its password: connect to it once in Trawl to save it, then copy again.`;
@@ -2540,6 +2662,7 @@ export async function copyRowsTo(ctx, rest) {
     { label: `Copying to ${target.name}` },
   );
   if (ran) ctx.recordRun({ sql: script, conn: target.name, database: ran.database, at: Date.now(), ok: done.ok, summary: ran.summary });
+  if (done.ok) ctx.logActivity?.(`/copy-rows ${objectName(obj)} from ${session.conn.name}/${session.database} to ${target.name}${ran.database ? `/${ran.database}` : ''} · ${plural(ran.inserted, 'row')} inserted${args.mask ? ', personal data made up' : ''}`, { kind: 'copy' });
   return done;
 }
 
@@ -2625,4 +2748,258 @@ export async function rehearse(ctx, rest = '') {
   ctx.rememberOutput(title, report);
   ctx.showText(title, report);
   return r;
+}
+
+// ---------------------------------------------------------------------------------------------------
+// /backup and /restore (backup.js): on a connection that is neither production nor read-only.
+
+/** Where it stands before a backup or a restore: the connection, its kind, or null after saying why not. */
+function backupTarget(ctx, rest, { restore = false } = {}) {
+  // A path quoted by hand keeps its backslashes; one quoted by quoteArg comes back as it was.
+  const words = [...String(rest ?? '').matchAll(/"(?:[^"\\]|\\.)*"|\S+/g)].map((m) => familyPath(m[0]));
+  const args = parseBackupArgs(words, { restore });
+  if (args.reason) return void ctx.note(args.reason, 'error');
+  const { conn } = ctx.session;
+  const { kind } = dialectOf(ctx.session);
+  const refusal = backupRefusal(conn, kind);
+  if (refusal) return void ctx.note(refusal, 'error');
+  if (ctx.tranCount) return void ctx.note(`A transaction is open on ${conn.name}: /commit or /rollback it first (${restore ? 'RESTORE' : 'BACKUP'} can't run inside one).`, 'error');
+  return { args, conn, kind };
+}
+
+/** /backup [file]: the database you're in, to a file (on the server, for SQL Server). */
+export async function backup(ctx, rest = '') {
+  if (!(await liveSession(ctx))) return;
+  const t = backupTarget(ctx, rest);
+  if (!t) return;
+  const database = ctx.session.database;
+  if (t.kind !== 'sqlserver') return dumpWithTool(ctx, t, database);
+  const info = await serverInfo(ctx);
+  if (!info) return;
+  if (Number(info.engine_edition) === 5) return ctx.note(AZURE_SQL_NOTE, 'error');
+  const path = backupPath(info, database, t.args.file);
+  if (!path) return ctx.note(`${t.conn.name} didn't say where it keeps backups: give a whole path on the server, as /backup C:\\Backups\\${database}.bak.`, 'error');
+  const here = onThisMachine(t.conn, info.machine, hostname());
+  const r = await ctx.query(backupSql(database, path), {
+    title: `BACKUP DATABASE ${database} (copy-only)`,
+    activity: false,
+    // A name in the backup folder is all /restore needs; a path elsewhere is typed whole.
+    notes: [`The backup is ${here ? 'on this machine' : `on the server${info.machine ? ` (${info.machine})` : ''}, not this machine`}: ${path}`, `/restore ${typedPath(t.args.file && absoluteOnServer(t.args.file) ? path : path.split(/[\\/]/).at(-1))} puts it back (--as <database> beside it).`],
+  });
+  if (r?.ok) ctx.logActivity?.(`BACKUP DATABASE ${database} on ${t.conn.name}`, { kind: 'backup' });
+  return r;
+}
+
+/** /restore <file> [--as <database>]: a backup into a database, made or replaced (after asking). */
+export async function restore(ctx, rest = '') {
+  if (!(await liveSession(ctx))) return;
+  const t = backupTarget(ctx, rest, { restore: true });
+  if (!t) return;
+  if (t.kind !== 'sqlserver') return loadWithTool(ctx, t);
+  const info = await serverInfo(ctx);
+  if (!info) return;
+  if (Number(info.engine_edition) === 5) return ctx.note(AZURE_SQL_NOTE, 'error');
+  const path = backupPath(info, null, t.args.file);
+  if (!path) return ctx.note(`${t.conn.name} didn't say where it keeps backups: give the backup's whole path on the server.`, 'error');
+  const session = ctx.session;
+  let header = null;
+  let files = [];
+  const read = await ctx.task(
+    `read the backup ${path}`,
+    async (signal) => {
+      header = rowsOf((await session.run(restoreHeaderSql(path), { signal, limit: 100 })).sets.at(-1)).at(-1) ?? null;
+      files = rowsOf((await session.run(restoreFilesSql(path), { signal, limit: 1000 })).sets.at(-1));
+      return [];
+    },
+    { label: 'Reading the backup', quiet: true },
+  );
+  if (!read.ok) return;
+  const target = t.args.as ?? header?.DatabaseName;
+  if (!target) return ctx.note("The backup doesn't say which database it was: name one with --as <database>.", 'error');
+  const replace = (ctx.schema?.databases ?? []).some((d) => d.toLowerCase() === target.toLowerCase());
+  const of = `a backup of ${header?.DatabaseName ?? 'a database'}${header?.BackupFinishDate ? ` taken ${formatWhen(header.BackupFinishDate)}` : ''}`;
+  const ok = await ctx.confirm(
+    replace
+      ? {
+          title: `Replace ${target} on ${t.conn.name} with the backup?`,
+          detail: `Everything in ${target} now is lost, and its other sessions are put out (ROLLBACK IMMEDIATE). ${path}: ${of}.`,
+          options: YES_NO(`Yes, replace ${target}`),
+          danger: true,
+        }
+      : { title: `Restore the backup as a new database, ${target}?`, detail: `${path}: ${of}. Its files go in the server's data and log folders, named after ${target}.`, options: YES_NO('Yes, restore it') },
+  );
+  if (!ok) return;
+  const before = session.database;
+  const moves = restoreMoves(files, target, info);
+  const back = `\nUSE ${dialectOf(session).quote(before)};`;
+  const r = await ctx.query(restoreSql({ target, path, moves, replace }) + back, { title: `RESTORE DATABASE ${target}${replace ? ' (replacing it)' : ''}`, activity: false, notes: moves.map((m) => `${m.logical} → ${m.to}`) });
+  if (r?.ok) {
+    ctx.logActivity?.(`RESTORE DATABASE ${target} on ${t.conn.name}${replace ? ', replacing it' : ''}`, { kind: 'restore' });
+    return r;
+  }
+  // A failed restore leaves the database for anyone again, and Trawl where it was.
+  await ctx.task(
+    'tidy up after the restore',
+    async (signal) => {
+      if (replace) await session.run(`USE master;\n${multiUserSql(target)}`, { signal }).catch(() => {});
+      if (session.database !== before) await session.run(`USE ${dialectOf(session).quote(before)};`, { signal }).catch(() => ctx.note(`Couldn't go back to ${before}: /use a database.`, 'error'));
+      return [];
+    },
+    { label: 'Tidying up after the restore', quiet: true },
+  );
+  ctx.refresh();
+  return r;
+}
+
+// A path as typed at the prompt: quoted when it has spaces (backslashes stay as they are).
+const typedPath = (p) => (/[\s"]/.test(p) ? `"${p}"` : p);
+
+const formatWhen = (v) => (v instanceof Date ? v.toISOString().slice(0, 16).replace('T', ' ') : String(v));
+
+/** SQL Server's default backup, data and log folders, its edition and its machine's name; null after saying why not. */
+async function serverInfo(ctx) {
+  let info = null;
+  const r = await ctx.task(
+    "read the server's backup folder",
+    async (signal) => {
+      info = rowsOf((await ctx.session.run(BACKUP_INFO_SQL, { signal, limit: 1 })).sets.at(-1))[0] ?? {};
+      return [];
+    },
+    { label: "Reading the server's backup folder", quiet: true },
+  );
+  return r.ok ? info : null;
+}
+
+/** The login's password for a tool's environment (never its command line), or undefined after saying why not. */
+async function toolPassword(ctx, conn) {
+  if (!conn.user) return null;
+  try {
+    return await ctx.passwordFor(conn);
+  } catch (e) {
+    ctx.note(firstLine(e.message), 'error');
+    return undefined;
+  }
+}
+
+const fileSize = (p) => {
+  try {
+    const n = statSync(p).size;
+    return n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`;
+  } catch {
+    return null;
+  }
+};
+
+async function runTool(ctx, tool, kind, command, env, { title, label, cwd }) {
+  const tools = toolsFor(kind);
+  return ctx.task(
+    title,
+    async (signal) => {
+      try {
+        await ctx.runProgram(command, { signal, env, cwd });
+      } catch (e) {
+        if (e.cancelled) throw e;
+        if (notInstalled(e)) throw new Error(`${tool} isn't installed, or isn't on PATH: it comes with ${tools.from}.`);
+        throw new Error(`${tool}: ${firstLine(e.message)}`);
+      }
+      return [];
+    },
+    { label },
+  );
+}
+
+async function dumpWithTool(ctx, { args, conn, kind }, database) {
+  const tools = toolsFor(kind);
+  const full = args.file ? resolve(pathArg(args.file)) : join(configDir(), 'backups', `${fileSafe(conn.name)}-${fileSafe(database)}-${stamp()}.${tools.ext}`);
+  const password = await toolPassword(ctx, conn);
+  if (password === undefined) return;
+  try {
+    mkdirSync(dirname(full), { recursive: true });
+  } catch (e) {
+    return ctx.note(`Couldn't make ${dirname(full)}: ${firstLine(e.message)}`, 'error');
+  }
+  const { command, env } = dumpCommand(conn, kind, { database, file: full, password });
+  const r = await runTool(ctx, tools.dump, kind, command, env, { title: `${tools.dump} ${database} on ${conn.name}`, label: `Backing up ${database} with ${tools.dump}`, cwd: dirname(full) });
+  if (!r.ok) {
+    // Half a dump is no backup.
+    try {
+      unlinkSync(full);
+    } catch {}
+    return r;
+  }
+  const size = fileSize(full);
+  ctx.note(`Backed up ${database} to ${full}${size ? ` (${size})` : ''}.\n/restore ${typedPath(full)} puts it back (--as <database> beside it).`, 'ok');
+  ctx.logActivity?.(`${tools.dump} ${database} on ${conn.name}`, { kind: 'backup' });
+  return r;
+}
+
+async function loadWithTool(ctx, { args, conn, kind }) {
+  const tools = toolsFor(kind);
+  const full = resolve(pathArg(args.file));
+  try {
+    statSync(full);
+  } catch {
+    return ctx.note(`No file ${full}.`, 'error');
+  }
+  const session = ctx.session;
+  const d = dialectOf(session);
+  const target = args.as ?? session.database;
+  const replace = (ctx.schema?.databases ?? []).some((x) => x.toLowerCase() === target.toLowerCase());
+  const what = kind === 'postgres' ? "what the backup has is dropped and made again from it (--clean); anything else in it stays" : 'its tables that the backup has are dropped and made again from it; anything else in it stays';
+  const ok = await ctx.confirm(
+    replace
+      ? { title: `Restore ${basename(full)} over ${target} on ${conn.name}?`, detail: `In ${target}, ${what}.`, options: YES_NO(`Yes, restore over ${target}`), danger: true }
+      : { title: `Make the database ${target} on ${conn.name} and restore ${basename(full)} into it?`, detail: `With ${tools.load}, from ${full}.`, options: YES_NO('Yes, restore it') },
+  );
+  if (!ok) return;
+  const password = await toolPassword(ctx, conn);
+  if (password === undefined) return;
+  if (!replace) {
+    const made = await ctx.task(`CREATE DATABASE ${target}`, async (signal) => {
+      await session.run(`CREATE DATABASE ${d.quote(target)};`, { signal });
+      return [];
+    });
+    if (!made.ok) return made;
+  }
+  const { command, env } = loadCommand(conn, kind, { database: target, file: full, password, replace });
+  const r = await runTool(ctx, tools.load, kind, command, env, { title: `${tools.load} ${basename(full)} into ${target} on ${conn.name}`, label: `Restoring ${target} with ${tools.load}`, cwd: dirname(full) });
+  if (r.ok) {
+    ctx.note(`Restored ${basename(full)} into ${target}.`, 'ok');
+    ctx.logActivity?.(`${tools.load} into ${target} on ${conn.name}${replace ? ', over what was there' : ''}`, { kind: 'restore' });
+  }
+  ctx.refresh();
+  return r;
+}
+
+// ---------------------------------------------------------------------------------------------------
+// The family's activity log and a project's wiring.
+
+/**
+ * /timeline: what the five apps did that changed something (family.js readActivity), newest first;
+ * `p` switches between this project's and everything, ↵ shows an entry whole.
+ */
+export function timeline(ctx, { all = false } = {}) {
+  const dir = ctx.familyHome ?? familyDir();
+  const project = ctx.projectDir;
+  const entries = readActivity({ dir, project: all ? undefined : project, limit: 500 });
+  const where = all ? 'all projects' : basename(project) || project;
+  ctx.showPicker({
+    title: `The family's timeline · ${where}`,
+    hint: `↵ the whole entry · p ${all ? 'this project only' : 'all projects'}`,
+    empty: all ? `Nothing yet: the family's apps add what they do that changes something (a write, a push, a restart) to ${dir}.` : `Nothing for ${project} yet: p shows every project's.`,
+    items: timelineItems(entries),
+    keys: {
+      return: (it) => ctx.showText(`${it.label.trim()}: ${it.detail}`.slice(0, 80), it.text),
+      p: () => timeline(ctx, { all: !all }),
+    },
+    free: ['p'],
+  });
+}
+
+/** /wiring: what the project points at (addresses, hosts, ports, connection strings), by file, secrets masked. */
+export function wiring(ctx) {
+  const dir = ctx.projectDir;
+  const text = wiringText(dir, projectWiring(dir));
+  ctx.rememberOutput(`Wiring: ${basename(dir) || dir}`, text);
+  ctx.showText(`Wiring: ${basename(dir) || dir}`, text);
 }

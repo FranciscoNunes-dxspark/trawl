@@ -7,12 +7,14 @@ import { Panel, Row } from './parts.jsx';
 /**
  * Full-height scrollable text: /describe, a record, the last output, help. `pageOnly`: a question
  * below has the other keys, so only page up/down scroll this. `keys` maps a letter to an action of
- * this text's own, which `hint` names.
+ * this text's own, which `hint` names. `draw` ((width, height) => lines of segments, or strings) draws
+ * coloured lines in place of the text, at the room there is, while drawing (a chart, a diagram).
  */
-export function TextViewer({ title, text, loading, keys, hint, ctx, width, height, active, pageOnly = false, onClose }) {
-  const lines = useMemo(() => (text ?? '').replace(/\n$/, '').split('\n'), [text]);
-  const [offset, setOffset] = useState(0);
+export function TextViewer({ title, text, draw, loading, keys, hint, ctx, width, height, active, pageOnly = false, onClose }) {
   const innerH = height - 2;
+  const plain = useMemo(() => (text ?? '').replace(/\n$/, '').split('\n'), [text]);
+  const lines = draw ? draw(width - 2, innerH) : plain;
+  const [offset, setOffset] = useState(0);
   const max = Math.max(0, lines.length - innerH);
   const to = (n) => setOffset(Math.max(0, Math.min(max, n)));
 
@@ -42,7 +44,7 @@ export function TextViewer({ title, text, loading, keys, hint, ctx, width, heigh
       {loading ? (
         <Row pointer={false} width={width - 2} segments={[{ text: 'Loading…', color: theme.dim }]} />
       ) : (
-        lines.slice(offset, offset + innerH).map((l, i) => <Row key={offset + i} pointer={false} width={width - 2} segments={[{ text: l }]} />)
+        lines.slice(offset, offset + innerH).map((l, i) => <Row key={offset + i} pointer={false} width={width - 2} segments={typeof l === 'string' ? [{ text: l }] : l} />)
       )}
     </Panel>
   );

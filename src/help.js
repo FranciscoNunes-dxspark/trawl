@@ -37,6 +37,7 @@ export const HELP = [
       ['s', 'Start a query on it in the console'],
       ['c', 'Its CREATE script, into the console (a table\'s from the catalog; others\' from the server)'],
       ['u', 'What uses it and what it uses (/uses): views, routines, triggers, foreign keys, by kind'],
+      ['D', 'Diagram of its foreign keys (/diagram [table] [--depth n] [--mermaid]): boxes with the key columns, joined by lines, ▶ pointing at the table referred to; m there gives a Mermaid erDiagram (y copies it, s saves it)'],
       ['C', 'Copy the table\'s rows, and the rows they refer to, to another connection, personal data made up (/copy-rows)'],
       ['/find <text>', 'Filter by name'],
       ['/grep <text>', 'Search inside every view, procedure, function and trigger; ↵ its CREATE script, at the match'],

@@ -32,6 +32,7 @@ export const COMMANDS = [
   { name: 'migrations', args: '[run] <folder>', desc: 'Migration scripts against the history table (Flyway, EF Core, DbUp, or Trawl\'s own): applied, pending, changed; run runs the pending (R)', run: (ctx, s) => a.migrations(ctx, s) },
   { name: 'generate', args: '<table> [rows] [--seed n]', desc: 'Rows of made-up test data as INSERTs, in a console tab of their own (nothing runs)', complete: 'objects', run: (ctx, s) => a.generateData(ctx, s) },
   { name: 'scaffold', args: '<table> [csharp|ef|ts|python]', desc: 'A C# class, EF Core entity, TypeScript interface or Python dataclass for a table or view, copied', complete: 'objects', run: (ctx, s) => a.scaffoldObject(ctx, s) },
+  { name: 'diagram', args: '[table] [--depth n] [--mermaid]', desc: "A table's foreign keys n levels out both ways (every table without one) as boxes and lines; m: Mermaid erDiagram to copy or save (D in the Explorer)", complete: 'objects', run: (ctx, s) => a.diagram(ctx, s) },
   { name: 'grep', args: '<text>', desc: 'Every view, procedure, function and trigger whose definition has the text in it: ↵ its CREATE script, at the match', run: (ctx, s) => a.grepDefinitions(ctx, s) },
   { name: 'uses', args: '<object>', desc: 'What refers to a table, view or routine, and what it refers to (u in the Explorer)', complete: 'everything', run: (ctx, s) => a.showUses(ctx, s) },
   { name: 'find', args: '[text]', desc: 'Filter the Explorer by name (empty clears it)', run: (ctx, s) => ctx.find(s) },

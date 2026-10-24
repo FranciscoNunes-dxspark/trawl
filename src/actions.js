@@ -42,6 +42,7 @@ import { copyRefusal, copyScript, foreignKeysFrom, insertOrder, insertedRows, ke
 import { rehearsalRefusal, rehearsalSteps, rehearsalText, rowsAffected } from './rehearse.js';
 import { locksText } from './transactions.js';
 import { chartTitle, drawChart, planChart } from './chart.js';
+import { diagramGraph, drawDiagram, mermaidDiagram, parseDiagramArgs } from './diagram.js';
 import { theme } from './theme.js';
 import { applySqlcmd, bindVariables, classifyScript, countQuery, oneLine, scriptVariables, splitStatements, sqlcmdVariables, statementAt, toCsv, toJson, toMarkdown, withoutLeadingComments } from './sql.js';
 
@@ -1806,6 +1807,67 @@ export function copyResults(ctx, format) {
   const text = f === 'csv' ? toCsv(set) : f === 'json' ? toJson(set) : f === 'md' ? toMarkdown(set) : f === 'insert' ? insertScript(set, table, { quote: d.quote, kind: d.kind }) : tsvText(set);
   const n = `${set.rows.length} row${set.rows.length === 1 ? '' : 's'}`;
   return ctx.copy(text, f === 'tsv' ? `${n}, tab-separated` : f === 'insert' ? `${n} as INSERT statements${source ? '' : ` (into ${table}: rename it)`}` : f === 'md' ? `${n} as a Markdown table` : `${n} as ${f.toUpperCase()}`);
+}
+
+/**
+ * /diagram [table] [--depth n] [--mermaid] (D in the Explorer): the table's foreign keys out to n
+ * levels both ways (every table without one), as boxes and lines; m there (or --mermaid) gives the
+ * Mermaid erDiagram, to copy (y) or save (s).
+ */
+export function diagram(ctx, rest = '') {
+  if (!needSession(ctx)) return;
+  if (!ctx.schema) return ctx.note('The schema is still loading: try again in a moment.', 'error');
+  const args = parseDiagramArgs(splitArgs(rest ?? ''));
+  if (args.reason) return ctx.note(args.reason, 'error');
+  const graph = diagramGraph(ctx.schema, args.table, { depth: args.depth });
+  if (graph.reason) return ctx.note(graph.reason, 'error');
+  const label = graph.root ?? ctx.schema.database;
+  if (args.mermaid) return showMermaid(ctx, graph, label);
+  const tables = plural(graph.nodes.length, 'table');
+  const title = graph.root ? `${graph.root}: its keys ${plural(args.depth, 'level')} out both ways · ${tables}` : `Every table in ${label} · ${tables}`;
+  const colors = () => ({ line: theme.dim, box: theme.border, root: theme.accent, name: theme.table, pk: theme.number, fk: theme.view, text: undefined });
+  ctx.showText(title, '', { draw: (width) => drawDiagram(graph, { width, colors: colors() }), hint: '▶ points at the table referred to · m Mermaid', keys: { m: () => showMermaid(ctx, graph, label) } });
+}
+
+function showMermaid(ctx, graph, label) {
+  const text = mermaidDiagram(graph);
+  const again = () => showMermaid(ctx, graph, label);
+  ctx.rememberOutput(`Mermaid erDiagram: ${label}`, text);
+  ctx.showText(`Mermaid erDiagram: ${label}`, text, {
+    hint: 'y copy · s save',
+    keys: {
+      y: async () => {
+        await ctx.copy(text, 'the Mermaid diagram');
+        again();
+      },
+      s: async () => {
+        await saveText(ctx, text, { title: 'Save the Mermaid diagram as', value: `${label.replace(/[^\w.-]+/g, '_')}.mmd`, what: 'the Mermaid diagram' });
+        again();
+      },
+    },
+  });
+}
+
+/** Asks for a file name (in the project's folder unless a path is given) and writes `text` there, asking before replacing one. */
+async function saveText(ctx, text, { title, value, what }) {
+  const dir = ctx.projectDir;
+  const name = await ctx.askText({ title, detail: `A path in ${dir}, or one of your own.`, value });
+  if (!name?.trim()) return false;
+  const full = resolve(dir, pathArg(name));
+  try {
+    statSync(full);
+    const ok = await ctx.confirm({ title: `${basename(full)} is there already. Replace it?`, detail: full, options: YES_NO('Yes, replace it') });
+    if (!ok) return false;
+  } catch {}
+  try {
+    mkdirSync(dirname(full), { recursive: true });
+    await writeFile(full, text, 'utf8');
+    ctx.note(`Saved ${what} to ${full}.`, 'ok');
+    return true;
+  } catch (e) {
+    ctx.note(`Couldn't write ${full}: ${firstLine(e.message)}`, 'error');
+    return false;
+  }
 }
 
 const CHART_NAMES = { bars: 'Bars', line: 'Line', histogram: 'Histogram', scatter: 'Scatter' };

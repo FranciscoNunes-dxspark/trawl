@@ -2,6 +2,8 @@
 
 # Trawl
 
+> **Trawl has moved to [fleet](https://github.com/FranciscoNunes-dxspark/fleet/tree/main/apps/trawl)**, the family's one repository. Its releases are there now, tagged `trawl-v<version>`; an installed Trawl updates itself from them. This repository is kept for its history.
+
 A keyboard-driven SQL Server client for the terminal, built the same way as [Tiller](https://github.com/FranciscoNunes-dxspark/tiller): titled rounded panels, a prompt box with slash commands and completion, `!` to run any SQL, and a running log of what each statement did.
 
 ```

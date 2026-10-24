@@ -12,9 +12,11 @@ import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
 import { VERSION } from './version.js';
 
-export const REPO = 'FranciscoNunes-dxspark/trawl';
+// Trawl now lives in the fleet repository, released as trawl-v<version> beside its siblings.
+export const REPO = 'FranciscoNunes-dxspark/fleet';
+export const TAG = 'trawl-v';
 export const RELEASES_URL = `https://github.com/${REPO}/releases`;
-const LATEST_API = `https://api.github.com/repos/${REPO}/releases/latest`;
+const LATEST_API = `https://api.github.com/repos/${REPO}/releases?per_page=100`;
 const DAY = 24 * 60 * 60 * 1000;
 
 /** "v1.2.3" or "1.2.3" → [1, 2, 3]; anything else → null. Pre-release suffixes are ignored. */
@@ -63,7 +65,7 @@ export function assetName(platform = process.platform, arch = process.arch) {
  */
 export function ghLatest({ signal } = {}) {
   return new Promise((resolve) => {
-    execFile('gh', ['api', `repos/${REPO}/releases/latest`], { signal, windowsHide: true, encoding: 'utf8', timeout: 10000 }, (err, stdout) => {
+    execFile('gh', ['api', `repos/${REPO}/releases?per_page=100`], { signal, windowsHide: true, encoding: 'utf8', timeout: 10000 }, (err, stdout) => {
       if (err) return resolve(null);
       try {
         resolve(JSON.parse(stdout));
@@ -74,11 +76,24 @@ export function ghLatest({ signal } = {}) {
   });
 }
 
-function shape(body, { signedIn }) {
-  const version = String(body?.tag_name ?? '').replace(/^v/, '');
+/** The newest published release of Trawl among fleet's (its tag starts with TAG), or null. */
+export function newestOf(list) {
+  if (!Array.isArray(list)) return null;
+  let best = null;
+  for (const r of list) {
+    const tag = String(r?.tag_name ?? '');
+    if (r.draft || r.prerelease || !tag.startsWith(TAG) || !parseVersion(tag.slice(TAG.length))) continue;
+    if (!best || isNewer(tag.slice(TAG.length), best.tag_name.slice(TAG.length))) best = r;
+  }
+  return best;
+}
+
+function shape(list, { signedIn }) {
+  const body = newestOf(list);
+  const version = String(body?.tag_name ?? '').slice(TAG.length);
   if (!parseVersion(version)) return null;
   const file = (body.assets ?? []).find((a) => a.name === assetName());
-  return { version, url: body.html_url ?? `${RELEASES_URL}/tag/v${version}`, download: file?.browser_download_url ?? null, signedIn };
+  return { version, url: body.html_url ?? `${RELEASES_URL}/tag/${TAG}${version}`, download: file?.browser_download_url ?? null, signedIn };
 }
 
 /**
@@ -107,7 +122,7 @@ export function updateAdvice({ latest, current, compiled, root = checkoutRoot() 
   const lines = [`Trawl ${latest.version} is out (you have ${current}).`];
   if (compiled && latest.signedIn) {
     // A private release's files need a signed-in download, which gh does.
-    lines.push(`Download it: gh release download v${latest.version} --repo ${REPO} --pattern ${assetName()}`);
+    lines.push(`Download it: gh release download ${TAG}${latest.version} --repo ${REPO} --pattern ${assetName()}`);
   } else if (compiled) {
     lines.push(latest.download ? `Download ${assetName()}: ${latest.download}` : `Download it from ${latest.url}`);
     lines.push('Then replace this executable with it (quit Trawl first).');
@@ -144,7 +159,7 @@ async function downloadAssets(version, names, dir, { signal } = {}) {
   const limit = signal ? AbortSignal.any([signal, AbortSignal.timeout(DOWNLOAD_MS)]) : AbortSignal.timeout(DOWNLOAD_MS);
   try {
     for (const name of names) {
-      const res = await fetch(`https://github.com/${REPO}/releases/download/v${version}/${name}`, {
+      const res = await fetch(`https://github.com/${REPO}/releases/download/${TAG}${version}/${name}`, {
         headers: { 'user-agent': `trawl/${VERSION}` },
         signal: limit,
       });
@@ -157,7 +172,7 @@ async function downloadAssets(version, names, dir, { signal } = {}) {
     // A private repository answers 404; gh has a sign-in that can read it.
   }
   await new Promise((resolve, reject) => {
-    const args = ['release', 'download', `v${version}`, '--repo', REPO, '--dir', dir, '--clobber', ...names.flatMap((n) => ['--pattern', n])];
+    const args = ['release', 'download', `${TAG}${version}`, '--repo', REPO, '--dir', dir, '--clobber', ...names.flatMap((n) => ['--pattern', n])];
     execFile('gh', args, { signal: limit, windowsHide: true, encoding: 'utf8' }, (err, _, stderr) => {
       if (!err) return resolve();
       reject(new Error(err.code === 'ENOENT' ? "the download needs gh, which isn't installed" : (stderr || err.message).trim().split('\n')[0]));

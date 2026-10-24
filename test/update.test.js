@@ -119,7 +119,7 @@ test('old executables and abandoned downloads are removed, but not a download st
 });
 
 const reply = (status, body) => async (url, opts) => {
-  assert.match(url, /api\.github\.com\/repos\/FranciscoNunes-dxspark\/trawl\/releases\/latest$/);
+  assert.match(url, /api\.github\.com\/repos\/FranciscoNunes-dxspark\/fleet\/releases\?per_page=100$/);
   assert.equal(opts.headers['user-agent'], 'trawl/0.1.0');
   return { status, ok: status < 300, statusText: 'x', json: async () => body };
 };
@@ -127,17 +127,23 @@ const reply = (status, body) => async (url, opts) => {
 test('fetchLatest reads the release and picks this machine’s file', async () => {
   const latest = await fetchLatest({
     current: '0.1.0',
-    fetchImpl: reply(200, {
-      tag_name: 'v0.2.0',
-      html_url: 'https://github.com/FranciscoNunes-dxspark/trawl/releases/tag/v0.2.0',
-      assets: [{ name: assetName(), browser_download_url: 'https://example.test/trawl' }],
-    }),
+    // fleet's releases are every app's: only Trawl's published ones count, the newest first.
+    fetchImpl: reply(200, [
+      { tag_name: 'splice-v9.0.0', html_url: 'https://s', assets: [] },
+      { tag_name: 'trawl-v0.9.0', draft: true, html_url: 'https://draft', assets: [] },
+      { tag_name: 'trawl-v0.1.9', html_url: 'https://old', assets: [] },
+      {
+        tag_name: 'trawl-v0.2.0',
+        html_url: 'https://github.com/FranciscoNunes-dxspark/fleet/releases/tag/trawl-v0.2.0',
+        assets: [{ name: assetName(), browser_download_url: 'https://example.test/trawl' }],
+      },
+    ]),
   });
-  assert.deepEqual(latest, { version: '0.2.0', url: 'https://github.com/FranciscoNunes-dxspark/trawl/releases/tag/v0.2.0', download: 'https://example.test/trawl', signedIn: false });
+  assert.deepEqual(latest, { version: '0.2.0', url: 'https://github.com/FranciscoNunes-dxspark/fleet/releases/tag/trawl-v0.2.0', download: 'https://example.test/trawl', signedIn: false });
 });
 
 test('a 404 (private, or no releases) asks again through gh', async () => {
-  const viaGh = await fetchLatest({ current: '0.1.0', fetchImpl: reply(404, {}), ghImpl: async () => ({ tag_name: 'v0.3.0', html_url: 'https://r', assets: [] }) });
+  const viaGh = await fetchLatest({ current: '0.1.0', fetchImpl: reply(404, {}), ghImpl: async () => [{ tag_name: 'trawl-v0.3.0', html_url: 'https://r', assets: [] }] });
   assert.deepEqual(viaGh, { version: '0.3.0', url: 'https://r', download: null, signedIn: true });
   assert.equal(await fetchLatest({ current: '0.1.0', fetchImpl: reply(404, {}), ghImpl: async () => null }), null);
   await assert.rejects(fetchLatest({ current: '0.1.0', fetchImpl: reply(403, {}) }), /GitHub answered 403/);
@@ -147,7 +153,7 @@ test('the advice depends on how Trawl was installed', () => {
   const latest = { version: '0.2.0', url: 'https://r', download: 'https://d' };
   assert.match(updateAdvice({ latest: null, current: '0.1.0' })[0], /gh auth login/);
   const signedIn = updateAdvice({ latest: { ...latest, signedIn: true }, current: '0.1.0', compiled: true });
-  assert.equal(signedIn[1], `Download it: gh release download v0.2.0 --repo FranciscoNunes-dxspark/trawl --pattern ${assetName()}`);
+  assert.equal(signedIn[1], `Download it: gh release download trawl-v0.2.0 --repo FranciscoNunes-dxspark/fleet --pattern ${assetName()}`);
   assert.deepEqual(updateAdvice({ latest, current: '0.2.0' }), ['Trawl 0.2.0 is the latest version.']);
   const exe = updateAdvice({ latest, current: '0.1.0', compiled: true });
   assert.equal(exe[0], 'Trawl 0.2.0 is out (you have 0.1.0).');

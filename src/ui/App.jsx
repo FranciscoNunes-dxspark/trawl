@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Box, Text, useApp, useInput } from 'ink';
 import { readFileSync, statSync, unwatchFile, watchFile } from 'node:fs';
-import { basename, resolve } from 'node:path';
+import { basename, dirname, resolve } from 'node:path';
 import * as a from '../actions.js';
 import { COMMANDS, findCommand, suggestionsFor } from '../commands.js';
 import { loadClaudeHistory, loadConsole, removeConsole, saveConfig, saveConsole, withRan } from '../config.js';
@@ -10,7 +10,7 @@ import * as ed from '../editor.js';
 import { commitMode, describeConn, isReadOnly } from '../connections.js';
 import { copyToClipboard } from '../clipboard.js';
 import { osCredentials } from '../credentials.js';
-import { connect as openSession } from '../db.js';
+import { DbError, connect as openSession } from '../db.js';
 import { changesText, editTarget, hasChanges, noChanges, readTarget } from '../edit.js';
 import { HELP } from '../help.js';
 import { commandsSection, sectionFor } from '../help-layout.js';
@@ -40,10 +40,13 @@ import { WELCOME_HEIGHT, Welcome } from './Glim.jsx';
 import { FACES, moodFor } from '../glim.js';
 import { checksDisabled, isDue, isNewer, openUrl, updateAdvice } from '../update.js';
 import { askClaude as askClaudeCli, canSeeSchema } from '../ai.js';
+import { az as runAz, firewallBlock, publicIp as findPublicIp } from '../azure.js';
 import { COMPILED, VERSION } from '../version.js';
 import { worthNotifying } from '../notify.js';
 import { changedCells, untilMatch, untilText } from '../watch.js';
 import { dueWarning, locksText, openFor, warnMinutes, warningTitle } from '../transactions.js';
+import { decodeContext, pastedLine, projectAt, readMoods, repoRoot, writeMood } from '../family.js';
+import { familyMood, moodsToShow, newDatabases, projectNote, reactionText } from '../siblings.js';
 
 const VIEWS = [
   { id: 'explorer', label: 'Explorer' },
@@ -63,9 +66,9 @@ const helpSections = (user, keymap) => [...HELP, ...[keymapSection(keymap, VIEW_
 const CTRL_P = '\x10';
 
 const HINTS = {
-  explorer: '↵ first rows · d describe · s query it in the console · c CREATE script · /find filter',
+  explorer: '↵ first rows · d describe · s query it in the console · c CREATE script · C copy rows · /find filter',
   query: '↵ run statement · v select several · R run file · e edit in the console · /console',
-  results: 'h/l columns · o sort · f filter · ↵ record · v value · y/Y copy · F follow key · p pin · c compare · e edit · n NULL · d delete · a add · s save · x export',
+  results: 'h/l columns · o sort · f filter · ↵ record · v value · y/Y copy · F follow key · p pin · c compare · e edit · n NULL · d delete · a add · s save · x export · t share · C copy rows',
   history: '↵ run again · e edit in the console · ◆ ran by Claude',
   connections: '↵ connect · n new · p password · f folder · x forget',
   activity: 'R read again · ↵ full SQL · x kill · a idle sessions too · J jobs · Q top queries',
@@ -188,9 +191,19 @@ const DOUBLE_CLICK_MS = 400;
  * a session (db.js); the tests pass their own. `setTitle(text)` names the terminal window. `mouse` is
  * mouse.js's terminalMouse() from cli.jsx (missing where the terminal can't report it); tests pass their own.
  * `notify(title, body)` says a long run has finished (cli.jsx rings the terminal's bell and raises a
- * notification); without it, as in most tests, nothing is said.
+ * notification); without it, as in most tests, nothing is said. `azureSql` is `trawl --azure-sql`'s
+ * spec (connections.js azureSqlSpec): that connection, found or added as /azure-sql does, instead of
+ * the last one. `az(args, { signal })` runs the Azure CLI (azure.js) and `publicIp({ signal })` finds this
+ * machine's address, for an Azure SQL firewall; `firewallWaits` are the pauses (ms) before each try
+ * to connect again once a rule is added. The tests pass their own, so nothing reaches Azure.
+ * `projectDir` is the folder Trawl started in (the project /family, /project and /api look at), and
+ * `familyHome` the family's folder for the mascots' moods (family.js familyDir): without it, as in the
+ * tests that don't pass one, Glim's mood is neither written nor are the others' read, every
+ * `moodEvery` ms.
  */
-export function App({ config: initialConfig, initialFile, initialConnection, checkLatest, installUpdate, askClaude = askClaudeCli, findDataSources, credentials = osCredentials, open = openSession, clipboard = copyToClipboard, setTitle, mouse, notify }) {
+const FIREWALL_WAITS = [0, 5000, 10000];
+
+export function App({ config: initialConfig, initialFile, initialConnection, checkLatest, installUpdate, askClaude = askClaudeCli, findDataSources, credentials = osCredentials, open = openSession, clipboard = copyToClipboard, setTitle, mouse, notify, azureSql, az = runAz, publicIp = findPublicIp, firewallWaits = FIREWALL_WAITS, projectDir = process.cwd(), familyHome = null, moodEvery = 30_000 }) {
   const { exit } = useApp();
   const { columns, rows } = useTerminalSize();
   const [config, setConfigState] = useState(initialConfig);
@@ -243,6 +256,14 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     return () => clearTimeout(t);
   }, [flash]);
 
+  // A sibling's mood Glim reacts to, in a line of its own until esc: { text, mood }.
+  const [reaction, setReactionState] = useState(null);
+  const reactionRef = useRef(null);
+  const setReaction = (r) => {
+    reactionRef.current = r;
+    setReactionState(r);
+  };
+
   // Async actions read the latest state through refs, not through stale closures.
   const sessionRef = useRef(null);
   const schemaRef = useRef(null);
@@ -267,6 +288,8 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
   const saveTimer = useRef(null);
   // Passwords typed this session, by connection, so /use and reconnecting don't ask again.
   const typed = useRef(new Map());
+  // The last connection an Azure SQL firewall turned away, and the address it gave: { conn, ip }.
+  const firewallBlocked = useRef(null);
   // A connection that dropped while something else ran: said once that has finished.
   const quietDrop = useRef(null);
   // The last run's error from the server, for /why: { message, number, line, sql, conn, database, label }.
@@ -484,7 +507,7 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     old.close();
     let s;
     try {
-      s = await open(old.conn, { database: old.database ?? old.conn.database, signal, password: typed.current.get(old.conn.name), credentials });
+      s = await open(old.conn, { database: old.database ?? old.conn.database, signal, password: typed.current.get(old.conn.name), credentials, az });
     } catch (e) {
       if (!e.cancelled) e.message = `Couldn't reconnect to ${old.conn.name}: ${e.message}`;
       throw e;
@@ -538,7 +561,9 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
 
   // A login with no password to hand (or a turned-down one) asks for it, then tries again. A
   // typed one (`remember` is then set) that works is kept in the OS store when "keep it" is on.
-  const connect = async (conn, { database, password = typed.current.get(conn.name), remember } = {}) => {
+  // An Azure SQL firewall that turned this machine away asks to let it in (`afterFirewall`: a rule was
+  // just added, so the connect is tried again a few times while the rule applies).
+  const connect = async (conn, { database, password = typed.current.get(conn.name), remember, afterFirewall = false } = {}) => {
     dropSession();
     setConnecting(true);
     const title = `connect ${conn.name}${database && database !== conn.database ? ` (${database})` : ''}`;
@@ -547,10 +572,30 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
       async (signal) => {
         let s;
         try {
-          s = await open(conn, { database, signal, password, credentials });
+          for (let i = 0; ; i++) {
+            if (afterFirewall && firewallWaits[i]) {
+              await new Promise((r) => setTimeout(r, firewallWaits[i]));
+              if (signal.aborted) throw new DbError('Cancelled', { cancelled: true });
+            }
+            try {
+              s = await open(conn, { database, signal, password, credentials, az });
+              break;
+            } catch (e) {
+              if (!afterFirewall || i + 1 >= firewallWaits.length || !firewallBlock(e) || signal.aborted) throw e;
+            }
+          }
         } catch (e) {
           if (e.needsPassword && password == null && !/login failed/i.test(e.message)) e.message = `${conn.name} needs the password for ${conn.user}.`;
           throw e;
+        }
+        // A password read from the App Service (passwordFrom) that signed in is kept, as a typed one is.
+        const fresh = s.freshPassword;
+        delete s.freshPassword;
+        if (fresh != null) {
+          credentials.set(conn.name, { user: conn.user, password: fresh }).then(
+            () => note(`Read the password for ${conn.name} from ${conn.passwordFrom.app} and saved it in ${credentials.name}.`, 'ok'),
+            (e) => note(`Couldn't save the password in ${credentials.name}: ${firstLine(e.message)}`, 'error'),
+          );
         }
         watchEnd(s);
         setSession(s);
@@ -561,6 +606,7 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     );
     setConnecting(false);
     if (r.ok) {
+      if (firewallBlocked.current?.conn.name === conn.name) firewallBlocked.current = null;
       setConfig((c) => ({ ...c, last: conn.name }));
       setView((v) => (v === 'connections' ? 'explorer' : v));
     } else dropSession();
@@ -589,6 +635,24 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
       const trusted = { ...conn, trustCert: true };
       setConfig((c) => ({ ...c, connections: c.connections.map((x) => (x.name === conn.name && !x.demo ? trusted : x)) }));
       return connect(trusted, { database, password, remember });
+    }
+    const blockedIp = !r.ok && !conn.demo && firewallBlock(r.error);
+    if (blockedIp) {
+      firewallBlocked.current = { conn, ip: blockedIp };
+      if (afterFirewall) {
+        note(`${conn.name}: the firewall still turns ${blockedIp} away. The rule can take a few minutes to apply: /connect ${conn.name} again in a moment.`, 'error');
+        return false;
+      }
+      const add = await confirm({
+        title: `Add a firewall rule on ${conn.server.replace(/^tcp:/i, '').replace(/,\d+$/, '')} for ${blockedIp}?`,
+        detail: `The server's firewall turned this machine away. Trawl asks the Azure CLI (your az login) to let ${blockedIp} in, then connects again.`,
+        options: [
+          { label: 'Yes, add it and connect', value: true },
+          { label: 'No', value: false },
+        ],
+      });
+      if (!add || !(await a.addFirewallFor(ctx, conn, blockedIp))) return false;
+      return connect(conn, { database, password, remember, afterFirewall: true });
     }
     if (!r.ok && r.error?.needsPassword) {
       typed.current.delete(conn.name);
@@ -953,6 +1017,10 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
   const ctxRef = useRef(null);
   if (!ctxRef.current) {
     ctxRef.current = {
+      // The last connection an Azure SQL firewall turned away: { conn, ip } (/firewall).
+      get firewallBlocked() {
+        return firewallBlocked.current;
+      },
       get session() {
         return sessionRef.current;
       },
@@ -1005,6 +1073,16 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
       get watching() {
         return watchRef.current && { every: watchRef.current.every, run: watchRef.current.run, title: watchRef.current.title };
       },
+      // The view on screen ('results', 'query'…).
+      get view() {
+        return viewRef.current;
+      },
+      // The project the family's commands look at: the open script's checkout (or its folder), else
+      // the folder Trawl started in.
+      get projectDir() {
+        const f = fileRef.current;
+        return f?.path ? (repoRoot(dirname(f.path)) ?? dirname(f.path)) : resolve(projectDir);
+      },
       // What useMouse registers: the component on screen takes the main area's clicks and wheel.
       mouseHandlers: [],
     };
@@ -1037,7 +1115,7 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     },
     currentSet: () => resultsRef.current?.sets[resultIndexRef.current] ?? null,
     // A session of its own on another connection (fan-out, schema diff); the caller closes it.
-    openSession: (conn, opts = {}) => open(conn, { credentials, password: typed.current.get(conn.name), ...opts }),
+    openSession: (conn, opts = {}) => open(conn, { credentials, az, password: typed.current.get(conn.name), ...opts }),
     // Results that didn't come from running SQL on this session: fan-out's merged rows, a comparison.
     present: (res) => {
       showResults({ id: nextId.current++, error: null, messages: [], ...res });
@@ -1053,6 +1131,8 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     // A line of text in the same place, shown as typed: resolves the text, or null on esc.
     askText: async (req) => (await confirm({ ...req, secret: true, plain: true, options: [] }))?.value ?? null,
     credentials,
+    az,
+    publicIp,
     // Whether this terminal can report the mouse at all (Settings says so).
     mouseAvailable: Boolean(mouse),
     // Puts text on the clipboard and says so; `what` is "the cell", "12 rows as CSV"…
@@ -1064,6 +1144,9 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
         note(`Couldn't copy: ${firstLine(e.message)}`, 'error');
       }
     },
+    // Puts text on the clipboard without a word in the log (the caller says what it was); resolves
+    // 'terminal' when it went through the terminal (OSC 52).
+    copyText: (text) => Promise.resolve(clipboard(text)),
     // Text selected with the mouse (the console's SQL), or cut with ctrl+x: copied, and said for a
     // moment in the bottom line.
     copySelection: (text, verb = 'Copied') =>
@@ -1175,6 +1258,8 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
       let r;
       if (text.startsWith('!')) r = await a.runSql(ctx, text.slice(1));
       else if (SQL_START.test(text)) r = await a.runSql(ctx, text);
+      // What a sibling copied, pasted without its /take.
+      else if (decodeContext(text)) r = await a.take(ctx, text);
       else {
         const [, name, rest] = text.replace(/^\//, '').match(/^(\S+)\s*([\s\S]*)$/);
         const cmd = findCommand(name, customRef.current.commands);
@@ -1273,6 +1358,12 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
       ctx.rememberOutput('Your commands and keys', text);
     }
     if (initialFile) openFile(initialFile);
+    // Databases the project's own files name (appsettings, .env) that aren't saved yet.
+    try {
+      const found = projectNote(newDatabases(projectAt(ctx.projectDir), initialConfig.connections));
+      if (found) note(found);
+    } catch {}
+    if (azureSql) return void a.azureSql(ctx, azureSql);
     const name = initialConnection ?? initialConfig.last;
     const conn = name && initialConfig.connections.find((c) => c.name === name);
     if (conn) connect(conn);
@@ -1365,6 +1456,7 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     if (key.escape) {
       if (watchRef.current) stopWatch('esc');
       else if (busyRef.current) busyRef.current.abort();
+      else if (reactionRef.current) setReaction(null);
       else {
         setEntries([]);
         setWelcome(false);
@@ -1375,6 +1467,11 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
     if (key.ctrl || key.meta) return;
     // A .sql or .txt file dropped on the terminal (which types its path) opens in a console tab.
     if (input.length > 1 && a.openDropped(ctx, input)) return;
+    // A command pasted over a view (as a sibling copies them), or a bare family:v1:… context: into the
+    // prompt, to read and run with ↵.
+    // (A terminal ends a pasted line with \r, which the family's rule takes as a \n.)
+    const pasted = pastedLine(input);
+    if (pasted) return prefill(pasted);
     if (input === '/' || input === ':') return prefill('/');
     if (input === '!') return prefill('!');
     if (input === '?') return ctx.showHelp();
@@ -1485,16 +1582,38 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
   const act = activityRows(entries);
   const bottom = confirmReq ? confirmHeight(confirmReq) : 3 + suggestions.length;
   const mood = moodFor({ session, busy, lastEntry: entries.at(-1), tranCount });
+  // Glim's mood for the family (family.js), written whenever it changes, and the others' read every
+  // half a minute: a worried, sad or happy one from the last 15 minutes gets a line, once. "Family
+  // moods" in Settings turns both off.
+  const moodsOn = Boolean(familyHome) && config.familyMoods !== false;
+  const shared = familyMood(mood, { session, lastEntry: entries.at(-1), busy, tranMinutes: tranCount && tranSince.current ? (Date.now() - tranSince.current) / 60_000 : 0 });
+  useEffect(() => {
+    if (moodsOn) writeMood('trawl', shared, { dir: familyHome });
+  }, [moodsOn, shared.mood, shared.reason]);
+  const seenMoods = useRef(new Set());
+  useEffect(() => {
+    if (!moodsOn) return void setReaction(null);
+    const look = () => {
+      const fresh = moodsToShow(readMoods('trawl', { dir: familyHome }), seenMoods.current);
+      for (const m of fresh) seenMoods.current.add(`${m.app}:${m.at}`);
+      if (fresh[0]) setReaction({ text: reactionText(fresh[0]), mood: fresh[0].mood });
+    };
+    look();
+    const t = setInterval(look, moodEvery);
+    t.unref?.();
+    return () => clearInterval(t);
+  }, [moodsOn, familyHome, moodEvery]);
   // The welcome box only appears when the terminal has room for it next to a useful view.
   const showWelcome = welcome && H >= 28;
   // A /watch keeps the spinner's line between its runs, so the layout doesn't jump.
   const statusLine = busy || watching ? 1 : 0;
-  const mainH = Math.max(6, H - 2 - act.length - statusLine - bottom - 1 - (showWelcome ? WELCOME_HEIGHT : 0));
+  const reactionH = reaction ? 1 : 0;
+  const mainH = Math.max(6, H - 2 - reactionH - act.length - statusLine - bottom - 1 - (showWelcome ? WELCOME_HEIGHT : 0));
   const viewActive = focus === 'view' && !overlay && !confirmReq;
   layout.current = {
     mainTop: 2,
     mainH,
-    promptTop: 2 + mainH + (showWelcome ? WELCOME_HEIGHT : 0) + act.length + statusLine,
+    promptTop: 2 + mainH + (showWelcome ? WELCOME_HEIGHT : 0) + reactionH + act.length + statusLine,
     sugCount: suggestions.length,
     tabs: tabLabels(results),
   };
@@ -1577,7 +1696,7 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
           : overlay
           ? 'j/k scroll · space page · esc close'
           : view === 'query' && queryMode === 'console'
-            ? '↵/i type · ctrl+r run statement · R run all · /save <file> · /open <file>'
+            ? '↵/i type · ctrl+r run statement · R run all · t share · /save <file> · /open <file>'
             : view === 'activity' && activityLists.show !== 'sessions'
               ? ACTIVITY_HINTS[activityLists.show]
               : HINTS[view];
@@ -1594,6 +1713,17 @@ export function App({ config: initialConfig, initialFile, initialConnection, che
         {main}
       </Box>
       {showWelcome ? <Welcome mood={mood} session={session} width={W} /> : null}
+      {reaction ? (
+        <Row
+          pointer={false}
+          width={W}
+          segments={[
+            { text: `${FACES[mood]} `, color: theme.accent, bold: true },
+            { text: reaction.text, color: reaction.mood === 'sad' ? theme.del : reaction.mood === 'worried' ? theme.warn : theme.ok },
+            { text: '  esc dismisses', color: theme.dim },
+          ]}
+        />
+      ) : null}
       {act.map((segs, i) => (
         <Row key={i} pointer={false} width={W} segments={segs} />
       ))}

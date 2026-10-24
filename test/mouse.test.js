@@ -89,6 +89,13 @@ test('what a drag selects: rows in between whole, wide characters whole, either 
   assert.equal(osc52('hé'), `\x1b]52;c;${Buffer.from('hé').toString('base64')}\x07`);
 });
 
+test('a drag over box drawing, wide characters, joined emoji and accents selects whole characters', () => {
+  const lines = ['│ ● main ─ 日本 │', '│ 👨‍👩‍👧 café e\u0301 │', '\x1b[36m╭─\x1b[39m ❯ ✨ ok'];
+  assert.deepEqual(selectionRows(lines, { x: 2, y: 0 }, { x: 11, y: 0 }), [{ y: 0, col: 2, text: '● main ─ 日' }]);
+  assert.deepEqual(selectionRows(lines, { x: 2, y: 1 }, { x: 4, y: 1 }), [{ y: 1, col: 2, text: '👨‍👩‍👧 ' }]);
+  assert.equal(selectedText(selectionRows(lines, { x: 0, y: 1 }, { x: 5, y: 2 })), '│ 👨‍👩‍👧 café e\u0301 │\n╭─ ❯ ✨');
+});
+
 /** A session over a fake terminal: what's written, what's copied, what App would hear. */
 function fakeTerminal() {
   const queue = [];

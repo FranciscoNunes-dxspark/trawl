@@ -4,11 +4,13 @@ import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import v8 from 'node:v8';
+import vm from 'node:vm';
 import React from 'react';
 import { render } from 'ink-testing-library';
 import { DEMO_CONNECTIONS } from '../src/connections.js';
 import { memoryCredentials } from '../src/credentials.js';
-import { DbError, untrustedCert } from '../src/db.js';
+import { DbError, findPassword, signIn, untrustedCert } from '../src/db.js';
 import { demoSession } from '../src/demo.js';
 import { applyTheme, theme } from '../src/theme.js';
 import { App } from '../src/ui/App.jsx';
@@ -960,5 +962,170 @@ test('/password saves one, /folder files a connection, and the window title foll
   await until(() => frame().includes('Nothing has run yet') || frame().includes('╭─ History'), 'History, so still running');
   const saved = JSON.parse(readFileSync(join(process.env.TRAWL_HOME, 'config.json'), 'utf8'));
   assert.equal(saved.connections.find((c) => c.name === 'club-sql').folder, 'Clubs/Lisbon');
+  app.unmount();
+});
+
+// Azure SQL on a pretend server: az login (no password) or a SQL login whose password is "right" (the
+// password lookup and its retry are db.js's own, App Service included), an App Service whose connection
+// string holds it, and a firewall that turns 203.0.113.7 away until `az` has made its rule.
+const BLOCKED = "Cannot open server 'clubs' requested by the login. Client with IP address '203.0.113.7' is not allowed to access the server.  To enable access, use the Azure Management Portal or run sp_set_firewall_rule on the master database to create a firewall rule for this IP address or address range.";
+function fakeAzure({ firewall = false } = {}) {
+  const az = { calls: [], rules: new Set(), opened: [] };
+  az.run = async (args) => {
+    az.calls.push(args.slice(0, 4).join(' '));
+    if (args[2] === 'list') return '[{"g": "rg-clubs", "n": "clubs"}]';
+    if (args[3] === 'create') az.rules.add(args[args.indexOf('--start-ip-address') + 1]);
+    if (args[2] === 'connection-string') return JSON.stringify([{ name: 'Clubs', type: 'SQLAzure', value: 'Server=tcp:clubs.database.windows.net,1433;Database=ClubA;User ID=app;Password=right;' }]);
+    if (args[2] === 'appsettings') return '[]';
+    return '';
+  };
+  az.open = async (conn, opts) => {
+    az.opened.push(conn.name);
+    if (firewall && !az.rules.has('203.0.113.7')) throw new DbError(BLOCKED);
+    if (conn.auth === 'azure-cli') return demoSession({ ...conn, demo: true }, { database: opts.database });
+    return signIn(conn, opts, async (o) => {
+      const found = await findPassword(conn, o);
+      if (found.password !== 'right') throw Object.assign(new DbError("Login failed for user 'app'.", { needsPassword: true }), { passwordSource: found.from });
+      const s = demoSession({ ...conn, demo: true }, { database: o.database });
+      if (found.from === 'azure') s.freshPassword = found.password;
+      return s;
+    });
+  };
+  return az;
+}
+const savedConnections = () => JSON.parse(readFileSync(join(process.env.TRAWL_HOME, 'config.json'), 'utf8')).connections;
+
+test('--azure-sql adds the connection /add would and connects, or connects to the one already saved', async () => {
+  const azure = fakeAzure();
+  const spec = { server: 'tcp:clubs.database.windows.net,1433', database: 'ClubA', prod: true, folder: 'Azure' };
+  let app = startWith([...DEMO_CONNECTIONS], { azureSql: spec, open: azure.open, az: azure.run });
+  await until(() => frame().includes('Clubs') && frame().includes('Added clubs-ClubA in Azure/ (production, read-only)'), 'added and connected');
+  assert.match(frame(), /clubs-ClubA .* PROD +read-only/);
+  assert.match(frame(), /clubs\.database\.windows\.net\/ClubA · 6 objects · read-only/);
+  assert.deepEqual(savedConnections().find((c) => c.name === 'clubs-ClubA'), { name: 'clubs-ClubA', server: 'clubs.database.windows.net', database: 'ClubA', auth: 'azure-cli', prod: true, folder: 'Azure' });
+  app.unmount();
+  // The same server and database again (another spelling of the server): no second connection.
+  const before = savedConnections();
+  app = startWith(before, { azureSql: { server: 'CLUBS.database.windows.net', database: 'cluba' }, open: azure.open, az: azure.run });
+  await until(() => frame().includes('Clubs') && frame().includes('Trawl  │  clubs-ClubA'), 'connected to the saved one');
+  assert.doesNotMatch(frame(), /Added/);
+  assert.equal(savedConnections().filter((c) => c.server === 'clubs.database.windows.net').length, 1);
+  assert.deepEqual(azure.opened, ['clubs-ClubA', 'clubs-ClubA']);
+  assert.deepEqual(azure.calls, [], 'no firewall, so az was never asked');
+  app.unmount();
+});
+
+test('/azure-sql with --password-from reads the login’s password from the App Service through az, and keeps it', async () => {
+  const azure = fakeAzure();
+  const credentials = memoryCredentials();
+  const app = startWith([...DEMO_CONNECTIONS], { open: azure.open, az: azure.run, credentials });
+  await until(() => frame().includes('Connections'), 'the connections');
+  await type(app.stdin, '/azure-sql tcp:clubs.database.windows.net,1433 ClubA --user app --name clubs-app --password-from rg-clubs/clubs-api/staging --subscription s1');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('Clubs') && frame().includes('Read the password for clubs-app from clubs-api and saved it in memory'), 'connected with the App Service’s password');
+  assert.doesNotMatch(frame(), /Password for|right/, 'never asked, never shown');
+  assert.equal(credentials.saved.get('clubs-app'), 'right');
+  assert.deepEqual(savedConnections().find((c) => c.name === 'clubs-app'), {
+    name: 'clubs-app',
+    server: 'clubs.database.windows.net',
+    database: 'ClubA',
+    auth: 'sql',
+    user: 'app',
+    passwordFrom: { subscription: 's1', resourceGroup: 'rg-clubs', app: 'clubs-api', slot: 'staging' },
+  });
+  assert.deepEqual(azure.calls, ['webapp config connection-string list', 'webapp config appsettings list']);
+  app.unmount();
+
+  // Rotated: the stored password is turned down, so the App Service's is read again before asking.
+  const later = fakeAzure();
+  const old = memoryCredentials({ 'clubs-app': 'last-month' });
+  const again = startWith(savedConnections(), { initialConnection: 'clubs-app', open: later.open, az: later.run, credentials: old });
+  await until(() => frame().includes('Clubs') && frame().includes('Read the password for clubs-app'), 'connected after the rotation');
+  assert.doesNotMatch(frame(), /Password for/);
+  assert.equal(old.saved.get('clubs-app'), 'right');
+  again.unmount();
+});
+
+test("an Azure SQL firewall that turns this machine away offers a rule through az, then connects; /firewall adds one on demand", async () => {
+  const azure = fakeAzure({ firewall: true });
+  const CLUBS = { name: 'clubs', server: 'clubs.database.windows.net', database: 'ClubA', auth: 'azure-cli' };
+  let app = startWith([CLUBS], { initialConnection: 'clubs', open: azure.open, az: azure.run, publicIp: async () => '198.51.100.4', firewallWaits: [0, 0] });
+  await until(() => frame().includes('Add a firewall rule on clubs.database.windows.net for 203.0.113.7?'), 'the question');
+  assert.match(frame(), /Client with IP address '203\.0\.113\.7' is not/);
+  app.stdin.write('1');
+  await until(() => frame().includes('Clubs') && frame().includes('trawl-203-0-113-7 on clubs (resource group rg-clubs) lets 203.0.113.7 in'), 'the rule, and connected');
+  assert.deepEqual(azure.calls, ['sql server list --query', 'sql server firewall-rule create']);
+  assert.deepEqual(azure.opened, ['clubs', 'clubs']);
+  app.unmount();
+
+  // A rule that hasn't applied after the tries says so, and asks nothing more.
+  const slow = fakeAzure({ firewall: true });
+  const run = slow.run;
+  slow.run = async (args) => (args[3] === 'create' ? (slow.calls.push('create, not applied yet'), '') : run(args));
+  app = startWith([CLUBS], { initialConnection: 'clubs', open: slow.open, az: slow.run, firewallWaits: [0, 0, 0] });
+  await until(() => frame().includes('Add a firewall rule'), 'the question');
+  app.stdin.write('1');
+  await until(() => frame().includes('the firewall still turns 203.0.113.7 away'), 'given up');
+  assert.deepEqual(slow.opened, ['clubs', 'clubs', 'clubs', 'clubs'], 'once, then three tries after the rule');
+  assert.doesNotMatch(frame(), /Add a firewall rule/);
+  app.unmount();
+
+  // No leaves the firewall alone.
+  const shut = fakeAzure({ firewall: true });
+  app = startWith([CLUBS], { initialConnection: 'clubs', open: shut.open, az: shut.run, firewallWaits: [0, 0] });
+  await until(() => frame().includes('Add a firewall rule'), 'the question again');
+  app.stdin.write('2');
+  await until(() => !frame().includes('Add a firewall rule'), 'declined');
+  assert.deepEqual(shut.calls, []);
+  // /firewall then adds it with the address the error gave.
+  await type(app.stdin, '/firewall');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('lets 203.0.113.7 in') && frame().includes('/connect clubs when it has applied'), 'the rule on demand');
+  app.unmount();
+
+  // With no error to go by, the address is looked up; a connection that isn't Azure SQL is refused.
+  const quiet = fakeAzure();
+  app = startWith([CLUBS, ...DEMO_CONNECTIONS], { open: quiet.open, az: quiet.run, publicIp: async () => '198.51.100.4' });
+  await until(() => frame().includes('Connections'), 'the connections');
+  await type(app.stdin, '/firewall clubs');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes('trawl-198-51-100-4 on clubs'), 'the looked-up address');
+  assert.ok(quiet.rules.has('198.51.100.4'));
+  await type(app.stdin, '/firewall demo');
+  app.stdin.write(KEYS.enter);
+  await until(() => frame().includes("demo isn't Azure SQL"), 'the refusal');
+  app.unmount();
+});
+
+test('Results lets go of a result set once two more have run', async () => {
+  // gc, which tests can't ask for otherwise.
+  v8.setFlagsFromString('--expose-gc');
+  const gc = vm.runInNewContext('gc');
+  const refs = [];
+  const open = async (conn, opts) => {
+    const s = demoSession(conn, opts);
+    const run = s.run;
+    s.run = (script, o) => {
+      if (!/FROM big/.test(script)) return run(script, o);
+      const set = { columns: [{ name: 'n', type: 'IntN' }], rows: Array.from({ length: 1000 }, (_, i) => [i]), truncated: false };
+      refs.push(new WeakRef(set.rows));
+      return Promise.resolve({ sets: [set], messages: [], stopped: false, ms: 1 });
+    };
+    return s;
+  };
+  const app = start('demo', { open });
+  await until(() => frame().includes('Clubs'), 'the explorer');
+  for (let i = 1; i <= 3; i++) {
+    app.stdin.write('!');
+    await type(app.stdin, `SELECT n FROM big -- run ${i}`);
+    app.stdin.write(KEYS.enter);
+    await until(() => frame().includes(`run ${i}`) && frame().includes('1000 rows'), `run ${i}`);
+  }
+  await new Promise((r) => setTimeout(r, 100));
+  gc();
+  await new Promise((r) => setTimeout(r, 10));
+  gc();
+  assert.equal(refs[0].deref(), undefined, "the first run's rows are still held");
+  assert.ok(refs[2].deref(), 'the rows on screen');
   app.unmount();
 });

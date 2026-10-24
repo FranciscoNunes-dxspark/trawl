@@ -57,7 +57,7 @@ const at = (s) => Date.parse(`${s}T00:00:00Z`);
 const ascii = (s) => s.normalize('NFD').replace(/[^\x20-\x7e]/g, '').replace(/'/g, '');
 
 // Which kind of value a column's name asks for, when its type allows text or numbers of that sort.
-function guessFor(column, table) {
+export function guessFor(column, table) {
   const n = column.toLowerCase().replace(/[\s_-]+/g, '');
   const has = (re) => re.test(n);
   if (has(/e?mail/)) return 'email';
@@ -363,4 +363,53 @@ export function generateScript(table, count, { seed = 1, kind = 'sqlserver', quo
   const out = [];
   for (let i = 0; i < values.length; i += 1000) out.push(`INSERT INTO ${name} (${columns.map((c) => quote(c.name)).join(', ')}) VALUES\n  ${values.slice(i, i + 1000).join(',\n  ')};`);
   return { script: [...head, ...out].join('\n') + '\n', rows: count, columns: columns.map((c) => c.name), notes };
+}
+
+/**
+ * A made-up value in place of `original` for a column holding personal data (copyrows.js's kinds:
+ * email, first, last, person, phone, street, city, zip, birth, ip, or scramble for an identifier such
+ * as an IBAN or a passport number). The same input gives the same fake, so rows that share a value
+ * still share it once masked, and it fits the column: its type and length, and a scrambled
+ * identifier keeps its shape (digits stay digits, letters letters).
+ */
+export function fakeValue(guess, original, column, kind = 'sqlserver') {
+  if (original == null) return null;
+  const rnd = random(`${guess}|${key(original)}`);
+  const int = (lo, hi) => lo + Math.floor(rnd() * (hi - lo + 1));
+  const pick = (list) => list[Math.floor(rnd() * list.length)];
+  const t = typeInfo(column?.type, kind);
+  const digits = (n) => Array.from({ length: n }, (_, i) => String(i === 0 ? int(1, 9) : int(0, 9))).join('');
+  if (original instanceof Date) return new Date((guess === 'birth' ? at('1950-01-01') + int(0, 55 * 365) * DAY : original.getTime() + int(-180, 180) * DAY));
+  if (typeof original === 'number' || typeof original === 'bigint') {
+    const n = String(original).replace(/^-/, '').replace(/\..*$/, '').length;
+    const v = Number(digits(Math.max(1, Math.min(n, 15))));
+    return typeof original === 'bigint' ? BigInt(v) : v;
+  }
+  if (Buffer.isBuffer(original)) return Buffer.from(Array.from({ length: original.length }, () => int(0, 255)));
+  const s = String(original);
+  const scramble = () => s.replace(/[0-9]/g, () => String(int(0, 9))).replace(/[a-z]/g, () => String.fromCharCode(97 + int(0, 25))).replace(/[A-Z]/g, () => String.fromCharCode(65 + int(0, 25)));
+  const fitted = (v) => (t.length ? v.slice(0, t.length) : v);
+  const person = { first: pick(FIRST), last: pick(LAST) };
+  switch (guess) {
+    case 'email': {
+      const tag = Array.from({ length: 6 }, () => '0123456789abcdef'[int(0, 15)]).join('');
+      return fitted(`${ascii(person.first).toLowerCase()}.${ascii(person.last).toLowerCase()}.${tag}@example.com`);
+    }
+    case 'ip':
+      return /:/.test(s) && !/\./.test(s) ? fitted(`fd00::${int(1, 65535).toString(16)}:${int(1, 65535).toString(16)}`) : fitted(`10.${int(0, 255)}.${int(0, 255)}.${int(1, 254)}`);
+    case 'phone':
+      return /^\+?[\d\s().-]+$/.test(s) ? scramble() : fitted(textFor('phone', t, { person, r: 0, int, pick, rnd, table: '', unique: false }));
+    case 'zip':
+      return scramble();
+    case 'birth':
+      return /^\d{4}-\d{2}-\d{2}/.test(s) ? fitted(new Date(at('1950-01-01') + int(0, 55 * 365) * DAY).toISOString().slice(0, s.length >= 19 ? 19 : 10).replace('T', ' ')) : scramble();
+    case 'first':
+    case 'last':
+    case 'person':
+    case 'street':
+    case 'city':
+      return textFor(guess, t, { person, r: 0, int, pick, rnd, table: '', unique: false });
+    default:
+      return scramble();
+  }
 }

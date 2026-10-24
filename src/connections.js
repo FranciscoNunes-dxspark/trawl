@@ -1,4 +1,5 @@
 import { kindOf } from './dialects.js';
+import { parsePasswordFrom, serverHost } from './azure.js';
 
 // Saved connections: parsing /add, and turning one into tedious's connection options.
 // config.json holds nothing secret. Azure SQL signs in with your Azure CLI login; a SQL login's
@@ -181,3 +182,65 @@ export const DEMO_CONNECTIONS = [
   { name: 'demo', demo: true, server: 'demo', database: 'ClubA' },
   { name: 'demo-prod', demo: true, prod: true, server: 'demo', database: 'ClubA' },
 ];
+
+export const AZURE_SQL_USAGE = '/azure-sql <server> [database] [--name <name>] [--user <login>] [--prod] [--folder <folder>] [--password-from <resource-group>/<app>[/<slot>]] [--subscription <id>]';
+
+/**
+ * An Azure SQL hand-over (/azure-sql, or trawl --azure-sql) checked: { server, database, name, user,
+ * prod, folder, passwordFrom }, the empty ones left out. `passwordFrom` is "rg/app[/slot]", which
+ * goes with a --user, and `subscription` the one it's in. Throws, saying what's wrong.
+ */
+export function azureSqlSpec({ server, database, name, user, prod, folder, passwordFrom, subscription }) {
+  if (!server || !serverHost(server)) throw new Error(AZURE_SQL_USAGE);
+  if (passwordFrom && !user) throw new Error('--password-from reads a SQL login\'s password: add --user <login>.');
+  if (subscription && !passwordFrom) throw new Error('--subscription goes with --password-from.');
+  const spec = { server, database, name, user, prod: Boolean(prod), folder: cleanFolder(folder) || undefined, passwordFrom: passwordFrom ? parsePasswordFrom(passwordFrom, subscription) : undefined };
+  for (const k of Object.keys(spec)) if (spec[k] === undefined) delete spec[k];
+  return spec;
+}
+
+/** /azure-sql's arguments as azureSqlSpec's. */
+export function parseAzureSqlArgs(rest) {
+  const args = splitArgs(rest);
+  const fields = {};
+  const positional = [];
+  const OPTIONS = { '--name': 'name', '--user': 'user', '--folder': 'folder', '--password-from': 'passwordFrom', '--subscription': 'subscription' };
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === '--prod') fields.prod = true;
+    else if (OPTIONS[a]) {
+      const v = args[++i];
+      if (v === undefined || v.startsWith('--')) throw new Error(`${a} needs a value. ${AZURE_SQL_USAGE}`);
+      fields[OPTIONS[a]] = v;
+    } else if (a.startsWith('--')) throw new Error(`Unknown option ${a}. ${AZURE_SQL_USAGE}`);
+    else positional.push(a);
+  }
+  if (positional.length > 2) throw new Error(`Too many arguments. ${AZURE_SQL_USAGE}`);
+  [fields.server, fields.database] = positional;
+  return azureSqlSpec(fields);
+}
+
+/**
+ * /azure-sql (Sonar copies one for you to paste): the saved SQL Server connection to the same server
+ * (tcp: and ,1433 aside, any case), database and login (none: az login), or null.
+ */
+export function findAzureSql(connections, { server, database, user }) {
+  const same = (x, y) => String(x ?? '').toLowerCase() === String(y ?? '').toLowerCase();
+  return connections.find((c) => !c.demo && !c.kind && serverHost(c.server) === serverHost(server) && same(c.database, database) && (user ? c.auth !== 'azure-cli' && same(c.user, user) : c.auth === 'azure-cli')) ?? null;
+}
+
+/**
+ * The connection to save for an /azure-sql that isn't saved yet, as /add would make it. Its name is
+ * `name`, else the server's own (its first label) and the database's, made unique among
+ * `connections` (and the demo's) with -2, -3…; `passwordFrom` is kept on it.
+ */
+export function azureSqlConnection(connections, { server, database, user, name, prod, folder, passwordFrom }) {
+  const host = serverHost(server);
+  const wanted = name || `${host.split('.')[0]}${database ? `-${database}` : ''}`;
+  const taken = new Set([...connections, ...DEMO_CONNECTIONS].map((c) => c.name.toLowerCase()));
+  let chosen = wanted;
+  for (let n = 2; taken.has(chosen.toLowerCase()); n++) chosen = `${wanted}-${n}`;
+  const q = (v) => `"${String(v).replace(/["\\]/g, '\\$&')}"`;
+  const args = [q(chosen), q(host), ...(database ? [q(database)] : []), ...(user ? ['--user', q(user)] : []), ...(prod ? ['--prod'] : []), ...(folder ? ['--folder', q(folder)] : [])];
+  return { ...parseAddArgs(args.join(' ')), ...(passwordFrom ? { passwordFrom } : {}) };
+}

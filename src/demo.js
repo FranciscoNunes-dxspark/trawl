@@ -1,7 +1,7 @@
 // An in-memory stand-in for SQL Server, for `trawl --demo` and the tests. It has no SQL engine:
 // it knows the catalog queries (/grep's, /uses's and /script-all's too), a Flyway history for
 // /migrations, SELECT [TOP (n)] … FROM a table, simple SELECT lists, USE,
-// the copies of rows kept for undo and the locks an open transaction holds,
+// the copies of rows kept for undo and the locks an open transaction holds, /copy-rows' reads and script,
 // transactions, WAITFOR DELAY (to try cancelling), RAISERROR/THROW, SHOWPLAN_TEXT and STATISTICS
 // PROFILE (made-up plans of a table scan), a few other sessions for the
 // Activity view (and KILL for them), SQL Agent jobs (and sp_start_job), the top queries, /health's
@@ -746,6 +746,13 @@ export function demoSession(conn, { database } = {}) {
           if (batch.startsWith('-- trawl:deadlocks')) return void state.sets.push(...deadlockSets(session, batch));
           if (batch.startsWith('-- trawl:snapshot')) return void state.sets.push(snapshotSet(DATABASES[session.database], batch));
           if (batch.startsWith('-- trawl:locks')) return void state.sets.push(lockSet(session));
+          // /copy-rows: its reads pick rows as the copies for undo do; its script, one transaction of
+          // IF NOT EXISTS … INSERTs, is counted as other writes are, every row as new.
+          if (batch.startsWith('-- trawl:copy-rows read')) return void state.sets.push(snapshotSet(DATABASES[session.database], batch));
+          if (batch.startsWith('-- trawl:copy-rows insert')) {
+            for (const _ of batch.matchAll(/\bINSERT\s+(?:IGNORE\s+)?INTO\b/gi)) state.messages.push('1 row affected');
+            return void state.messages.push('(Demo: nothing was changed.)');
+          }
           if (batch.startsWith('-- trawl:definition')) {
             const name = batch.match(/OBJECT_ID\(N'(.*)'\)\)/)[1].replace(/''/g, "'");
             const db = DATABASES[session.database];

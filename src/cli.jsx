@@ -6,8 +6,10 @@ import { loadConfig } from './config.js';
 import { DEMO_CONNECTIONS } from './connections.js';
 import { applyTheme } from './theme.js';
 import { App } from './ui/App.jsx';
+import { familyDir } from './family.js';
 import { terminalMouse } from './mouse.js';
 import { notification } from './notify.js';
+import { parseArgs } from './launch.js';
 
 // A title is printed raw, so nothing in it may end or start an escape sequence.
 const clean = (s) => String(s).replace(/[\x00-\x1f\x7f]/g, '');
@@ -21,14 +23,21 @@ if (args.includes('-v') || args.includes('--version')) {
 
 if (args.includes('-h') || args.includes('--help')) {
   console.log(`trawl [file.sql] [--connect <name>] [--demo]
+trawl --azure-sql <server> [--database <db>] [--user <login>] [--name <name>] [--prod] [--folder <folder>]
+      [--password-from <resource-group>/<app>[/<slot>]] [--subscription <id>]
 trawl mcp [--demo]
 
 A keyboard-driven SQL Server client. Opens [file.sql] in Query, and connects to
 <name> (default: the connection you used last).
 
-  --demo   adds two in-memory demo connections for this session (no server needed)
-  mcp      runs Trawl as an MCP server for Claude Code, reading through your saved
-           connections (register it with: claude mcp add trawl -- trawl mcp)
+  --demo          adds two in-memory demo connections for this session (no server needed)
+  --azure-sql     as /azure-sql inside: connects to the saved connection with this Azure SQL
+                  server, database and login, or saves one first as /add does (named --name,
+                  else after the server and database). Without --user it signs in with your az
+                  login; with it, the password saved for the connection, else (--password-from)
+                  the one in that App Service's connection strings, read through az
+  mcp             runs Trawl as an MCP server for Claude Code, reading through your saved
+                  connections (register it with: claude mcp add trawl -- trawl mcp)
 
 Inside: press ? for shortcuts, / for commands, ! to run SQL.`);
   process.exit(0);
@@ -49,10 +58,14 @@ async function runApp() {
     process.exit(1);
   }
 
-  const demo = args.includes('--demo');
-  const at = args.indexOf('--connect');
-  const connectTo = at >= 0 ? args[at + 1] : demo ? 'demo' : undefined;
-  const file = args.find((x, i) => !x.startsWith('-') && args[i - 1] !== '--connect');
+  let parsed;
+  try {
+    parsed = parseArgs(args);
+  } catch (e) {
+    console.error(`trawl: ${e.message} (trawl --help says how)`);
+    process.exit(1);
+  }
+  const { demo, file, connect: connectTo, azureSql } = parsed;
 
   const config = loadConfig();
   if (demo) config.connections = [...DEMO_CONNECTIONS, ...config.connections.filter((c) => !DEMO_CONNECTIONS.some((d) => d.name === c.name))];
@@ -79,11 +92,13 @@ async function runApp() {
       config={config}
       initialFile={file}
       initialConnection={connectTo}
+      azureSql={azureSql ?? undefined}
       checkLatest={checkLatest}
       installUpdate={COMPILED ? installUpdate : undefined}
       setTitle={setTitle}
       mouse={mouse}
       notify={(title, body) => process.stdout.write(notification(title, body))}
+      familyHome={familyDir()}
     />,
     // Through the mouse's stdout, which watches the frames to select text from.
     { exitOnCtrlC: false, stdout: mouse?.stdout ?? process.stdout },

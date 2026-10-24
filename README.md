@@ -50,7 +50,7 @@ Releases are automatic: every push to main (a merged pull request, say) publishe
 trawl --demo
 ```
 
-This adds two in-memory connections for the session: `demo`, and `demo-prod`, which behaves like a production connection. Each has the databases `ClubA` and `ClubB`. The demo has no SQL engine. It answers the catalog (and `/grep`, `/uses` and `/script-all`, with a trigger on `Players` for them to find), `SELECT [TOP (n)] * FROM` a table, simple `SELECT` lists, `USE`, transactions, made-up plans (estimated and actual), `WAITFOR DELAY` (to try cancelling) and `RAISERROR`/`THROW`. Writes only report how many rows they would touch, though they keep their copy for `/undo-write` all the same, and an open transaction says it holds a few made-up locks. `ClubA` has a Flyway history for `/migrations` to compare with (`V1__Create_clubs.sql` and `V2__Add_players.sql`), and what a run records there stays until you disconnect.
+This adds two in-memory connections for the session: `demo`, and `demo-prod`, which behaves like a production connection. Each has the databases `ClubA` and `ClubB`. The demo has no SQL engine. It answers the catalog (and `/grep`, `/uses` and `/script-all`, with a trigger on `Players` for them to find), `SELECT [TOP (n)] * FROM` a table, simple `SELECT` lists, `USE`, transactions, made-up plans (estimated and actual), `WAITFOR DELAY` (to try cancelling) and `RAISERROR`/`THROW`. Writes only report how many rows they would touch, though they keep their copy for `/undo-write` all the same, and an open transaction (a `/rehearse` too) says it holds a few made-up locks. `/copy-rows` reads rows by key and counts its inserts, and an extra demo connection (`{ "name": "dev", "demo": true, "server": "demo", "database": "ClubB" }` in `config.json`) gives it somewhere to copy to. `ClubA` has a Flyway history for `/migrations` to compare with (`V1__Create_clubs.sql` and `V2__Add_players.sql`), and what a run records there stays until you disconnect.
 
 ## Connect
 
@@ -77,9 +77,27 @@ Save connections with `/add`:
 
 Azure SQL gets a fresh token from the Azure CLI each time it connects, so there's no password to keep. A SQL or Windows login asks for its password the first time you connect, shown as `*`. With "Keep it" ticked (`tab` changes it), a password that signs in is saved in the operating system's credential store: **Windows Credential Manager** (as `Trawl:<connection>`), the macOS Keychain, or the Secret Service keyring on Linux (through `secret-tool`). It is never written to Trawl's own files. A saved password the server turns down is asked for again. `p` in Connections, or `/password [connection]`, sets a new one ahead of time; leaving it empty removes the saved one, and forgetting a connection removes its password too. If you'd rather keep a password in an environment variable, `/add … --password-env <VAR>` names it, and the variable comes first when it's set.
 
-Connections live in `~/.trawl/config.json` (or `TRAWL_HOME`), along with the prompt history, the run history and what Settings (`,`) changes: the row limit, the accent colour, the mouse, updates, notifications and the warning about open transactions.
+Connections live in `~/.trawl/config.json` (or `TRAWL_HOME`), along with the prompt history, the run history and what Settings (`,`) changes: the row limit, the accent colour, the mouse, updates, notifications, the warning about open transactions and the family's moods.
 
 When a query (or anything else with the spinner) takes longer than 10 seconds, Trawl rings the terminal's bell and asks it for a desktop notification saying what finished and how (OSC 9, which Windows Terminal, iTerm2, WezTerm and kitty show, or OSC 777 in GNOME Terminal and other VTE terminals), for when you've switched to another window. **Notify when done** in Settings turns it off, and `"notifyAfter": 30` in `config.json` changes the seconds. A run you cancel says nothing.
+
+### Azure SQL: the firewall, and /azure-sql
+
+When an Azure SQL server's firewall turns your machine away (error 40615, "Client with IP address … is not allowed to access the server"), Trawl asks whether to add a firewall rule on that server for the address in the error. Yes has the Azure CLI (your `az login`) find the server in its current subscription and add the rule `trawl-<address>` (`az sql server firewall-rule create`), which the log shows, and then connects again, trying a few times over about 15 seconds while the rule applies. `/firewall [connection]` adds the rule on demand, for the connection on screen (or the one the firewall last turned away): with the address that error gave, or else the one [api.ipify.org](https://api.ipify.org) sees. Your login needs the right to change the server's firewall (SQL Server Contributor, say).
+
+`/azure-sql` connects to an Azure SQL database without setting a connection up first. Sonar, the Azure console, copies one for you to paste into the prompt:
+
+```
+/azure-sql myserver.database.windows.net ClubA
+/azure-sql myserver.database.windows.net ClubA --user app --name club-a-app --password-from rg-clubs/clubs-api
+/azure-sql myserver.database.windows.net ClubA --prod --folder Azure/PROD
+```
+
+The whole form is `/azure-sql <server> [database] [--name <name>] [--user <login>] [--prod] [--folder <folder>] [--password-from <resource-group>/<app>[/<slot>]] [--subscription <id>]`. Trawl connects to the saved connection with that server (`tcp:` and `,1433` aside, in any case), database and login, or else saves one first, as `/add` would, and connects to it. It's named `--name`, or after the server and database (`myserver-ClubA`), with `-2` added when that name is taken; `--prod` and `--folder` are as for `/add`, for a connection it saves. Without `--user` it signs in with your `az login`. With it, it's a SQL login, whose password is looked for as any login's is (the environment variable, then the credential store), and asked for when there's none.
+
+`--password-from` names an App Service (and its slot) whose connection strings or app settings hold the login's password, in the subscription `--subscription` names (else az's current one). It's kept on the connection, so the password comes from Azure, never through the clipboard: when the credential store has none for the connection, or the one there is turned down (passwords get rotated), Trawl reads the App Service's connection strings and app settings through the Azure CLI (`az webapp config connection-string list` and `az webapp config appsettings list`), takes the `Password` of the one whose server, database and user are the connection's, and, once it signs in, keeps it in the credential store as it would a typed one. It's never shown or logged. `/azure-sql` on a saved connection with a different `--password-from` changes it there.
+
+`trawl --azure-sql <server> [--database <db>] …` does the same from the command line, with the same options (the database as `--database`).
 
 ### Through an SSH tunnel
 
@@ -107,8 +125,8 @@ Besides SQL Server, a connection can be to PostgreSQL or MySQL (MariaDB too): `/
 
 Most of Trawl works the same there: the Explorer, the console and its suggestions, scripts, Results with sorting, filters, copying, comparing, following foreign keys and editing in place, History, the read-only and production rules, manual commit (`BEGIN`/`START TRANSACTION`, then `/commit` or `/rollback`), the questions before risky statements and the row count before an `UPDATE` or `DELETE`, parameters and snippets, `/fanout` (a folder can mix kinds), CSV import, Activity and `/kill` (`pg_terminate_backend` on Postgres), `p` for the plan (`EXPLAIN`, which doesn't run anything) and Claude's explanation of it, `P` for the actual plan (`EXPLAIN (ANALYZE, BUFFERS)` on Postgres, `EXPLAIN ANALYZE` on MySQL 8.0.18 or later, with the same `▲`/`▼` marks), `c` for a view's or routine's definition, `/grep` and `/uses`, and `trawl mcp`. The differences:
 
-- A script runs a statement at a time, split at `;` (Postgres's `$$` bodies and MySQL's backslash escapes are understood); there is no `GO`, and MySQL's `DELIMITER` isn't supported.
-- Rows past the row limit are dropped once they arrive, rather than the query being stopped there, so a huge `SELECT` still crosses the network: add a `LIMIT`.
+- A script runs a statement at a time, split at `;` (Postgres's `$$` bodies and MySQL's backslash escapes are understood); there is no `GO`. On MySQL, a `DELIMITER $$` line works as in the mysql client: statements then end at `$$`, so a procedure's or trigger's body with `;` in it goes to the server whole, until `DELIMITER ;`. Run the whole script for that, or select the lines with the `DELIMITER` lines in them.
+- The row limit stops a query there, as on SQL Server, and `m` fetches more the same way. On Postgres a statement that reads (`SELECT`, `WITH`, `VALUES`, `TABLE`, `SHOW`, `FETCH`) goes through a cursor that hands over only the limit's worth, so the rest never leaves the server; on MySQL the query is stopped (`KILL QUERY`) as soon as the limit's worth has come, which ends that statement but leaves your transaction as it was. The rows a write sends back (Postgres's `RETURNING`) are still cut once they have arrived.
 - Saving edited results is written each server's way (see [Editing results](#editing-results)). Generated columns, Postgres arrays, intervals and geometric values, and MySQL's spatial types can't be edited, and on MySQL a failed save leaves only tables that keep transactions (InnoDB, not MyISAM) as they were.
 - `/stats` and the sync script of `/diff` are SQL Server only; `/diff` compares tables, columns and keys only (not indexes or definitions) when either side isn't SQL Server.
 - Activity on MySQL doesn't show who blocks whom. There are no SQL Agent jobs on either (`J` says so), and the top queries come from `pg_stat_statements` (which has to be installed: `Q` says how) and from `performance_schema` on MySQL, where reads are rows examined and there is no CPU time.
@@ -144,6 +162,12 @@ It only reads: anything that would change data or schema is refused, and what ru
 - Data sources in a DataGrip folder called PROD (or with prod in the name) become production connections, read-only until `/writes`; DataGrip's own read-only flag and manual commit (Tx: Manual) carry over too.
 - Importing again only adds what's new: one Trawl already has (same server, database and login) is skipped. If that one is in no folder yet, it goes into its DataGrip folder, so connections imported before Trawl had folders get theirs by running `/import datagrip` again.
 
+### From the project's own files
+
+When Trawl starts in a project folder whose files name databases that aren't saved yet, the log says so once: `Found 2 databases in appsettings.Development.json and .env: /project to add them.` It reads the `ConnectionStrings` of `appsettings*.json` (ADO.NET connection strings, SQL Server's) and `DATABASE_URL`-style lines in `.env` files (`postgres://…`, `mysql://…`, `sqlserver://…`). A database counts as saved when a connection has the same server (`tcp:` and the port aside), database and login.
+
+`/project` lists them: `↵` on one saves it as `/add` would (the line it runs is shown beside it, the same line the siblings' `/family` copies for Trawl), named after its key (`DefaultConnection`, with `-2` when that name is taken), as SQL Server, PostgreSQL or MySQL by its connection string, with its login, or your `az login` when it has none (Entra or integrated sign-in; an Azure SQL server that way is saved as `/azure-sql` would), and `--trust-cert` when the connection string has `TrustServerCertificate=True`. When the file holds the login's password, Trawl asks before keeping it in the OS credential store for that connection, as a typed one would be; it never goes into `config.json`. The folder is the one Trawl started in, or the checkout of the script you opened.
+
 The Explorer shows the server as a tree, as SSMS's Object Explorer does: every database you can open on it, the one you're in opened up to its schemas, tables, views and routines, and the server's own (`master`, `msdb`, …) last. `↵` on another database switches to it, as `/use <database>` does: by reconnecting, which works on Azure SQL Database too, where `USE` doesn't (and there the server lists only `master` and your database). With a transaction open, it asks first.
 
 ## Use
@@ -154,17 +178,17 @@ Press `?` inside for every shortcut: the sections down the left, opening on the 
 | --- | --- |
 | Anywhere | `1`–`6` or `tab` switch views · `/` commands · `!` SQL · `ctrl+p` the command palette · `r` reload the schema · `,` settings · `esc` cancel the running query · `q` quit |
 | Lists | `j`/`k` or arrows · `g`/`G` top/bottom · `ctrl+d`/`ctrl+u` page |
-| Explorer | `↵` first rows (on a database: switch to it) · `d` describe · `s` start a query on it in the console · `c` its CREATE script, into the console · `u` what uses it, and what it uses · `/find <text>` filter · `/grep <text>` search inside the definitions |
-| Query, the console | `↵` or `i` start typing · `esc` stop · `ctrl+r` run the selection, or the statement under the cursor · `R` run it all · `f` format (`alt+shift+f` while typing) · `p` plan, `P` actual plan (then `a`: Claude explains it) · `S` save as a snippet · `[`/`]` previous/next tab · `+` new tab · `ctrl+f` find, then `n`/`N` · `ctrl+z`/`ctrl+y` undo/redo · while typing, `tab` takes a suggestion and `ctrl+n` asks for them |
+| Explorer | `↵` first rows (on a database: switch to it) · `d` describe · `s` start a query on it in the console · `c` its CREATE script, into the console · `u` what uses it, and what it uses · `C` copy its rows to another connection · `/find <text>` filter · `/grep <text>` search inside the definitions |
+| Query, the console | `↵` or `i` start typing · `esc` stop · `ctrl+r` run the selection, or the statement under the cursor · `R` run it all · `f` format (`alt+shift+f` while typing) · `p` plan, `P` actual plan (then `a`: Claude explains it) · `S` save as a snippet · `t` share the statement · `[`/`]` previous/next tab · `+` new tab · `ctrl+f` find, then `n`/`N` · `ctrl+z`/`ctrl+y` undo/redo · while typing, `tab` takes a suggestion and `ctrl+n` asks for them |
 | Query, a file | `↵` run the statement under the cursor · `v` select several · `R` run the whole file · `e` edit in the console |
-| Results | `h`/`l` columns · `[`/`]` result sets · `m` more rows · `o` sort by the column · `f` filter · `y`/`Y` copy the cell/row · `↵` the row as a record · `v` the whole value of the cell · `F` follow the foreign key · `p` pin · `c` compare with the pinned · `e` edit · `n` NULL · `d` delete · `a` add a row · `u` undo · `s` save · `x` export |
+| Results | `h`/`l` columns · `[`/`]` result sets · `m` more rows · `o` sort by the column · `f` filter · `y`/`Y` copy the cell/row · `↵` the row as a record · `v` the whole value of the cell · `F` follow the foreign key · `p` pin · `c` compare with the pinned · `e` edit · `n` NULL · `d` delete · `a` add a row · `u` undo · `s` save · `x` export · `t` share the row · `C` copy the rows to another connection |
 | History | `↵` run again · `e` edit in the console · `◆` marks what Claude ran |
 | Connections | `↵` connect · `n` new · `p` password · `f` folder · `x` forget |
 | Activity | `R` read again · `↵` the session in full · `x` kill · `a` idle sessions too · `J` SQL Agent jobs · `Q` top queries (the same key again, or `esc`, back to the sessions) |
 | Activity, jobs | `↵` recent runs · `s` start the job · `R` read again |
 | Activity, top queries | `o` sort by total duration, CPU, reads or executions · `↵` the query in full · `e` edit in the console · `R` read again |
 | Migrations (`/migrations <folder>`) | `R` run the pending ones (`/migrations run`) |
-| Settings (`,`) | `↵` or space changes the row limit, the accent colour, the theme (dark, light or auto), the mouse, whether Trawl checks for and installs updates, whether it notifies when a long run ends, and how long a transaction may sit open before Trawl warns · `esc` closes |
+| Settings (`,`) | `↵` or space changes the row limit, the accent colour, the theme (dark, light or auto), the mouse, whether Trawl checks for and installs updates, whether it notifies when a long run ends, how long a transaction may sit open before Trawl warns, and whether Glim shares moods with the family · `esc` closes |
 
 One-liners can also go straight in the prompt: SQL there runs with `!`, or without it when it starts with a SQL keyword (`select …`, `exec …`).
 
@@ -265,6 +289,20 @@ Files in that layout whose objects are gone (dropped, renamed) are listed, and r
 
 `R` on the list, or `/migrations run [folder]` (the last folder shown, without one), runs the pending ones in order. Each goes through the usual checks, as if you'd run it yourself: a read-only connection refuses it, risky statements ask first, and with manual commit they wait for `/commit`. After each, Trawl records it the way its tool would: Flyway's row (`installed_rank`, `version`, `description`, type `SQL`, `script`, `checksum`, `installed_by`, `execution_time`, `success`), DbUp's script name and time, or Trawl's own row. The first one that fails, or that you answer No to, stops the rest. When applied ones are changed or missing (which Flyway would refuse to go on with), the question says so first.
 
+### Rehearsing a migration
+
+`/rehearse` runs the console's script, or `/rehearse <file.sql>` a file, for real but inside a transaction that is always rolled back, and reports each statement: how long it took, how many rows it changed (or the result sets it gave), and the error that stopped it, with the statements after it that didn't run. At the end, before rolling back, it lists the locks the script held (`sys.dm_tran_locks` on SQL Server, `pg_locks` on Postgres), summed up by object (`dbo.Players: X on 3 keys, IX on the table`): what a real run would keep until it commits, and other sessions would wait for. Nothing is kept, whatever happens, esc included. History records it as a rehearsal.
+
+SQL Server and PostgreSQL roll back DDL as well as data, so a migration that adds a column and fills it can be rehearsed whole. MySQL commits DDL (`CREATE`, `ALTER`, `DROP`, `RENAME`, `TRUNCATE`…) by itself, so a script with any is refused there, saying so; its `INSERT`s, `UPDATE`s and `DELETE`s can be rehearsed. A script that begins or ends transactions of its own (`BEGIN TRAN`, `COMMIT`, `ROLLBACK`) is refused too, as is what can't run inside a transaction at all (`CREATE DATABASE`, `CREATE INDEX CONCURRENTLY`, `VACUUM`). With a transaction of yours open it asks you to end it first. On a production connection it asks first, saying that the locks it takes while it runs are real. A script runs a statement at a time (a `GO` batch at a time on SQL Server when it declares variables), and its parameters are asked for as for any run.
+
+### Production rows to dev, masked
+
+`/copy-rows <target> [table] [--where <condition>] [--no-mask]` copies rows from the database you're on into another saved connection: those of the table on screen in Results (when its rows are one table's), or of the table named, up to the row limit (`--where` picks them, as a `WHERE` would). The rows they refer to through foreign keys come too, and the rows those refer to, read as far as they go (only read: nothing is written where they come from). `C` in Results or on a table in the Explorer asks which connection to copy to.
+
+- Personal data is made up: columns named like an email, a phone or mobile number, a first, last or full name (and a plain `Name` in a table of people), an address, street, city, zip or postal code, a birth date, an SSN, NIF or NIN, an IBAN, a card or passport number, or an IP address get a fake that fits the column (its type and length; an identifier keeps its shape, digits for digits). The same value always gets the same fake, so rows that matched still match after. `--no-mask` copies them as they are.
+- The script inserts the rows referred to first, then the rows, in one transaction. A row whose primary key the target has already is skipped: `IF NOT EXISTS` on SQL Server (with `SET IDENTITY_INSERT` around a table with an identity, so the keys stay the same), `ON CONFLICT DO NOTHING` on PostgreSQL (`OVERRIDING SYSTEM VALUE` for identity columns, whose sequences it doesn't move on), `INSERT IGNORE` on MySQL. Computed columns are left out. A table without a primary key can't be copied, since a row already there can't be told from a new one; and both connections must be the same kind.
+- The script shows first, with what it copies and which columns are made up, and runs only when you say yes. A production or read-only target is refused outright. The log says how many rows went in and how many were there already, and the target's History has the script.
+
 ### Test data
 
 `/generate <table> [rows] [--seed n]` writes made-up rows for a table (10 unless you say) as `INSERT` statements in a console tab of its own (`generate`), to read through and run with `R`; nothing runs by itself. Each value fits its column's type, length and nullability (a nullable column is sometimes `NULL`), and identity, computed and `rowversion` columns are left out. Names, emails, phone numbers, cities, countries (a `char(2)` gets a country code), dates, amounts, quantities and descriptions are guessed from the column's name. A foreign key takes key values the table it refers to already has (the first thousand, read in key order), and primary-key and unique columns get a different value in each row (unique among these rows: what the table already holds isn't checked). The same seed gives the same rows, so a test can rely on them; `--seed` picks another set.
@@ -330,9 +368,9 @@ On PostgreSQL it checks what has an equivalent there: tables without a primary k
 
 ### Slash commands
 
-Type `/` and the menu narrows as you type. `tab` completes, `↑`/`↓` picks, `↵` runs. `/connect` completes connection names, `/use` database names, `/describe`, `/generate` and `/scaffold` tables and views, and `/script` and `/uses` everything in the database.
+Type `/` and the menu narrows as you type. `tab` completes, `↑`/`↓` picks, `↵` runs. `/connect` and `/copy-rows` complete connection names, `/use` database names, `/describe`, `/generate` and `/scaffold` tables and views, and `/script` and `/uses` everything in the database.
 
-`/import datagrip [folder]` `/import-csv <file.csv> <table> [--run]` `/connect <name>` `/add …` `/forget <name>` `/folder <connection> [folder]` `/password [connection]` `/disconnect` `/use <database>` `/open <file.sql>` `/snippet [name]` `/snippets` `/console` `/tab …` `/new` `/format` `/search <text>` `/save <file.sql>` `/describe <table>` `/script <name>` `/grep <text>` `/uses <object>` `/find [text]` `/export <file>` `/filter [text]` `/cell` `/follow` `/pin` `/compare` `/copy [tsv|csv|json|md|insert]` `/limit [rows]` `/watch <seconds> [sql] [--until <condition>]` `/writes` `/tx [auto|manual]` `/commit` `/rollback` `/undo-write` `/ask <question>` `/why` `/explain` `/ai [connection] [level]` `/update` `/settings` `/stats [on|off]` `/plan [actual] [sql]` `/more` `/diff <connection> [database]` `/health` `/sizes` `/deadlocks` `/fanout <folder> [sql]` `/activity` `/jobs` `/top-queries` `/kill <session>` `/script-all <folder>` `/migrations [run] <folder>` `/generate <table> [rows] [--seed n]` `/scaffold <table> [csharp|ef|ts|python]` `/last` `/refresh` `/help` `/quit`
+`/import datagrip [folder]` `/import-csv <file.csv> <table> [--run]` `/connect <name>` `/add …` `/forget <name>` `/folder <connection> [folder]` `/password [connection]` `/azure-sql <server> [database] …` `/firewall [connection]` `/disconnect` `/use <database>` `/open <file.sql>` `/snippet [name]` `/snippets` `/console` `/tab …` `/new` `/format` `/search <text>` `/save <file.sql>` `/describe <table>` `/script <name>` `/grep <text>` `/uses <object>` `/find [text]` `/export <file>` `/filter [text]` `/cell` `/follow` `/pin` `/compare` `/copy [tsv|csv|json|md|insert]` `/limit [rows]` `/watch <seconds> [sql] [--until <condition>]` `/writes` `/tx [auto|manual]` `/commit` `/rollback` `/undo-write` `/ask <question>` `/why` `/explain` `/ai [connection] [level]` `/update` `/settings` `/stats [on|off]` `/plan [actual] [sql]` `/more` `/diff <connection> [database]` `/health` `/sizes` `/deadlocks` `/fanout <folder> [sql]` `/activity` `/jobs` `/top-queries` `/kill <session>` `/script-all <folder>` `/migrations [run] <folder>` `/generate <table> [rows] [--seed n]` `/scaffold <table> [csharp|ef|ts|python]` `/api [language]` `/last` `/refresh` `/help` `/quit`
 
 ### The command palette
 
@@ -399,6 +437,12 @@ After a run the server turned down, the log line under the error says `/why asks
 
 On a plan (`p` or `P` in the console, or `/plan`), `a` asks Claude to explain it, and `/explain` does the same for the last plan shown: what the plan does step by step, what is likely to cost the most (scans, lookups, sorts, conversions, a missing index) and what might help, with a `CREATE INDEX` when one would, and on an actual plan, where the estimates were far off. Claude gets the query and its plan text, never rows, so a connection at the `schema` level can ask; one at `off` can't. The answer opens in the viewer, and `/last` shows it again.
 
+### A query as an API
+
+`/api` asks Claude for an HTTP endpoint that runs the console's statement (the selection, or the one under the cursor): its parameters (`@clubId`) become route or query parameters, it runs the SQL with them as parameters (never pasted into the text), and returns the rows as JSON. It's written in the project's language: a C# minimal API when the project has a `*.csproj`, Node with Express when it has a `package.json`, otherwise the one you name (`/api csharp`, `node`, `python`, `go`), and otherwise Trawl asks. A language you name comes first. Claude gets the SQL, the kind of database and its parameters, never rows, so a connection at the `schema` level can ask.
+
+The endpoint opens in the viewer, and `s` there saves it to a file you name (in the project's folder unless you give a path; Trawl asks before replacing one). A line for Hail, to call it, is copied too: `/take` with the request (`GET {{host}}/players/{id}`), where `{{host}}` is Hail's variable for where your API runs.
+
 ### Claude Code reads your databases (MCP)
 
 `trawl mcp` runs Trawl as an MCP server, so Claude Code, working in any of your repositories, can look at your databases through your saved connections. Register it once:
@@ -416,6 +460,16 @@ claude mcp add --scope user trawl -- trawl mcp
 - Everything Claude runs shows in History, marked `◆`.
 
 `trawl mcp --demo` adds the demo connections, to try it without a server.
+
+## The family
+
+Trawl has siblings, built the same way: Splice (git), Sonar (Azure), Bosun (the project's processes) and Hail (HTTP requests). They never start each other: what one hands another is a command line it copies, for you to paste into the other's prompt. The log says `Copied for Hail: paste it into Hail's prompt` and what the line holds. A plain command where the other app has one (`/open`, `/move`), else `/take family:v1:…`, a thing under the cursor in one word. Nothing secret is ever in one.
+
+- `/take <family:v1:…>` takes what a sibling copied for Trawl: a query goes into a console tab of its own (`take`), and Trawl connects to the saved connection to the server and database it was for (or says which it was for, when none is); rows become an `INSERT … VALUES` script in a tab of their own (`rows`). Pasting the bare `family:v1:…` at the prompt works too. What's for another app (a request, a commit, an exception) says whose it is.
+- `/share`, or `t` in the console and Results, copies one: the console's statement as a query (for another Trawl), or in Results the row under the cursor, as rows (for Hail to send as a request's body, or another Trawl to insert); `/share all` copies every row of the result set. Columns that look like they hold a secret (a password, a hash, a token) are left out of it, and the log says which.
+- `/family` lists what this project offers the others: the repository, for Splice (`/open <repo>`); its processes, for Bosun (`/move <folder>`), when it has something to run; each `.http` file, for Hail (`/open <file>`). `↵` copies the line. The project is the folder Trawl started in, or the checkout of the script you opened.
+- A command pasted over a view (anywhere but the prompt, the console or a cell being typed in), or a bare `family:v1:…`, goes into the prompt instead of being taken as keys: `↵` runs it.
+- Glim tells the others how it feels, and why (a query failed, a transaction has been open 20 minutes), in a small file under `~/.family` (or `FAMILY_HOME`), on this machine only. Every half a minute Trawl reads theirs: when one has been worried, sad or happy in the last 15 minutes, Glim says so once, in a line above the log (`Ping says: production has 12 new exceptions`), until `esc`. **Family moods** in Settings (`"familyMoods": false`) turns both off.
 
 ## Updates
 

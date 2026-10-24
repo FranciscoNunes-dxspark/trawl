@@ -1,7 +1,8 @@
 // PostgreSQL behind the same session interface as db.js's SQL Server one, through pg (plain
 // JavaScript, so the Bun build carries it). A script runs a statement at a time (dialects.js
-// splitScript), each result set cut at the row limit; pg reads a result whole, so the rows past the
-// limit still cross the network before they're dropped. esc cancels with pg_cancel_backend.
+// splitScript). A statement that reads rows goes through a portal that hands over the row limit and
+// one more, then is closed (LimitedQuery), so the server stops there, as SQL Server's does, and an open
+// transaction carries on. esc cancels with pg_cancel_backend.
 import pg from 'pg';
 import { DbError, connectionLost, ended, runScript } from './db.js';
 import { DIALECTS, splitScript } from './dialects.js';
@@ -83,6 +84,63 @@ async function cancelBackend(config, pid) {
   }
 }
 
+/**
+ * A query through the extended protocol's portal, which hands over at most `limit + 1` rows: when the
+ * server suspends it there (there are more), the portal is closed and the exchange ended with Sync,
+ * so the rest are never read, the server stops, and a transaction stays usable (a cancel would fail
+ * it). Its rows come back as pg's usual result, the one extra row saying there were more.
+ */
+export class LimitedQuery extends pg.Query {
+  constructor(text, limit) {
+    super({ text, rowMode: 'array', rows: limit + 1 });
+    this.synced = false;
+    this.submitted = false;
+  }
+  submit(connection) {
+    this.submitted = true;
+    return super.submit(connection);
+  }
+  handlePortalSuspended(connection) {
+    this.synced = true;
+    connection.close({ type: 'P', name: this.portal });
+    connection.sync();
+  }
+  handleCommandComplete(msg, connection) {
+    this.synced = true;
+    super.handleCommandComplete(msg, connection);
+  }
+  handleEmptyQuery(connection) {
+    this.synced = true;
+    super.handleEmptyQuery(connection);
+  }
+  // The server skips everything after an error until Sync, which pg leaves to the query when it pages.
+  handleError(err, connection) {
+    if (this.submitted && !this.synced) {
+      this.synced = true;
+      connection.sync();
+    }
+    super.handleError(err, connection);
+  }
+}
+
+// Statements that read rows, which go through LimitedQuery; the rest go as a simple query.
+const READS = /^(\s|--[^\n]*\n|\/\*[\s\S]*?\*\/|\()*(SELECT|WITH|TABLE|VALUES|SHOW|FETCH)\b/i;
+export const readsRows = (text) => READS.test(text);
+
+/**
+ * Sends one statement: a read through LimitedQuery, anything else as it is. A stand-in client (the
+ * tests') that answers a query with a promise is taken at its word.
+ */
+export function send(client, text, limit) {
+  if (!readsRows(text) || !Number.isSafeInteger(limit)) return client.query({ text, rowMode: 'array' });
+  return new Promise((resolve, reject) => {
+    const q = new LimitedQuery(text, limit);
+    q.callback = (err, res) => (err ? reject(err) : resolve(res));
+    const answer = client.query(q);
+    if (typeof answer?.then === 'function') answer.then(resolve, reject);
+  });
+}
+
 /** One statement's results into the shared state: result sets cut at `limit`, and rows affected. */
 export function collectResult(result, state, limit) {
   for (const r of Array.isArray(result) ? result : [result]) {
@@ -131,7 +189,7 @@ export function postgresSession(conn, client, { database = null, cancel = async 
           const onAbort = () => cancel().catch(() => {});
           signal?.addEventListener('abort', onAbort, { once: true });
           try {
-            collectResult(await client.query({ text, rowMode: 'array' }), state, limit);
+            collectResult(await send(client, text, limit), state, limit);
           } catch (e) {
             if (e.code === '57014' || signal?.aborted) throw new DbError('Cancelled', { cancelled: true });
             throw new DbError(errorText(e), { number: e.code ?? null, line: errorLine(e, text, line), lost: connectionLost(e) });

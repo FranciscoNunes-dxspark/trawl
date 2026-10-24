@@ -1,7 +1,8 @@
 // MySQL (and MariaDB) behind the same session interface as db.js's SQL Server one, through mysql2
-// (plain JavaScript). A script runs a statement at a time (dialects.js splitScript; DELIMITER isn't
-// understood), each result set cut at the row limit after it has arrived. esc cancels with KILL QUERY
-// from a second connection.
+// (plain JavaScript). A script runs a statement at a time (dialects.js splitScript, which follows
+// DELIMITER lines). Rows are read as they arrive, and at the row limit and one more the query is
+// stopped (KILL QUERY from a second connection, which ends the statement but not the transaction), so
+// the server stops there as SQL Server's does. esc cancels the same way.
 import mysql from 'mysql2/promise';
 import { DbError, connectionLost, ended, localSocket, runScript } from './db.js';
 import { DIALECTS, splitScript } from './dialects.js';
@@ -55,6 +56,47 @@ async function killQuery(config, id, tunnel) {
   }
 }
 
+/**
+ * Runs one statement on mysql2's own connection (`core`), reading the rows as they come: once a
+ * result set has `limit` and one more, `stop()` (KILL QUERY) ends the statement, and the rest are let
+ * go. Resolves as mysql2's promise API does ([rows, fields], or each result's for several), and the
+ * error the stop causes comes back as the rows read. A connection that drops on the way rejects.
+ */
+export function streamQuery(core, sql, limit, stop) {
+  return new Promise((resolve, reject) => {
+    const rows = [];
+    const fields = [];
+    let stopping = null;
+    const answer = () => (rows.length === 1 ? [rows[0], fields[0]] : [rows, fields]);
+    const finish = (fn) => {
+      core.removeListener?.('error', lost);
+      core.removeListener?.('end', lost);
+      // The KILL has to have landed before the next statement starts, or it could stop that one.
+      Promise.resolve(stopping).then(fn, fn);
+    };
+    const lost = (e) => finish(() => reject(e ?? Object.assign(new Error('Connection lost: The server closed the connection.'), { code: 'PROTOCOL_CONNECTION_LOST', fatal: true })));
+    core.on?.('error', lost);
+    core.on?.('end', lost);
+    const q = core.query({ sql, rowsAsArray: true });
+    q.on('fields', (f) => {
+      fields.push(f);
+      rows.push(f ? [] : undefined);
+    });
+    q.on('result', (row) => {
+      const at = rows.length - 1;
+      if (fields[at] === undefined) rows[at] = row;
+      else if (stopping) return;
+      else {
+        rows[at].push(row);
+        if (rows[at].length > limit) stopping = Promise.resolve(stop()).catch(() => {});
+      }
+    });
+    let failed = null;
+    q.on('error', (e) => (failed = e));
+    q.on('end', () => finish(() => (failed && !(stopping && failed.errno === 1317) ? reject(failed) : resolve(answer()))));
+  });
+}
+
 /** One statement's answer ([rows, fields] from mysql2, a CALL's several) into the shared state. */
 export function collectResult([rows, fields], state, limit) {
   const pairs = Array.isArray(fields) && Array.isArray(fields[0]) ? rows.map((r, i) => [r, fields[i]]) : [[rows, fields]];
@@ -104,7 +146,8 @@ export function mysqlSession(conn, c, { database = null, cancel = async () => {}
           signal?.addEventListener('abort', onAbort, { once: true });
           let mismatch = null;
           try {
-            const result = await c.query({ sql: text, rowsAsArray: true });
+            // mysql2's own connection streams the rows; a stand-in without one (the tests') answers whole.
+            const result = c.connection?.query && Number.isSafeInteger(limit) ? await streamQuery(c.connection, text, limit, cancel) : await c.query({ sql: text, rowsAsArray: true });
             collectResult(result, state, limit);
             open = transactionAfter(open, text);
             const one = oneRowCheck(text);

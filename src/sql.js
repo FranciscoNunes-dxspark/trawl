@@ -8,15 +8,61 @@ const FILL = '\u0001';
 /** Masks comments (nested /* *\/ too), 'strings', "identifiers" and [identifiers] in `src`. */
 export function mask(src) {
   // As splitStatements, the last answer is kept: highlighting, splitting and completing all mask the same text.
-  if (src !== lastMask.src) lastMask = { src, masked: maskText(src) };
-  return lastMask.masked;
+  if (src === lastMask.src) return lastMask.masked;
+  if (src === lastLong.src) return (lastMask = lastLong).masked;
+  // A long text is most often the console's after one key: only the part around the change is masked again.
+  const masked = src.length >= LONG && lastLong.src != null ? remask(lastLong, src) : maskText(src).out;
+  lastMask = { src, masked };
+  if (src.length >= LONG) lastLong = lastMask;
+  return masked;
 }
 
 let lastMask = { src: null, masked: '' };
+// The last long text masked, which the next one is compared with; other masks in between (a statement,
+// the text before the cursor) don't push it out.
+let lastLong = { src: null, masked: '' };
+const LONG = 4096;
 
-function maskText(src) {
+/**
+ * Masks `src` again from `before`'s mask, `before.src` being a text that differs from it in one place.
+ * The mask of a character depends only on the text before it (and the character after), so up to the
+ * change it is the same; from the change it is worked out again until both texts are past it and at
+ * a character outside any masked run in both, after which the rest is the old mask's.
+ */
+function remask(before, src) {
+  const old = before.src;
+  const n = Math.min(old.length, src.length);
+  const p = common(n, (k) => old.slice(0, k) === src.slice(0, k));
+  const tail = common(n - p, (k) => old.slice(old.length - k) === src.slice(src.length - k));
+  const shift = src.length - old.length;
+  const changeEnd = src.length - tail;
+  // Back to where masking was outside a run, before the change and before the character it looked ahead to.
+  let q = Math.max(0, p - 1);
+  while (q > 0 && before.masked[q - 1] === FILL) q--;
+  const { out, at } = maskText(src, q, (i) => i - 1 >= changeEnd && before.masked[i - 1 - shift] !== FILL);
+  return before.masked.slice(0, q) + out + before.masked.slice(at - shift);
+}
+
+// The most, up to `n`, for which same(k) holds, same being true up to some k and false after: how
+// many characters two texts have in common at the start or end, compared a block at a time.
+function common(n, same) {
+  let lo = 0;
+  let hi = n;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (same(mid)) lo = mid;
+    else hi = mid - 1;
+  }
+  return lo;
+}
+
+/**
+ * The mask of `src` from `from` (where masking is outside any run) on: { out, at }. With `stop`, it
+ * ends at the first `at` after a character outside any run for which stop(at) is true.
+ */
+function maskText(src, from = 0, stop = null) {
   let out = '';
-  let i = 0;
+  let i = from;
   const n = src.length;
   const fill = (from, to) => {
     out += FILL.repeat(to - from);
@@ -54,9 +100,10 @@ function maskText(src) {
     } else {
       out += ch;
       i++;
+      if (stop?.(i)) return { out, at: i };
     }
   }
-  return out;
+  return { out, at: n };
 }
 
 const GO_LINE = /^[ \t]*go(?:[ \t]+(\d+))?[ \t\u0001]*$/i;
@@ -64,7 +111,7 @@ const hasCode = (masked) => /[^\s\u0001;]/.test(masked);
 
 function lineIndex(src) {
   const starts = [0];
-  for (let i = 0; i < src.length; i++) if (src[i] === '\n') starts.push(i + 1);
+  for (let i = src.indexOf('\n'); i >= 0; i = src.indexOf('\n', i + 1)) starts.push(i + 1);
   return (offset) => {
     let lo = 0;
     let hi = starts.length - 1;
@@ -133,6 +180,9 @@ export function splitStatements(text) {
 
 let lastSplit = { text: null, statements: [] };
 const WORD_AFTER = /[\s\u0001]*(\w+)/y;
+// [A-Za-z_@#], which starts a word, and [\w@#$], which goes on with one.
+const wordStart = (c) => (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 95 || c === 64 || c === 35;
+const wordChar = (c) => wordStart(c) || (c >= 48 && c <= 57) || c === 36;
 
 function split(text) {
   const src = normalise(text);
@@ -171,29 +221,38 @@ function split(text) {
     words = [];
   };
 
-  let off = 0;
-  for (const line of m.split('\n')) {
-    const lineStart = off;
-    off += line.length + 1;
-    if (GO_LINE.test(line)) {
+  // Line by line over the mask, a character code at a time: this runs over the whole console on every key.
+  for (let lineStart = 0; lineStart <= m.length; ) {
+    const nl = m.indexOf('\n', lineStart);
+    const lineEnd = nl < 0 ? m.length : nl;
+    const off = lineEnd + 1;
+    let first = lineStart;
+    while (first < lineEnd && (m.charCodeAt(first) === 32 || m.charCodeAt(first) === 9)) first++;
+    if (first < lineEnd && (m.charCodeAt(first) | 32) === 103 && GO_LINE.test(m.slice(lineStart, lineEnd))) {
       flush(lineStart);
       start = Math.min(off, src.length);
+      lineStart = off;
       continue;
     }
-    if (/^[ \t]*$/.test(line)) {
+    if (first === lineEnd) {
       if (!paren && !blocks.length && !whole) flush(lineStart);
+      lineStart = off;
       continue;
     }
-    for (let j = 0; j < line.length; j++) {
-      const ch = line[j];
-      if (ch === '(') paren++;
-      else if (ch === ')') paren = Math.max(0, paren - 1);
-      else if (ch === ';' && !paren && !blocks.length && !whole) flush(lineStart + j + 1);
-      else if (/[A-Za-z_@#]/.test(ch) && (j === 0 || !/[\w@#$]/.test(line[j - 1]))) {
-        const word = line.slice(j).match(/^[\w@#$]+/)[0];
-        const w = word.toUpperCase();
-        const after = lineStart + j + word.length;
-        j += word.length - 1;
+    for (let at = lineStart; at < lineEnd; at++) {
+      const c = m.charCodeAt(at);
+      if (c === 40) paren++;
+      else if (c === 41) paren = Math.max(0, paren - 1);
+      else if (c === 59 && !paren && !blocks.length && !whole) flush(at + 1);
+      else if (wordStart(c) && (at === lineStart || !wordChar(m.charCodeAt(at - 1)))) {
+        let after = at + 1;
+        while (after < lineEnd && wordChar(m.charCodeAt(after))) after++;
+        const length = after - at;
+        const from = at;
+        at = after - 1;
+        // Only the first four words and BEGIN, CASE and END matter.
+        if (words.length >= 4 && (length < 3 || length > 5)) continue;
+        const w = m.slice(from, after).toUpperCase();
         if (words.length < 4) {
           words.push(w);
           if (isModuleHeader(words)) whole = true;
@@ -208,13 +267,15 @@ function split(text) {
           if (next === 'CATCH') {
             const catchEnd = after + m.slice(after).search(/CATCH/i) + 'CATCH'.length;
             flush(catchEnd);
-            j = catchEnd - lineStart - 1;
+            at = catchEnd - 1;
+            if (at >= lineEnd) break;
             continue;
           }
           flush(after);
         }
       }
     }
+    lineStart = off;
   }
   flush(src.length);
   return out;
@@ -465,43 +526,67 @@ const FUNCTION_NAMES = new Set([
 /**
  * Splits a script into coloured runs per line: { text, kind } with kind 'keyword', 'function',
  * 'string', 'comment', 'number', 'variable' or null. Comments and strings spanning lines stay coloured.
+ * With `from` and `to` only those lines (from inclusive, to exclusive) are worked out, the others
+ * left out of the array: the console colours the lines on screen, not the whole text on every key.
  */
-export function highlight(text) {
+export function highlight(text, { from = 0, to = Infinity } = {}) {
   const src = normalise(text);
   const m = mask(src);
-  // What each masked run is, from the character it starts with.
-  const kinds = new Array(src.length).fill(null);
-  for (let i = 0; i < src.length; ) {
+  // The offsets the lines asked for cover: [a, b), b at the end of the last one.
+  let a = 0;
+  for (let line = 0; line < from; line++) {
+    const nl = src.indexOf('\n', a);
+    if (nl < 0) return [];
+    a = nl + 1;
+  }
+  let b = a;
+  for (let line = from; line < to; line++) {
+    const nl = src.indexOf('\n', b);
+    if (nl < 0) {
+      b = src.length;
+      break;
+    }
+    b = line + 1 < to ? nl + 1 : nl;
+  }
+  // What each masked run is, from the character it starts with (which may be before `a`).
+  const kinds = new Array(b - a).fill(null);
+  for (let i = a; i < b; ) {
     if (m[i] !== FILL) {
       i++;
       continue;
     }
-    const kind = src[i] === '-' || src[i] === '/' ? 'comment' : src[i] === "'" ? 'string' : null;
+    let s = i;
+    while (s > 0 && m[s - 1] === FILL) s--;
+    const kind = src[s] === '-' || src[s] === '/' ? 'comment' : src[s] === "'" ? 'string' : null;
     let j = i;
-    while (j < src.length && m[j] === FILL) kinds[j++] = kind;
+    while (j < b && m[j] === FILL) kinds[j++ - a] = kind;
     i = j;
   }
-  for (const t of m.matchAll(/[@#]?[A-Za-z_][\w$#@]*|\b\d+(\.\d+)?\b/g)) {
+  const words = /[@#]?[A-Za-z_][\w$#@]*|\b\d+(\.\d+)?\b/g;
+  words.lastIndex = a;
+  for (let t; (t = words.exec(m)) && t.index < b; ) {
     const w = t[0];
     const upper = w.toUpperCase();
     // A built-in's name with a parenthesis after it, but not a dotted name's last part (x.value( is XML's).
     const called = FUNCTION_NAMES.has(upper) && m[t.index - 1] !== '.' && /^\s*\(/.test(m.slice(t.index + w.length, t.index + w.length + 20));
     const kind = /^\d/.test(w) ? 'number' : w.startsWith('@') ? 'variable' : called ? 'function' : KEYWORDS.has(upper) ? 'keyword' : null;
-    if (kind) for (let k = 0; k < w.length; k++) kinds[t.index + k] = kind;
+    if (kind) for (let k = 0; k < w.length; k++) kinds[t.index - a + k] = kind;
   }
   // N'…' is a string too.
-  for (let i = 0; i + 1 < src.length; i++) if ((src[i] === 'N' || src[i] === 'n') && kinds[i + 1] === 'string' && src[i + 1] === "'") kinds[i] = 'string';
+  for (let i = a; i + 1 < b; i++) if ((src[i] === 'N' || src[i] === 'n') && kinds[i + 1 - a] === 'string' && src[i + 1] === "'") kinds[i - a] = 'string';
   const out = [];
-  let off = 0;
-  for (const line of src.split('\n')) {
+  for (let row = from, off = a; row < to; row++) {
+    const nl = src.indexOf('\n', off);
+    const end = nl < 0 ? src.length : nl;
     const runs = [];
-    for (let k = 0; k < line.length; k++) {
-      const kind = kinds[off + k];
-      if (runs.length && runs.at(-1).kind === kind) runs.at(-1).text += line[k];
-      else runs.push({ text: line[k], kind });
+    for (let k = off; k < end; k++) {
+      const kind = kinds[k - a];
+      if (runs.length && runs.at(-1).kind === kind) runs.at(-1).text += src[k];
+      else runs.push({ text: src[k], kind });
     }
-    out.push(runs);
-    off += line.length + 1;
+    out[row] = runs;
+    if (nl < 0) break;
+    off = nl + 1;
   }
   return out;
 }
@@ -520,8 +605,12 @@ export function compareValues(a, b) {
   if (a instanceof Date && b instanceof Date) return a - b;
   if ((typeof a === 'number' || typeof a === 'bigint') && (typeof b === 'number' || typeof b === 'bigint')) return a < b ? -1 : a > b ? 1 : 0;
   if (typeof a === 'boolean' && typeof b === 'boolean') return Number(a) - Number(b);
-  return formatValue(a).localeCompare(formatValue(b), undefined, { numeric: true, sensitivity: 'base' });
+  return TEXT_ORDER.compare(formatValue(a), formatValue(b));
 }
+
+// localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }), made once: localeCompare with
+// options sets up a collator on every call, which sorting 50,000 rows does a million times.
+const TEXT_ORDER = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
 
 /**
  * The order a result set's rows show in, as indexes into `set.rows`: only those with a value

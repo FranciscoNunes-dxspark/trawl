@@ -113,6 +113,17 @@ test('built-in functions are their own colour when called: LEFT( is one, LEFT JO
   assert.deepEqual(kinds("SELECT x.value('a', 'int'), 'LEN(x)'"), ['SELECT:keyword', "'a':string", "'int':string", "'LEN(x)':string"]);
 });
 
+test('highlighting only some lines colours them as the whole text would, a comment or string from above included', () => {
+  const sql = "SELECT 'a\nb' AS x, N'it''s\n' /* one\ntwo\n*/ FROM t -- c\n[x\ny] COUNT(\n*)\n@v 1.5 LEFT JOIN u\n\nGO\n";
+  const all = highlight(sql);
+  for (let from = 0; from <= all.length + 1; from++) {
+    for (let to = from; to <= all.length + 2; to++) {
+      const some = highlight(sql, { from, to });
+      for (let row = 0; row < all.length + 2; row++) assert.deepEqual(some[row], row >= from && row < to ? all[row] : undefined, `lines ${from}-${to}, row ${row}`);
+    }
+  }
+});
+
 test('undo steps back a word at a time, and redo forward again', () => {
   let h = ed.newHistory();
   let e = ed.fromText('');

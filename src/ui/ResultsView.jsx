@@ -13,6 +13,27 @@ import { Lines, Panel, Row } from './parts.jsx';
 const SEP = ' │ ';
 const MAX_COL = 40;
 
+/**
+ * Runs `ref.current` when the component goes. The cleanup is made here rather than in the view, whose
+ * closures share one scope per render: made there, it would hold on to the first render's result
+ * set, however many runs later, for as long as the grid stays on screen.
+ */
+function useOnUnmount(ref) {
+  useEffect(() => () => ref.current(), []);
+}
+
+/**
+ * A key for the grid of each result set, so a new one draws its rows afresh: React's development build
+ * keeps, for as long as a row stays mounted, where it was first made, and with it the render that held
+ * the result set it was made for.
+ */
+const gridKeys = new WeakMap();
+let lastGridKey = 0;
+function gridKey(set) {
+  if (!gridKeys.has(set)) gridKeys.set(set, ++lastGridKey);
+  return gridKeys.get(set);
+}
+
 /** Column widths from the header and the first rows, so wide text doesn't push everything off screen. */
 export function columnWidths(set, sample = 200) {
   return set.columns.map((c, i) => {
@@ -237,6 +258,12 @@ export function ResultsView({ results, changes, setIndex, view, ctx, width, heig
     else if (input === 'Y' && set?.rows[row]) ctx.copy(tsvText(set, { header: false, rows: [set.rows[row]] }), `row ${row + 1}, tab-separated`);
     else if (k.return && set?.rows[row]) ctx.showText(`Row ${row + 1} of ${set.rows.length}`, recordText(set, set.rows[row]));
     else if (input === 'a' && set) addRow();
+    else if (input === 't' && set) a.share(ctx);
+    else if (input === 'C' && set) {
+      const table = results.edit?.table ?? results.source?.table;
+      if (!table) return ctx.note(`These rows aren't one table's, so there's nothing to copy from: /copy-rows <target> <table>.`, 'error');
+      a.pickCopyTarget(ctx, `${table.schema}.${table.name}`);
+    }
     else if (row == null || !set) return;
     else if (input === 'v') {
       ctx.cellOnScreen = cellAt(row, cur);
@@ -274,13 +301,12 @@ export function ResultsView({ results, changes, setIndex, view, ctx, width, heig
   // The cell under the cursor, for /cell; forgotten when the grid goes, unless another grid has taken over.
   const shownCell = useRef(null);
   shownCell.current = ctx.cellOnScreen = cellAt(shownRows[nav.index], cur);
-  useEffect(
-    () => () => {
-      leaveCell.current();
-      if (ctx.cellOnScreen === shownCell.current) ctx.cellOnScreen = null;
-    },
-    [],
-  );
+  const unmount = useRef(null);
+  unmount.current = () => {
+    leaveCell.current();
+    if (ctx.cellOnScreen === shownCell.current) ctx.cellOnScreen = null;
+  };
+  useOnUnmount(unmount);
 
   const scrollCols = (n) => {
     colFree.current = hasCursor;
@@ -313,6 +339,8 @@ export function ResultsView({ results, changes, setIndex, view, ctx, width, heig
     { top },
   );
 
+  // Where /share starts from: the row under the cursor, in the set on screen.
+  ctx.resultRow = set && shownRows[nav.index] != null ? { set, row: shownRows[nav.index] } : null;
   // Where /follow starts from: the cell under the cursor.
   ctx.resultCell = set && order[nav.index] != null && setIndex === 0 ? { row: order[nav.index], col: cur } : null;
 
@@ -360,7 +388,7 @@ export function ResultsView({ results, changes, setIndex, view, ctx, width, heig
   return (
     <Panel title={title} hint={parts.join(' · ')} width={width} height={height} focused={active}>
       {set ? (
-        <Box flexDirection="column">
+        <Box key={gridKey(set)} flexDirection="column">
           <Row
             pointer={false}
             width={innerW}

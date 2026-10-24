@@ -280,8 +280,9 @@ test('a long run ends with a notification, unless Settings turns it off', async 
   assert.match(told[0][1], /\d+ ms/);
   app.stdin.write(',');
   await until(() => frame().includes('Row limit'), 'Settings');
-  // The last row is the open-transaction warning; the notify row is just above it.
+  // The last rows are the open-transaction warning and the family's moods; the notify row is above them.
   app.stdin.write('G');
+  app.stdin.write('k');
   app.stdin.write('k');
   await until(() => /❯ Notify when done\s+on\s+after 0\.5 s/.test(frame()), 'the notify row');
   app.stdin.write(KEYS.enter);

@@ -3,7 +3,8 @@
 import { mkdirSync, readFileSync, readdirSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import { basename, dirname, extname, join, resolve } from 'node:path';
-import { ADD_USAGE, cleanFolder, commitMode, describeConn, isReadOnly, parseAddArgs, splitArgs, sshText } from './connections.js';
+import { ADD_USAGE, azureSqlConnection, cleanFolder, commitMode, describeConn, findAzureSql, isReadOnly, parseAddArgs, parseAzureSqlArgs, splitArgs, sshText } from './connections.js';
+import { addFirewallRule, serverHost } from './azure.js';
 import { csvInsertScript, parseCsv } from './csv.js';
 import * as ed from './editor.js';
 import { findDataSources, importPlan, planText } from './datagrip.js';
@@ -34,6 +35,12 @@ import { LANGUAGE_NAMES, LANGUAGES, languageOf, scaffold } from './scaffold.js';
 import { UNDO_ROWS, reverseScript, snapshotOf, snapshotRows, snapshotSummary, undoPlan, withSnapshot } from './undo.js';
 import { loadUndo, saveUndo } from './config.js';
 import { relTime } from './text.js';
+import { APP_NAMES, TAKEN_BY, contextIn, copiedNote, notMine, projectAt, quoteArg, takeLine } from './family.js';
+import { connectionForQuery, familyOffers, newDatabases, placeText, projectLine, queryContext, rowsContext, rowsScript } from './siblings.js';
+import { API_LANGUAGES, API_SYSTEM, apiFileName, apiLanguage, apiPrompt, apiRequest, parseApi, projectLanguage } from './api.js';
+import { copyRefusal, copyScript, foreignKeysFrom, insertOrder, insertedRows, keyTuples, maskRows, parentSql, parseCopyRowsArgs, rowKey, rowsSql, selfOrder, tupleKey } from './copyrows.js';
+import { rehearsalRefusal, rehearsalSteps, rehearsalText, rowsAffected } from './rehearse.js';
+import { locksText } from './transactions.js';
 import { applySqlcmd, bindVariables, classifyScript, countQuery, oneLine, scriptVariables, splitStatements, sqlcmdVariables, statementAt, toCsv, toJson, toMarkdown, withoutLeadingComments } from './sql.js';
 
 // A WHERE that still changes more rows than this is asked about too.
@@ -409,11 +416,85 @@ export function addConnection(ctx, rest) {
   } catch (e) {
     return ctx.note(e.message, 'error');
   }
+  return saveConnection(ctx, conn);
+}
+
+/** Saves `conn` (in place of one with its name) and says how it signs in. Returns it. */
+function saveConnection(ctx, conn) {
   const replaced = ctx.config.connections.some((c) => c.name.toLowerCase() === conn.name.toLowerCase());
   ctx.setConfig((c) => ({ ...c, connections: [...c.connections.filter((x) => x.name.toLowerCase() !== conn.name.toLowerCase()), conn] }));
-  const signIn = conn.auth === 'azure-cli' ? 'Signs in with your az login.' : conn.passwordEnv ? `Password from $${conn.passwordEnv}.` : `Asks for the password when you connect, and keeps it in ${ctx.credentials.name}.`;
+  const signIn = conn.auth === 'azure-cli' ? 'Signs in with your az login.' : conn.passwordFrom ? `Reads the password from ${conn.passwordFrom.app}${conn.passwordFrom.slot ? `/${conn.passwordFrom.slot}` : ''}'s connection strings through az, and keeps it in ${ctx.credentials.name}.` : conn.passwordEnv ? `Password from $${conn.passwordEnv}.` : `Asks for the password when you connect, and keeps it in ${ctx.credentials.name}.`;
   const tunnel = conn.ssh ? ` Through ssh ${sshText(conn.ssh)}, which signs in with a key or your ssh agent (no password prompt).` : '';
   ctx.note(`${replaced ? 'Updated' : 'Added'} ${conn.name}${conn.folder ? ` in ${conn.folder}/` : ''}${conn.prod ? ' (production, read-only)' : ''}. ${signIn}${tunnel} /connect ${conn.name}`, 'ok');
+  return conn;
+}
+
+/**
+ * /azure-sql <server> [database] … (Sonar copies one for you to paste; trawl --azure-sql does the
+ * same): connects to the saved connection with the same server, database and login, or saves one as
+ * /add would and connects to that. --password-from (an App Service whose connection strings hold the
+ * login's password) is kept on the connection, the saved one's too.
+ */
+export async function azureSql(ctx, rest) {
+  if (typeof rest !== 'object' && !String(rest ?? '').trim()) return ctx.prefill('/azure-sql ');
+  let spec;
+  try {
+    spec = typeof rest === 'string' ? parseAzureSqlArgs(rest) : rest;
+  } catch (e) {
+    return ctx.note(e.message, 'error');
+  }
+  let conn = findAzureSql(ctx.config.connections, spec);
+  if (!conn) conn = saveConnection(ctx, azureSqlConnection(ctx.config.connections, spec));
+  else if (spec.passwordFrom && JSON.stringify(conn.passwordFrom) !== JSON.stringify(spec.passwordFrom)) {
+    const was = conn;
+    conn = { ...conn, passwordFrom: spec.passwordFrom };
+    ctx.setConfig((c) => ({ ...c, connections: c.connections.map((x) => (x === was || x.name === was.name ? conn : x)) }));
+    ctx.note(`${conn.name} reads its password from ${spec.passwordFrom.app}${spec.passwordFrom.slot ? `/${spec.passwordFrom.slot}` : ''} from now on, when the saved one is missing or turned down.`);
+  }
+  return ctx.connect(conn);
+}
+
+/** Whether a connection can have an Azure firewall rule: SQL Server, and not the demo. */
+const firewallable = (conn) => conn && !conn.demo && !conn.kind;
+
+/**
+ * Adds a rule for `ip` to the firewall of `conn`'s Azure SQL server through az, as a task with a line
+ * in the log. Resolves whether it was added.
+ */
+export async function addFirewallFor(ctx, conn, ip) {
+  const host = serverHost(conn.server);
+  const r = await ctx.task(
+    `firewall rule on ${host} for ${ip}`,
+    async (signal) => {
+      const added = await addFirewallRule(conn.server, ip, { run: ctx.az, signal });
+      return [`${added.rule} on ${added.server} (resource group ${added.group}) lets ${ip} in. It can take a few seconds to apply.`];
+    },
+    { label: 'Adding the firewall rule' },
+  );
+  return r.ok;
+}
+
+/**
+ * /firewall [connection]: lets this machine through the Azure SQL server's firewall (the connection
+ * on screen, else the one the firewall last turned away). The address is the one that error gave,
+ * else api.ipify.org's answer.
+ */
+export async function firewall(ctx, name) {
+  const blocked = ctx.firewallBlocked;
+  const conn = name ? ctx.config.connections.find((c) => c.name.toLowerCase() === name.trim().toLowerCase()) : (ctx.session?.conn ?? blocked?.conn);
+  if (!conn) return ctx.note(name ? `No connection called ${name}.` : 'Name the connection: /firewall <connection>', 'error');
+  if (!firewallable(conn)) return ctx.note(`${conn.name} isn't Azure SQL: only an Azure SQL server has a firewall Trawl can open.`, 'error');
+  let ip = blocked?.ip;
+  if (!ip) {
+    const r = await ctx.task('find this machine’s address', async (signal) => {
+      ip = await ctx.publicIp({ signal });
+      return [`${ip} (from api.ipify.org)`];
+    }, { label: 'Finding the address', quiet: true });
+    if (!r.ok) return ctx.note(`Couldn't find this machine's address: ${firstLine(r.error?.message)}`, 'error');
+  }
+  const ok = await addFirewallFor(ctx, conn, ip);
+  if (ok && ctx.session?.conn.name !== conn.name) ctx.note(`/connect ${conn.name} when it has applied.`);
+  return ok;
 }
 
 export async function forgetConnection(ctx, name) {
@@ -2081,4 +2162,467 @@ export function scaffoldObject(ctx, rest) {
   ctx.rememberOutput(title, text);
   ctx.showText(title, text);
   return ctx.copy(text, `the ${LANGUAGE_NAMES[lang]} for ${objectName(obj)}`);
+}
+
+// ---------------------------------------------------------------------------------------------------
+// The family: what Trawl hands Splice, Sonar, Bosun and Hail (a command line copied to paste into
+// their prompt), and what it takes from them (/take). Nothing secret goes into a line.
+
+/** Copies `line` for `apps` ('hail', or a list) and says so in the log: the line, or for a /take what it holds. */
+export async function handOver(ctx, apps, line) {
+  try {
+    const via = await ctx.copyText(line);
+    ctx.note(`${copiedNote(apps, line)}${via === 'terminal' ? ' (copied through the terminal, which has to allow it)' : ''}`, 'ok');
+  } catch (e) {
+    ctx.note(`Couldn't copy: ${firstLine(e.message)}`, 'error');
+  }
+}
+
+/**
+ * /take <context>: what a sibling copied for Trawl. A query goes into a console tab of its own, on
+ * the saved connection to its server and database when there is one; rows become an INSERT script
+ * there. Contexts for the other apps say whose they are.
+ */
+export async function take(ctx, rest) {
+  if (!String(rest ?? '').trim()) return ctx.prefill('/take ');
+  const c = contextIn(rest);
+  if (!c) return ctx.note("That isn't a line one of the family copied: /take takes the family:v1:… that Splice, Sonar, Bosun or Hail puts on the clipboard.", 'error');
+  if (c.kind === 'query') return takeQuery(ctx, c.data);
+  if (c.kind === 'rows') return takeRows(ctx, c.data);
+  ctx.note(notMine('trawl', c), 'error');
+}
+
+// A console tab of its own (`base`, made unique) holding `text`, on screen.
+function consoleTabWith(ctx, base, text) {
+  const name = freeName(ctx.consoleTabs.names.map((n) => ({ name: n })), base);
+  ctx.addConsoleTab(name);
+  ctx.setConsole(ed.fromText(text), { record: false });
+  return name;
+}
+
+async function takeQuery(ctx, data) {
+  const sql = String(data.sql ?? '').trim();
+  if (!sql) return ctx.note('That query came without any SQL.', 'error');
+  const where = placeText(data);
+  const head = data.server || data.database ? `-- Handed over, for ${where}. Nothing has run: ctrl+r runs it.\n` : '';
+  const tab = consoleTabWith(ctx, 'take', `${head}${sql}\n`);
+  const conn = connectionForQuery(ctx.config.connections, data);
+  const s = ctx.session;
+  if (!data.server) return ctx.note(`The query is in the console tab ${tab}: it didn't say which database it was for, so it runs on the one you're on.`, 'ok');
+  if (!conn) return ctx.note(`The query is in the console tab ${tab}. It was for ${where}, which no saved connection is to: /azure-sql or /add one, then ctrl+r.`, 'ok');
+  if (s && s.conn.name === conn.name && (!data.database || s.database?.toLowerCase() === data.database.toLowerCase())) return ctx.note(`The query is in the console tab ${tab}, on ${conn.name}, where it was for.`, 'ok');
+  ctx.note(`The query is in the console tab ${tab}. It was for ${where}: connecting to ${conn.name}.`, 'ok');
+  return connect(ctx, conn.name, { database: data.database && data.database !== conn.database ? data.database : undefined });
+}
+
+function takeRows(ctx, data) {
+  if (!Array.isArray(data.columns) || !Array.isArray(data.rows)) return ctx.note('Those rows came without their columns.', 'error');
+  const d = dialectOf(ctx.session);
+  const tab = consoleTabWith(ctx, 'rows', rowsScript(data, { quote: d.quote, kind: d.kind }));
+  ctx.note(`${plural(data.rows.length, 'row')}${data.table ? ` of ${data.table}` : ''} as an INSERT, in the console tab ${tab}: read it, then R runs it${data.table ? '' : ' (put the table\'s name in first)'}.`, 'ok');
+}
+
+/**
+ * /share (t in the console and Results): copies a /take line for the family. In Results, the row
+ * under the cursor (`all`: every row of the set) as `rows`, for Hail to send as a body or another
+ * Trawl to insert; elsewhere the console's statement as `query`. `query` and `rows` pick one.
+ */
+export async function share(ctx, rest = '') {
+  const what = String(rest).trim().toLowerCase();
+  if (what && !['query', 'rows', 'row', 'all'].includes(what)) return ctx.note('/share [query | rows | all]: the console\'s statement, the row under the cursor in Results, or all its rows.', 'error');
+  const s = ctx.session;
+  const place = s ? { server: s.conn.demo ? 'demo' : s.conn.server, database: s.database } : {};
+  if (what === 'query' || (!what && ctx.view !== 'results')) {
+    const pick = consolePick(ctx);
+    if (!pick?.text.trim()) return ctx.note('Nothing to share: put the cursor on a statement in the console (or select it).', 'error');
+    const { line } = queryContext(pick.text, place);
+    return handOver(ctx, TAKEN_BY.query, line);
+  }
+  const res = ctx.results;
+  const set = ctx.currentSet();
+  if (!set?.rows.length) return ctx.note('No rows to share: run a query first.', 'error');
+  const indexes = what === 'all' ? set.rows.map((_, i) => i) : ctx.resultRow?.set === set && ctx.resultRow.row != null && set.rows[ctx.resultRow.row] ? [ctx.resultRow.row] : [0];
+  const table = res?.edit?.table ?? res?.source?.table ?? null;
+  const from = res?.conn && res.conn === s?.conn.name ? place : { database: res?.database ?? null };
+  const { line, hidden } = rowsContext(set, indexes, { ...from, table: table ? objectName(table) : null });
+  await handOver(ctx, TAKEN_BY.rows, line);
+  if (hidden.length) ctx.note(`Left out of it: ${hidden.join(', ')}, which look${hidden.length === 1 ? 's' : ''} like ${hidden.length === 1 ? 'it holds a secret' : 'they hold secrets'}.`);
+}
+
+/** /family: what this project offers the siblings, each a line to copy for the app that takes it. */
+export function family(ctx) {
+  const dir = ctx.projectDir;
+  const project = projectAt(dir);
+  const offers = familyOffers(project);
+  ctx.showPicker({
+    title: `What ${basename(dir) || dir} offers the family`,
+    hint: '↵ copy it',
+    empty: `Nothing in ${dir} for the others: no git repository (Splice), nothing to run (Bosun), no .http files (Hail).`,
+    items: offers.map((o) => ({ label: APP_NAMES[o.app], detail: o.line, text: `${o.detail[0].toUpperCase()}${o.detail.slice(1)}.\n\n${o.line}\n\n↵ copies it, to paste into ${APP_NAMES[o.app]}'s prompt.`, offer: o })),
+    keys: { return: (it) => handOver(ctx, it.offer.app, it.offer.line) },
+  });
+}
+
+/**
+ * /project: the databases this project's files name (appsettings*.json's connection strings,
+ * DATABASE_URL-style lines in .env files) that no saved connection is to; ↵ saves one as /add would.
+ */
+export function project(ctx) {
+  const dir = ctx.projectDir;
+  const p = projectAt(dir);
+  if (!p.databases.length) return ctx.note(`No databases in ${dir}: Trawl looks at appsettings*.json's ConnectionStrings and DATABASE_URL-style lines in .env files.`);
+  const found = newDatabases(p, ctx.config.connections);
+  if (!found.length) return ctx.note(`The ${plural(p.databases.length, 'database')} in ${dir}'s files ${p.databases.length === 1 ? 'is' : 'are'} saved already.`);
+  ctx.showPicker({
+    title: `Databases in ${basename(dir) || dir}`,
+    hint: '↵ add it',
+    items: found.map((db) => ({
+      label: db.name,
+      detail: `${db.kind === 'sqlserver' ? '' : `${db.kind} `}${db.server}${db.port ? `:${db.port}` : ''}/${db.database ?? ''}  ${db.source}`,
+      text: [
+        `${db.source}: ${db.name}`,
+        '',
+        `Server     ${db.server}${db.port ? ` (port ${db.port})` : ''}`,
+        `Database   ${db.database ?? '(the login\'s default)'}`,
+        `Kind       ${dialectOf({ kind: db.kind }).label}`,
+        `Signs in   ${db.user && !db.entra ? `as ${db.user}` : 'with your az login'}`,
+        ...(db.password ? ['', `The file holds its password: Trawl asks before keeping it in ${ctx.credentials.name} (never in its config).`] : []),
+        '',
+        `↵ adds it: ${projectLine(db, ctx.config.connections)}`,
+      ].join('\n'),
+      db,
+    })),
+    keys: { return: (it) => addProjectDatabase(ctx, it.db) },
+  });
+}
+
+async function addProjectDatabase(ctx, db) {
+  let conn;
+  try {
+    const [, command, rest] = /^\/(\S+) (.*)$/.exec(projectLine(db, ctx.config.connections));
+    conn = command === 'azure-sql' ? azureSqlConnection(ctx.config.connections, parseAzureSqlArgs(rest)) : parseAddArgs(rest);
+  } catch (e) {
+    return ctx.note(e.message, 'error');
+  }
+  saveConnection(ctx, conn);
+  if (!db.password || !conn.user) return conn;
+  const keep = await ctx.confirm({
+    title: `Keep the password ${db.source} has for ${conn.user} in ${ctx.credentials.name}?`,
+    detail: `For ${conn.name}, so connecting doesn't ask for it. It goes only there, never into Trawl's config.`,
+    options: YES_NO('Yes, keep it'),
+  });
+  if (!keep) return conn;
+  try {
+    await ctx.credentials.set(conn.name, { user: conn.user, password: db.password });
+    ctx.note(`Saved the password for ${conn.name} in ${ctx.credentials.name}.`, 'ok');
+  } catch (e) {
+    ctx.note(`Couldn't save the password in ${ctx.credentials.name}: ${firstLine(e.message)}`, 'error');
+  }
+  return conn;
+}
+
+/**
+ * /api [language]: Claude writes an HTTP endpoint that runs the console's statement (its parameters
+ * as route or query parameters) in the project's language: C# when a *.csproj is in the folder, Node
+ * when a package.json is, else the one named, else it asks. It shows in the viewer (s saves it), and
+ * a Hail /take request line for calling it is copied.
+ */
+export async function api(ctx, rest = '') {
+  const word = String(rest).trim();
+  let language = word ? apiLanguage(word) : null;
+  if (word && !language) return ctx.note(`/api writes ${Object.keys(API_LANGUAGES).join(', ')}, not ${word}.`, 'error');
+  const pick = consolePick(ctx);
+  if (!pick?.text.trim()) return ctx.note('Nothing to turn into an endpoint: put the cursor on a statement in the console (or select it).', 'error');
+  const conn = ctx.session?.conn;
+  if (conn && !canSeeSchema(conn)) return ctx.note(`${conn.name} is closed to Claude. /ai schema lets Claude see its SQL and names (never rows).`, 'error');
+  const dir = ctx.projectDir;
+  language ??= projectLanguage(dir);
+  if (!language) {
+    language = await ctx.confirm({
+      title: 'Which language should the endpoint be in?',
+      detail: `There's no *.csproj or package.json in ${dir} to go by. /api <language> says it straight away.`,
+      options: [...Object.entries(API_LANGUAGES).map(([value, l]) => ({ label: l.name, value })), { label: 'Cancel', value: false }],
+    });
+    if (!language) return;
+  }
+  const d = dialectOf(ctx.session);
+  const sql = pick.text.trim();
+  const prompt = apiPrompt({ sql, language, label: d.label, database: ctx.session?.database ?? null });
+  let answer = null;
+  const r = await ctx.task(
+    `ask Claude for an endpoint: ${oneLine(withoutLeadingComments(sql))}`,
+    async (signal) => {
+      answer = parseApi(await ctx.askClaude({ prompt, system: API_SYSTEM, signal }));
+      return [`${answer.method} ${answer.path} in ${API_LANGUAGES[language].name}: on screen (s saves it).`];
+    },
+    { label: 'Asking Claude for an endpoint' },
+  );
+  if (!r.ok || !answer) return;
+  const title = `${answer.method} ${answer.path} · ${API_LANGUAGES[language].name}`;
+  ctx.rememberOutput(title, answer.code);
+  ctx.showText(title, answer.code, { hint: 's save to a file', keys: { s: () => saveApi(ctx, answer, language) } });
+  const request = apiRequest(answer, { name: `${answer.method} ${answer.path}` });
+  await handOver(ctx, TAKEN_BY.request, takeLine('request', request));
+}
+
+async function saveApi(ctx, answer, language) {
+  const dir = ctx.projectDir;
+  const name = await ctx.askText({ title: 'Save the endpoint as', detail: `A path in ${dir}, or one of your own.`, value: apiFileName(answer, language) });
+  if (!name?.trim()) return;
+  const full = resolve(dir, pathArg(name));
+  try {
+    statSync(full);
+    const ok = await ctx.confirm({ title: `${basename(full)} is there already. Replace it?`, detail: full, options: YES_NO('Yes, replace it') });
+    if (!ok) return;
+  } catch {}
+  try {
+    mkdirSync(dirname(full), { recursive: true });
+    await writeFile(full, answer.code, 'utf8');
+    ctx.note(`Saved the endpoint to ${full}.`, 'ok');
+  } catch (e) {
+    ctx.note(`Couldn't write ${full}: ${firstLine(e.message)}`, 'error');
+  }
+}
+
+/** The connections /copy-rows can write to: neither production nor read-only, and not this one. */
+const copyTargets = (ctx) => ctx.config.connections.filter((c) => !c.prod && !isReadOnly(c) && c.name !== ctx.session?.conn.name);
+
+/** C in Results and the Explorer: which connection to copy `table`'s rows to, then /copy-rows. */
+export function pickCopyTarget(ctx, table) {
+  if (!needSession(ctx)) return;
+  const targets = copyTargets(ctx);
+  if (!targets.length) return ctx.note('No connection to copy to: /copy-rows writes only to one that is neither production nor read-only. /add one (a dev database, say).', 'error');
+  ctx.showPicker({
+    title: `Copy ${table}'s rows to`,
+    hint: '↵ copy to it',
+    items: targets.map((c) => ({ label: c.name, detail: describeConn(c), text: `The rows of ${table} (up to the row limit) and the rows they refer to, with personal data made up, inserted into ${c.name}. The script shows first, and nothing runs until you say so.\n\n/copy-rows ${c.name} ${table} [--where <condition>] [--no-mask]` })),
+    keys: { return: (it) => copyRowsTo(ctx, `${quoteArg(it.label)} ${quoteArg(table)}`) },
+  });
+}
+
+/**
+ * /copy-rows <target> [table] [--where <condition>] [--no-mask]: up to the row limit of a table's
+ * rows (the one on screen in Results, or the one named), and the rows they refer to through foreign
+ * keys (read recursively, only read), as one script that inserts parents first on another connection,
+ * skipping rows it has already. Personal columns get made-up values, the same for the same input.
+ * A production or read-only target is refused; the script shows first and runs after a question.
+ */
+export async function copyRowsTo(ctx, rest) {
+  if (!needSession(ctx)) return;
+  let args;
+  try {
+    args = parseCopyRowsArgs(rest);
+  } catch (e) {
+    return ctx.note(e.message, 'error');
+  }
+  if (!args.target) return ctx.prefill('/copy-rows ');
+  const target = ctx.config.connections.find((c) => c.name.toLowerCase() === args.target.toLowerCase());
+  if (!target) return ctx.note(`No connection called ${args.target}.`, 'error');
+  if (target.prod || isReadOnly(target)) return ctx.note(`${target.name} is ${target.prod ? 'production' : 'read-only'}: /copy-rows only writes to a connection that is neither, such as a dev database.`, 'error');
+  const session = ctx.session;
+  const d = dialectOf(session);
+  if (dialectOf(target).kind !== d.kind) return ctx.note(`/copy-rows copies between databases of the same kind: this is ${d.label}, ${target.name} is ${dialectOf(target).label}.`, 'error');
+  if (target.name === session.conn.name && (target.database ?? session.database) === session.database) return ctx.note(`Those rows are in ${target.name} already: name another connection to copy them to.`, 'error');
+  const res = ctx.results;
+  const fromResults = res && res.conn === session.conn.name && res.database === session.database ? (res.edit?.table ?? res.source?.table) : null;
+  const obj = args.table ? findObject(ctx.schema, args.table) : fromResults ? findObject(ctx.schema, objectName(fromResults)) : null;
+  if (!obj) return ctx.note(args.table ? `No table called ${args.table} in ${session.database}.` : 'Which table? /copy-rows <target> <table>, or run a query on one table first.', 'error');
+  const refusal = copyRefusal(obj);
+  if (refusal) return ctx.note(`Can't copy: ${refusal}.`, 'error');
+  const limit = ctx.config.limit;
+  const first = rowsSql(d, obj, { where: args.where, limit });
+  if (classifyScript(first, { dialect: d.kind }).write) return ctx.note('/copy-rows only reads where the rows come from, and that --where changes something.', 'error');
+  const schema = ctx.schema;
+  const groups = new Map();
+  const notes = [];
+  // Rows of `o` not read before, kept by primary key; how many were new.
+  const add = (o, set) => {
+    const name = objectName(o);
+    if (!groups.has(name)) groups.set(name, { obj: o, set: { columns: set.columns, rows: [] }, keys: new Set() });
+    const g = groups.get(name);
+    let n = 0;
+    for (const row of set.rows) {
+      const k = rowKey(o, set, row);
+      if (g.keys.has(k)) continue;
+      g.keys.add(k);
+      g.set.rows.push(row);
+      n++;
+    }
+    return n;
+  };
+  const r = await ctx.task(
+    `read ${objectName(obj)}'s rows for ${target.name}`,
+    async (signal) => {
+      add(obj, (await session.run(first, { signal, limit })).sets.at(-1) ?? { columns: [], rows: [] });
+      const queue = [obj];
+      for (let rounds = 0; queue.length && rounds < 200; rounds++) {
+        const o = queue.shift();
+        for (const fk of foreignKeysFrom(schema, o)) {
+          const parent = findObject(schema, fk.to);
+          const why = copyRefusal(parent);
+          if (why) {
+            notes.push(`${fk.name}: the rows it refers to aren't copied (${why}).`);
+            continue;
+          }
+          const g = groups.get(objectName(o));
+          const toCols = fk.columns.map(([, to]) => to);
+          const have = groups.get(objectName(parent));
+          const there = new Set(have ? keyTuples(have.set, toCols).map((t) => tupleKey(t)) : []);
+          const needed = keyTuples(g.set, fk.columns.map(([from]) => from)).filter((t) => !there.has(tupleKey(t)));
+          if (!needed.length) continue;
+          let added = 0;
+          for (const sql of parentSql(d, parent, toCols, needed)) added += add(parent, (await session.run(sql, { signal, limit: 1_000_000 })).sets.at(-1) ?? { columns: [], rows: [] });
+          if (added) queue.push(parent);
+        }
+      }
+      const counts = [...groups.values()].map((g) => `${objectName(g.obj)} ${g.set.rows.length}`);
+      return [`Read ${counts.join(', ')}: the script is on screen.`];
+    },
+    { label: `Reading ${objectName(obj)} and what it refers to` },
+  );
+  if (!r.ok) return;
+  const main = groups.get(objectName(obj));
+  if (!main.set.rows.length) return ctx.note(`${objectName(obj)} has no rows${args.where ? ` where ${args.where}` : ''}: nothing to copy.`);
+  const { order, cycle } = insertOrder(groups, schema.foreignKeys);
+  const masked = [];
+  const tables = order.map((name) => {
+    const g = groups.get(name);
+    const rows = selfOrder(g.obj, g.set, schema.foreignKeys);
+    if (!args.mask) return { obj: g.obj, set: g.set, rows };
+    const m = maskRows(g.obj, { columns: g.set.columns, rows }, { kind: d.kind });
+    masked.push(...m.masked.map((c) => `${g.obj.name}.${c}`));
+    return { obj: g.obj, set: g.set, rows: m.rows };
+  });
+  const others = order.filter((n) => n !== objectName(obj));
+  const head = [
+    `${plural(main.set.rows.length, 'row')} of ${objectName(obj)}${args.where ? ` where ${args.where}` : ''}${others.length ? `, and the rows they refer to in ${others.join(', ')}` : ''}: from ${session.conn.name}/${session.database} to ${target.name}${target.database ? `/${target.database}` : ''}.`,
+    args.mask ? (masked.length ? `Personal data made up (the same value always gets the same fake, so joins still meet): ${masked.join(', ')}.` : 'No column looked personal, so nothing is made up.') : 'Not masked (--no-mask): the values are as they are where they came from.',
+    'A row whose key the target has already is skipped.',
+    ...(d.kind === 'postgres' ? ['Identity columns keep their values; the target\'s sequences aren\'t moved past them (setval does that).'] : []),
+    ...(d.kind === 'mysql' ? ['INSERT IGNORE also lets some other errors by as warnings (a value too long is cut), as MySQL does.'] : []),
+    ...(cycle ? ['These tables refer to each other in a circle: some inserts may fail on a foreign key.'] : []),
+    ...notes,
+  ];
+  const { script, rows } = copyScript(tables, d, { head });
+  const title = `Copy to ${target.name}`;
+  ctx.showText(title, script);
+  const ok = await ctx.confirm({
+    title: `Insert up to ${plural(rows, 'row')} into ${target.name}${target.database ? ` (${target.database})` : ''}?`,
+    detail: `The script is above (pgup/pgdn scroll it). It runs in one transaction on ${target.name}; rows it has already are skipped.`,
+    scrollsOverlay: true,
+    options: YES_NO('Yes, copy them'),
+    danger: true,
+  });
+  ctx.closeOverlay();
+  if (!ok) return;
+  let ran = null;
+  const done = await ctx.task(
+    `copy ${plural(rows, 'row')} to ${target.name}`,
+    async (signal) => {
+      let s = null;
+      try {
+        s = await ctx.openSession(target, { signal });
+        const out = await s.run(script, { signal, limit: 1 });
+        const inserted = insertedRows(out.messages);
+        ran = { database: s.database, summary: `${inserted} of ${rows} rows inserted (/copy-rows)` };
+        return [`${plural(inserted, 'row')} went in${rows - inserted ? `; ${plural(rows - inserted, 'row')} ${rows - inserted === 1 ? 'was' : 'were'} there already` : ''}.`];
+      } catch (e) {
+        if (e.needsPassword) e.message = `${target.name} needs its password: connect to it once in Trawl to save it, then copy again.`;
+        ran = { database: s?.database ?? target.database ?? null, summary: firstLine(e.message) };
+        throw e;
+      } finally {
+        if (s && !s.closed) {
+          if (await s.tranCount().catch(() => 0)) await s.run(dialectOf(target).rollback).catch(() => {});
+          s.close();
+        }
+      }
+    },
+    { label: `Copying to ${target.name}` },
+  );
+  if (ran) ctx.recordRun({ sql: script, conn: target.name, database: ran.database, at: Date.now(), ok: done.ok, summary: ran.summary });
+  return done;
+}
+
+/**
+ * /rehearse [file]: runs a migration (the file, else the console) inside a transaction that is always
+ * rolled back, a statement at a time, and reports each one's time, rows and error, and the locks it
+ * holds by the end. SQL Server and PostgreSQL roll DDL back; MySQL commits DDL implicitly, so a script
+ * with it is refused there. On production it asks first: the locks are real while it runs.
+ */
+export async function rehearse(ctx, rest = '') {
+  await ctx.stopWatch?.('another run');
+  if (!(await liveSession(ctx))) return;
+  const path = pathArg(rest);
+  let text;
+  let from = 'the console';
+  if (path) {
+    try {
+      text = await readFile(resolve(path), 'utf8');
+      from = basename(path);
+    } catch (e) {
+      return ctx.note(`Couldn't read ${path}: ${firstLine(e.message)}`, 'error');
+    }
+  } else text = ed.toText(ctx.console);
+  if (!text.trim()) return ctx.note(`Nothing to rehearse: ${path ? `${from} is empty` : 'the console is empty (or /rehearse <file.sql>)'}.`, 'error');
+  if (ctx.tranCount) return ctx.note('A transaction is open: /commit or /rollback it first. The rehearsal rolls back a transaction of its own, and would take yours with it.', 'error');
+  const s = ctx.session;
+  const d = dialectOf(s);
+  text = await withParameters(ctx, text);
+  if (text == null) return;
+  const steps = rehearsalSteps(text, d);
+  if (!steps.length) return ctx.note(`Nothing to rehearse in ${from}.`, 'error');
+  const refusal = rehearsalRefusal(steps, d);
+  if (refusal) return ctx.note(refusal, 'error');
+  if (s.conn.prod) {
+    const ok = await ctx.confirm({
+      title: `Rehearse ${from} on ${s.conn.name} (production)?`,
+      detail: 'It runs for real inside a transaction that is rolled back at the end, so nothing is kept. But while it runs it takes real locks, and other sessions wait for what it changes until the rollback.',
+      options: YES_NO('Yes, rehearse it'),
+      danger: true,
+    });
+    if (!ok) return;
+  }
+  const results = [];
+  let locks = [];
+  let totalMs = 0;
+  const r = await ctx.task(
+    `rehearse ${from} (rolled back)`,
+    async (signal) => {
+      const started = Date.now();
+      await s.run(d.begin, { signal });
+      try {
+        for (const step of steps) {
+          const t0 = Date.now();
+          try {
+            const res = await s.run(step.text, { signal, limit: 1000 });
+            results.push({ step, ms: res.ms ?? Date.now() - t0, rows: rowsAffected(res.messages), sets: res.sets.filter((x) => x.columns.length).length });
+          } catch (e) {
+            if (e.cancelled || e.lost || signal.aborted) throw e;
+            results.push({ step, ms: Date.now() - t0, error: `${e.line ? `Line ${step.line + e.line - 1}: ` : ''}${e.message}` });
+            break;
+          }
+        }
+        totalMs = Date.now() - started;
+        try {
+          locks = !(await s.tranCount()) ? ['None: the error ended the transaction, so nothing was held any more.'] : d.locksSql ? locksText((await s.run(d.locksSql, { signal, limit: 1000 })).sets) : ['Trawl can’t read them on this server.'];
+        } catch (e) {
+          if (e.cancelled) throw e;
+          locks = [d.locksUnavailable ?? `Couldn't read them: ${firstLine(e.message)}`];
+        }
+      } finally {
+        // Whatever happened, nothing it did is kept.
+        if (!s.closed && (await s.tranCount().catch(() => 1))) await s.run(d.rollback).catch(() => {});
+      }
+      const failed = results.find((x) => x.error);
+      return [`${results.filter((x) => !x.error).length} of ${plural(steps.length, 'statement')} ran${failed ? `; line ${failed.step.line} failed` : ''}, then it was all rolled back. The report is on screen (/last shows it again).`];
+    },
+    { label: 'Rehearsing (rolled back at the end)' },
+  );
+  ctx.recordRun({ sql: text, conn: s.conn.name, database: s.database, at: Date.now(), ok: r.ok && !results.some((x) => x.error), summary: `rehearsed, rolled back: ${results.filter((x) => !x.error).length} of ${steps.length} ran` });
+  if (!r.ok) return r;
+  const report = rehearsalText({ steps, results, locks, conn: s.conn.name, database: s.database, label: d.label, totalMs });
+  const title = `Rehearsal: ${from} on ${s.conn.name}`;
+  ctx.rememberOutput(title, report);
+  ctx.showText(title, report);
+  return r;
 }

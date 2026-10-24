@@ -82,7 +82,6 @@ export function ConsoleView({ editor, tabs = ['console'], tab = 0, editing, ctx,
   const top = useRef(0);
   const left = useRef(0);
   const text = ed.toText(editor);
-  const lines = useMemo(() => highlight(text), [text]);
   const st = useMemo(() => statementAt(splitStatements(text), editor.row + 1), [text, editor.row]);
   const innerH = height - 2;
   const gutterW = String(editor.lines.length).length + 2;
@@ -102,6 +101,8 @@ export function ConsoleView({ editor, tabs = ['console'], tab = 0, editing, ctx,
     if (editor.col < left.current) left.current = editor.col;
     if (editor.col >= left.current + textW) left.current = editor.col - textW + 1;
   }
+  // Only the lines on screen are coloured: the text can be thousands of lines, and this runs on every key.
+  const lines = useMemo(() => highlight(text, { from: top.current, to: top.current + innerH }), [text, top.current, innerH]);
 
   const set = (next) => ctx.setConsole(next);
 
@@ -132,6 +133,7 @@ export function ConsoleView({ editor, tabs = ['console'], tab = 0, editing, ctx,
     if (input === '+') return a.consoleTab(ctx, 'new');
     // After every handler has had the S, or the prompt would take it as its first letter.
     if (input === 'S') return queueMicrotask(() => ctx.prefill('/snippet save '));
+    if (input === 't') return a.share(ctx, 'query');
     if (input === 'n' || input === 'N') return a.searchConsole(ctx, '', { back: input === 'N' });
     if (key.downArrow || input === 'j') return set(ed.move(editor, { rows: 1 }));
     if (key.upArrow || input === 'k') return set(ed.move(editor, { rows: -1 }));

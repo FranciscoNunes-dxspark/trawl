@@ -67,9 +67,17 @@ export function Panel({ title, hint, width, height, focused = false, children })
   );
 }
 
-/** Lines of segments (or plain strings) without a cursor, for detail panes. */
-export function Lines({ lines, width, height, offset = 0 }) {
-  const shown = lines.slice(offset, offset + height);
+/**
+ * Lines of segments (or plain strings) without a cursor, for detail panes: rows `offset` to
+ * `offset + height` of `lines`. Only those are drawn, so slice first rather than restyling every
+ * line of a long text on each render: pass the visible rows (and no offset), or `lines` as a
+ * function `(i) => line` with `count`, which is asked for the visible rows only.
+ */
+export function Lines({ lines, count, width, height, offset = 0 }) {
+  const shown = [];
+  if (typeof lines === 'function') {
+    for (let i = offset; i < Math.min(offset + height, count ?? 0); i++) shown.push(lines(i));
+  } else shown.push(...lines.slice(offset, offset + height));
   return shown.map((line, i) => (
     <Row key={i} pointer={false} width={width} segments={typeof line === 'string' ? [{ text: line }] : line} />
   ));

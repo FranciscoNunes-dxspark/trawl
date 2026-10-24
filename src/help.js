@@ -37,6 +37,7 @@ export const HELP = [
       ['s', 'Start a query on it in the console'],
       ['c', 'Its CREATE script, into the console (a table\'s from the catalog; others\' from the server)'],
       ['u', 'What uses it and what it uses (/uses): views, routines, triggers, foreign keys, by kind'],
+      ['C', 'Copy the table\'s rows, and the rows they refer to, to another connection, personal data made up (/copy-rows)'],
       ['/find <text>', 'Filter by name'],
       ['/grep <text>', 'Search inside every view, procedure, function and trigger; ↵ its CREATE script, at the match'],
     ],
@@ -64,6 +65,9 @@ export const HELP = [
       ['[  ]  +', 'Console tabs: the one before · the one after · a new one (/tab new [name])'],
       ['/tab …', '/tab <name or number> switch · /tab rename <name> · /tab close · /tab alone lists them\nclick a tab\'s name in the title to go to it · drop a .sql or .txt file on Trawl to open it in a tab'],
       ['S', 'Save the statement under the cursor (or the selection) as a snippet (/snippet save <name>)'],
+      ['t', 'Share the statement under the cursor (/share): copies a /take line for another Trawl'],
+      ['/api [language]', 'Claude writes an HTTP endpoint that runs the statement (C# if the project has a .csproj, Node if a package.json); s saves it, and a request for Hail is copied'],
+      ['/rehearse [file]', 'Run the console (or a file) inside a transaction that is always rolled back: each statement\'s time, rows and error, and the locks held at the end'],
     ],
   },
   {
@@ -103,6 +107,8 @@ export const HELP = [
       ['y  Y', 'Copy the cell · the row (tab-separated); /copy [tsv|csv|json|md|insert] copies the whole set (md: a Markdown table)'],
       ['p  c', 'Pin the result set (/pin) · compare the one on screen with it (/compare): ~ changed, + added, − removed, matched by the primary key when the rows are one table\'s, else row by row'],
       ['F', 'Follow the cell\'s foreign key (/follow): the row its value refers to, or on a key other tables refer to, their rows (it asks which when there are several ways to go)'],
+      ['t', 'Share the row under the cursor (/share; /share all: every row): copies a /take line, for Hail to send as a body or another Trawl to insert'],
+      ['C', 'Copy the table\'s rows to another connection (/copy-rows <target> [table] [--where <condition>] [--no-mask]): the rows they refer to come too, parents first, personal data made up; the script shows first, rows already there are skipped, production targets are refused'],
       ['/watch <s> [sql]', 'Run a read again every s seconds (2 at least; without sql, the console\'s statement), the cells that changed since the run before picked out; esc, another run or /watch stop ends it\n--until "Status = \'Done\'" (or <>, >, <, >=, <=, IS NULL, "rows > 0", "rows = 0") stops and notifies when a row matches'],
       { heading: 'Editing', about: 'the rows of one table, with its primary key: ↵ in the Explorer, or SELECT … FROM one table' },
       ['e or i', 'Edit the cell: ↵ keeps it, tab keeps it and edits the next column, esc leaves it'],
@@ -148,10 +154,23 @@ export const HELP = [
     title: 'Schema in files, migrations, test data, code',
     rows: [
       ['/script-all <folder>', 'Every table (with its keys, defaults, checks and indexes), view, procedure, function and trigger in a file of its own: <schema>/Tables/<name>.sql, Views/, Procedures/, Functions/, Triggers/. The same bytes each time, so only changed objects\' files are written; files of objects that are gone are removed only after asking.'],
+      ['/rehearse [file]', 'A migration (the console, or a file) run inside a transaction that is always rolled back: each statement\'s time, rows and error, and the locks it held at the end. SQL Server and PostgreSQL; on MySQL only scripts without DDL (which it commits by itself). Asks first on production, where the locks are real while it runs'],
       ['/migrations <folder>', 'The folder\'s scripts against the history table: Flyway (V1__name.sql, its checksums), EF Core (listed only: its migrations are C#), DbUp (script names), or Trawl\'s own trawl_migrations (any .sql, by name). Applied, pending, changed, missing.'],
       ['R', 'On that list (or /migrations run [folder]): run the pending ones in order, each through the usual checks and recorded as the tool would; the first failure stops the rest'],
       ['/generate <table> [rows] [--seed n]', 'Made-up rows as INSERTs in a console tab (generate): values fit each column, names, emails, dates and amounts guessed from its name, foreign keys from the rows the other table has, keys kept unique. The same seed, the same rows. Nothing runs.'],
       ['/scaffold <table> [csharp|ef|ts|python]', 'A C# class, an EF Core entity ([Key], [Column], [MaxLength]), a TypeScript interface or a Python dataclass for a table or view: shown, and copied'],
+    ],
+  },
+  {
+    title: 'The family',
+    about: 'Splice (git), Sonar (Azure), Bosun (processes) and Hail (HTTP): each hands the others a command line to paste',
+    rows: [
+      ['/take <family:v1:…>', 'What a sibling copied: a query goes into a console tab (on the saved connection it was for), rows into an INSERT script; pasting the bare family:v1:… works too'],
+      ['/share [query|rows|all]', 'Copy a /take line: the console\'s statement, or in Results the row under the cursor (all: every row); t in both'],
+      ['/family', 'What this project offers the others: Splice /open <repo>, Bosun /move <dir>, Hail /open <file> per .http file; ↵ copies it'],
+      ['/project', 'The databases appsettings*.json and .env files name that aren\'t saved yet: ↵ adds one (a password in the file is kept in the OS store, after asking)'],
+      ['paste', 'A command pasted over a view (not while typing) goes into the prompt, to run with ↵'],
+      ['moods', 'Glim tells the others how it feels, and says in a line when one of them is worried, sad or happy (esc dismisses it); "Family moods" in Settings turns it off'],
     ],
   },
   {
@@ -171,6 +190,9 @@ export const HELP = [
       ['p', 'Password: saved in the OS credential store (Trawl also asks when you connect)'],
       ['f', 'Move to a folder (/folder <connection> [folder])'],
       ['x', 'Forget (and its saved password)'],
+      { heading: 'Azure SQL', about: 'through your az login' },
+      ['/azure-sql <server> [database] …', 'Connect to the saved connection to it (same server, database and login), else save one as /add would and connect; --password-from <rg>/<app>[/<slot>] reads a login\'s password from that App Service\'s connection strings. Sonar copies these for you'],
+      ['/firewall [connection]', 'Let this machine through the server\'s firewall (Trawl offers it when the firewall turns you away)'],
     ],
   },
   {
@@ -208,6 +230,7 @@ export const HELP = [
     rows: [
       ['/ask <question>', 'Claude writes a query from the schema; it lands in the console, and nothing runs until ctrl+r'],
       ['/explain', 'Claude explains the last plan: what it does, what costs most, what might help (the query and plan only)'],
+      ['/api [language]', 'Claude writes an HTTP endpoint that runs the console\'s statement, its parameters as route or query parameters, in the project\'s language; s saves it, and a Hail request for it is copied'],
       ['/why', 'Claude explains the last error (its message, line and SQL, with the schema\'s names) and puts a corrected statement in the console, the explanation as comments; nothing runs'],
       ['/ai [connection] [off|schema|results]', 'What Claude may see: nothing, names only (the default), or rows too'],
       ['trawl mcp', 'Run from Claude Code (claude mcp add --scope user trawl -- trawl mcp); it only reads'],

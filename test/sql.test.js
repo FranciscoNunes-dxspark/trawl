@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { classify, classifyScript, countQuery, statisticsSummary, viewOrder, formatValue, mask, oneLine, quoteIdent, splitBatches, splitStatements, statementAt, toCsv, toJson, toMarkdown, withoutLeadingComments } from '../src/sql.js';
+import { classify, classifyScript, compareValues, countQuery, statisticsSummary, viewOrder, formatValue, mask, oneLine, quoteIdent, splitBatches, splitStatements, statementAt, toCsv, toJson, toMarkdown, withoutLeadingComments } from '../src/sql.js';
 
 const texts = (list) => list.map((s) => s.text);
 
@@ -11,6 +11,43 @@ test('mask hides comments, strings and quoted names but keeps offsets', () => {
   assert.ok(!m.includes(';'));
   assert.ok(m.endsWith('\nFROM t'));
   assert.equal(mask("'it''s'").replace(/\u0001/g, ''), '');
+});
+
+test('a long text masked again after an edit is masked as it would be from scratch', () => {
+  // Masking an unrelated long text first leaves nothing in common to start from.
+  const fresh = (text) => (mask('\u0002'.repeat(5000)), mask(text));
+  const unit = "SELECT 'a;b', [x]]y], \"q\" /* ; /* nested */ ; */ -- ;\nFROM t WHERE n = N'it''s' AND a-b > c/d;\n\n";
+  const base = unit.repeat(80);
+  const at = unit.length * 40;
+  const edits = ["'", "''", '[', ']', '/*', '*/', '-', '--', '\n', '*', 'x', "'abc", '"', ']]'];
+  for (const add of edits) {
+    for (const where of [0, 1, ...Array.from({ length: unit.length + 1 }, (_, k) => at + k), base.length - 1, base.length]) {
+      const after = base.slice(0, where) + add + base.slice(where);
+      const removed = base.slice(0, where) + base.slice(where + add.length);
+      const expected = [fresh(after), fresh(removed)];
+      mask(base);
+      assert.equal(mask(after), expected[0], `${JSON.stringify(add)} added at ${where}`);
+      mask(base);
+      assert.equal(mask(removed), expected[1], `${add.length} removed at ${where}`);
+      // And back, from the edited text to the first.
+      assert.equal(mask(base), fresh(base));
+    }
+  }
+});
+
+test('statements split the same way across lines: a CATCH lines below its END, words after the fourth, a lower-case go', () => {
+  const sql = "BEGIN TRY\n  SELECT 1;\nEND\n  TRY\nBEGIN\n  CATCH\n  SELECT 2;\nEND\n\n  CATCH SELECT 3\nSELECT a$b, @x#y, x1 FROM t WHERE CASE WHEN a = 1 THEN 2 END = 2;\n  go 2\nUPDATE t SET x = (1;\n\n2);";
+  assert.deepEqual(splitStatements(sql).map((s) => [s.text, s.line, s.endLine, s.label]), [
+    ['BEGIN TRY\n  SELECT 1;\nEND\n  TRY\nBEGIN\n  CATCH\n  SELECT 2;\nEND\n\n  CATCH', 1, 10, 'BEGIN TRY'],
+    ['CATCH SELECT 3\nSELECT a$b, @x#y, x1 FROM t WHERE CASE WHEN a = 1 THEN 2 END = 2;', 10, 11, 'CATCH SELECT 3'],
+    ['UPDATE t SET x = (1;\n\n2);', 13, 15, 'UPDATE t SET x = (1;'],
+  ]);
+});
+
+test('text sorts as localeCompare with numbers as numbers and case and accents ignored', () => {
+  const words = ['a', 'A', 'á', 'b', 'B2', 'b10', 'b9', 'é', 'e', 'Z', 'ß', 'ss', '', ' ', '10', '9', 'x-1', 'x_1', '{"a":1}', 'Ñ', 'n', 'İ', 'i'];
+  for (const a of words) for (const b of words) assert.equal(Math.sign(compareValues(a, b)), Math.sign(a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' })), `${a} ${b}`);
+  assert.deepEqual(['b10', 'B2', 'a', 'b9'].sort(compareValues), ['a', 'B2', 'b9', 'b10']);
 });
 
 test('GO splits batches, with repeat counts, and not inside comments', () => {

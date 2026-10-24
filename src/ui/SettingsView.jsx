@@ -132,6 +132,16 @@ export function SettingsView({ config, ctx, updates, update, width, height, acti
       ],
       change: () => ctx.setConfig((c) => ({ ...c, openTransactionWarning: nextWarnMinutes(warnMinutes(c)) })),
     },
+    {
+      label: 'Family moods',
+      value: onOff(config.familyMoods !== false),
+      hint: '↵ turn on or off',
+      about: [
+        'Glim tells the family (Splice, Sonar, Bosun and Hail) how it feels and why: a query that failed, a transaction left open. It goes into a small file in ~/.family (FAMILY_HOME), on this machine only.',
+        'Every half a minute Trawl reads theirs, and when one of them has been worried, sad or happy in the last 15 minutes, Glim says so in a line above the log, once (esc dismisses it). Off, Trawl neither writes Glim\'s nor reads theirs. It is "familyMoods" in config.json.',
+      ],
+      change: () => toggle('familyMoods'),
+    },
   ];
   const nav = useListNav(rows.length, innerH);
   const row = rows[nav.index];

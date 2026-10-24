@@ -58,8 +58,8 @@ test('what a project offers the others', () => {
   assert.deepEqual(offers.map((o) => o.app), ['splice', 'bosun', 'hail']);
   // Quoted when it has to be: a space, or Windows' backslashes.
   assert.equal(offers[0].line, shareLine('open', [dir]));
-  assert.equal(offers[1].line.split(' ')[0], '/move');
-  assert.match(offers[2].line, /^\/open .*api\.http$/);
+  assert.equal(offers[1].line, shareLine('move', [dir]));
+  assert.equal(offers[2].line, shareLine('open', [join(dir, 'http', 'api.http')]));
 });
 
 test('rows: from a set, without secrets, and back as an INSERT; the connection a query was for', () => {

@@ -41,6 +41,7 @@ export const COMMANDS = [
   { name: 'pin', desc: 'Keep the result set on screen to compare a later run with (p in Results)', run: (ctx) => a.pinResult(ctx) },
   { name: 'compare', desc: 'What changed between the pinned result and the one on screen (c in Results)', run: (ctx) => a.compareResults(ctx) },
   { name: 'copy', args: '[tsv|csv|json|md|insert]', desc: 'Copy the result set on screen (tab-separated pastes into a spreadsheet)', run: (ctx, s) => a.copyResults(ctx, s.trim()) },
+  { name: 'chart', args: '[bars|line|histogram|scatter] [x] [y…]', desc: 'The result set on screen as a chart, picked from its columns unless named (b in Results; esc back to the grid)', run: (ctx, s) => a.chart(ctx, s) },
   { name: 'export', args: '<file.csv|file.json|file.md>', desc: 'Save the result set on screen', run: (ctx, s) => a.exportResults(ctx, s) },
   { name: 'watch', args: '<seconds> [sql] [--until <condition>]', desc: "Run a read again every few seconds, changes picked out, until esc (the console's statement without sql; stop ends it)", run: (ctx, s) => a.watch(ctx, s) },
   { name: 'more', desc: 'Fetch another row limit\'s worth of the result set the limit cut off (m in Results)', run: (ctx) => a.moreRows(ctx) },

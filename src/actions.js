@@ -41,6 +41,8 @@ import { API_LANGUAGES, API_SYSTEM, apiFileName, apiLanguage, apiPrompt, apiRequ
 import { copyRefusal, copyScript, foreignKeysFrom, insertOrder, insertedRows, keyTuples, maskRows, parentSql, parseCopyRowsArgs, rowKey, rowsSql, selfOrder, tupleKey } from './copyrows.js';
 import { rehearsalRefusal, rehearsalSteps, rehearsalText, rowsAffected } from './rehearse.js';
 import { locksText } from './transactions.js';
+import { chartTitle, drawChart, planChart } from './chart.js';
+import { theme } from './theme.js';
 import { applySqlcmd, bindVariables, classifyScript, countQuery, oneLine, scriptVariables, splitStatements, sqlcmdVariables, statementAt, toCsv, toJson, toMarkdown, withoutLeadingComments } from './sql.js';
 
 // A WHERE that still changes more rows than this is asked about too.
@@ -1804,6 +1806,26 @@ export function copyResults(ctx, format) {
   const text = f === 'csv' ? toCsv(set) : f === 'json' ? toJson(set) : f === 'md' ? toMarkdown(set) : f === 'insert' ? insertScript(set, table, { quote: d.quote, kind: d.kind }) : tsvText(set);
   const n = `${set.rows.length} row${set.rows.length === 1 ? '' : 's'}`;
   return ctx.copy(text, f === 'tsv' ? `${n}, tab-separated` : f === 'insert' ? `${n} as INSERT statements${source ? '' : ` (into ${table}: rename it)`}` : f === 'md' ? `${n} as a Markdown table` : `${n} as ${f.toUpperCase()}`);
+}
+
+const CHART_NAMES = { bars: 'Bars', line: 'Line', histogram: 'Histogram', scatter: 'Scatter' };
+
+/**
+ * /chart [type] [x] [y…] (b in Results): the result set on screen as a chart (chart.js), over the
+ * grid; esc goes back to it. The colours are the theme's, read as it draws.
+ */
+export function chart(ctx, rest = '') {
+  const set = ctx.currentSet();
+  const plan = planChart(set, splitArgs(rest ?? ''));
+  if (plan.reason) return ctx.note(plan.reason, 'error');
+  ctx.setView('results');
+  const draw = (width, height) => {
+    const colors = { axis: theme.border, label: theme.dim, negative: theme.del, series: [theme.accent, theme.number, theme.ok, theme.routine, theme.view, theme.warn] };
+    // Two lines under it say what it was drawn from; the chart takes the rest.
+    const { lines, about } = drawChart(set, plan, { width, height: Math.max(5, height - 3), colors });
+    return [...lines, '', ...wrap(about, Math.max(10, width)).slice(0, 2).map((l) => [{ text: l, color: theme.dim }])];
+  };
+  ctx.showText(`${CHART_NAMES[plan.type]}: ${chartTitle(set, plan)}`, '', { draw, hint: plan.picked ? '/chart <type> <x> <y…> picks another' : '' });
 }
 
 const EXPORTS = { '.csv': toCsv, '.json': toJson, '.md': toMarkdown, '.markdown': toMarkdown };

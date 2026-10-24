@@ -248,7 +248,7 @@ export function ResultsView({ results, changes, setIndex, view, ctx, width, heig
     else if (k.rightArrow || input === 'l') setCol(cur + 1);
     else if (input === '[' && setIndex > 0) (ctx.setResultIndex(setIndex - 1), setColOffset(0), setCol(0));
     else if (input === ']' && setIndex < sets.length - 1) (ctx.setResultIndex(setIndex + 1), setColOffset(0), setCol(0));
-    else if (input === 'x') ctx.prefill('/export ');
+    else if (input === 'x') a.chooseExport(ctx);
     else if (input === 'b' && set) a.chart(ctx);
     else if (input === 'm') a.moreRows(ctx);
     else if (input === 'o' && set) ctx.sortResults(cur);

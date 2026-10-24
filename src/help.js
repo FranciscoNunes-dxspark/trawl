@@ -101,7 +101,7 @@ export const HELP = [
       ['[ ]', 'Previous, next result set'],
       ['↵', 'The row as a record, one column per line'],
       ['v', 'The whole value of the cell (/cell): JSON and XML laid out, long text wrapped, binary as hex'],
-      ['x', 'Export (/export <file.csv|file.json|file.md>)'],
+      ['x', 'Export: pick CSV, Excel, JSON or Markdown, then /export <file> is in the prompt to name it (.xlsx: every result set, a sheet each, numbers and dates as such)'],
       ['b', 'Chart the result set (/chart [bars|line|histogram|scatter] [x] [y…]): a date and numbers draw a line over time, text and a number sorted bars, one number a histogram, two a scatter; esc back to the grid'],
       ['m', 'More rows: when the row limit cut the result off, run it again for another limit\'s worth (/more); the cursor, sort and filter stay'],
       ['o', 'Sort by the column: A to Z, then Z to A, then as it came (the query doesn\'t run again)'],

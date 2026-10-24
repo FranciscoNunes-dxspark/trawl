@@ -42,6 +42,7 @@ import { copyRefusal, copyScript, foreignKeysFrom, insertOrder, insertedRows, ke
 import { rehearsalRefusal, rehearsalSteps, rehearsalText, rowsAffected } from './rehearse.js';
 import { locksText } from './transactions.js';
 import { chartTitle, drawChart, planChart } from './chart.js';
+import { toXlsx } from './xlsx.js';
 import { diagramGraph, drawDiagram, mermaidDiagram, parseDiagramArgs } from './diagram.js';
 import { theme } from './theme.js';
 import { applySqlcmd, bindVariables, classifyScript, countQuery, oneLine, scriptVariables, splitStatements, sqlcmdVariables, statementAt, toCsv, toJson, toMarkdown, withoutLeadingComments } from './sql.js';
@@ -1892,15 +1893,49 @@ export function chart(ctx, rest = '') {
 
 const EXPORTS = { '.csv': toCsv, '.json': toJson, '.md': toMarkdown, '.markdown': toMarkdown };
 
-/** Writes the result set on screen to a .csv, .json or .md (a Markdown table) file. */
+const EXPORT_CHOICES = [
+  { ext: 'csv', label: 'CSV', detail: 'comma-separated, a header line, for any spreadsheet or tool' },
+  { ext: 'xlsx', label: 'Excel', detail: 'a workbook: a sheet per result set, a bold header, numbers and dates as such' },
+  { ext: 'json', label: 'JSON', detail: 'an array of objects, one per row' },
+  { ext: 'md', label: 'Markdown', detail: 'a table, for a pull request or a wiki' },
+];
+
+/** x in Results: which kind of file, then /export with a name for it in the prompt, to change or run. */
+export function chooseExport(ctx) {
+  const set = ctx.currentSet();
+  if (!set) return ctx.note('Run a query first: there is nothing to export.', 'error');
+  const res = ctx.results;
+  const table = res?.edit?.table ?? res?.source?.table;
+  const base = table ? String(table.name).replace(/[^\w.-]+/g, '_') : 'results';
+  ctx.showPicker({
+    title: 'Export the result set as',
+    hint: '↵ /export with a name, to change or run',
+    items: EXPORT_CHOICES.map((c) => ({ label: c.label, detail: `${base}.${c.ext}`, text: `${c.detail}.\n\n/export ${base}.${c.ext}${c.ext === 'xlsx' && res.sets.length > 1 ? `\n\nAll ${res.sets.length} result sets, a sheet each.` : ''}`, choice: c })),
+    keys: { return: (it) => ctx.prefill(`/export ${base}.${it.choice.ext}`) },
+  });
+}
+
+/**
+ * Writes the result set on screen to a .csv, .json or .md (a Markdown table) file, or every result
+ * set of the run to an .xlsx workbook, a sheet each.
+ */
 export async function exportResults(ctx, path) {
   const set = ctx.currentSet();
   if (!set) return ctx.note('Run a query first: there is nothing to export.', 'error');
-  if (!path) return ctx.prefill('/export ');
-  const full = resolve(path);
-  const format = EXPORTS[extname(full).toLowerCase()];
-  if (!format) return ctx.note('Export to a .csv, .json or .md file.', 'error');
+  if (!path) return chooseExport(ctx);
+  const full = resolve(pathArg(path));
+  const ext = extname(full).toLowerCase();
+  const format = EXPORTS[ext];
+  if (!format && ext !== '.xlsx') return ctx.note('Export to a .csv, .xlsx, .json or .md file.', 'error');
   try {
+    if (ext === '.xlsx') {
+      const sets = ctx.results?.sets?.length ? ctx.results.sets : [set];
+      const table = ctx.results?.edit?.table ?? ctx.results?.source?.table;
+      await writeFile(full, toXlsx(sets, { names: sets.length === 1 && table ? [table.name] : undefined }));
+      const cut = sets.filter((s) => s.truncated).length;
+      const rows = sets.map((s) => plural(s.rows.length, 'row')).join(', ');
+      return ctx.note(`Wrote ${sets.length === 1 ? rows : `${sets.length} sheets (${rows})`} to ${full}${cut ? ` (the row limit cut ${sets.length === 1 ? 'it' : `${cut} of them`} off: raise /limit for more)` : ''}`, 'ok');
+    }
     await writeFile(full, format(set), 'utf8');
     ctx.note(`Wrote ${set.rows.length} row${set.rows.length === 1 ? '' : 's'} to ${full}${set.truncated ? ` (only the first ${set.rows.length}: raise /limit for more)` : ''}`, 'ok');
   } catch (e) {

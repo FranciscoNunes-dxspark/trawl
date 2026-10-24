@@ -111,3 +111,55 @@ test('a pasted line ending in a carriage return, and quoted paths', () => {
   assert.equal(pathArg('"C:\\Team\\shop"'), 'C:\\Team\\shop');
   assert.equal(pathArg('  plain  '), 'plain');
 });
+
+test('secrets are masked wherever a value or a line could carry one', async () => {
+  const { maskValue, redactSecrets, MASK } = await import('../src/family.js');
+  assert.equal(maskValue('DATABASE_URL', 'postgres://app:s3cret@db:5432/shop'), `postgres://app:${MASK}@db:5432/shop`);
+  assert.equal(maskValue('Shop', 'Server=tcp:x.database.windows.net,1433;Database=Shop;User ID=app;Password=p@ss;Encrypt=True'), `Server=tcp:x.database.windows.net,1433;Database=Shop;User ID=app;Password=${MASK};Encrypt=True`);
+  assert.equal(maskValue('Storage', 'DefaultEndpointsProtocol=https;AccountName=acc;AccountKey=abc==;EndpointSuffix=core.windows.net'), `DefaultEndpointsProtocol=https;AccountName=acc;AccountKey=${MASK};EndpointSuffix=core.windows.net`);
+  assert.equal(maskValue('API_KEY', 'xyz'), MASK);
+  assert.equal(maskValue('API_URL', 'https://api.example.com'), 'https://api.example.com');
+  assert.equal(redactSecrets('curl -H "Authorization: Bearer abc.def" https://u:pw@h/ password=hunter2 token: t0k'), `curl -H "Authorization: Bearer ${MASK}" https://u:${MASK}@h/ password=${MASK} token: ${MASK}`);
+});
+
+test('what a project points at, masked', async () => {
+  const { projectWiring, MASK } = await import('../src/family.js');
+  const dir = mkdtempSync(join(tmpdir(), 'family-'));
+  try {
+    writeFileSync(join(dir, 'appsettings.json'), JSON.stringify({ ConnectionStrings: { Shop: 'Server=localhost;Database=Shop;User ID=sa;Password=x' }, Api: { BaseUrl: 'https://api.local', Retries: 3, ClientSecret: 'zzz' } }));
+    writeFileSync(join(dir, '.env'), 'REDIS_URL=redis://:pw@cache:6379\nDEBUG=1\nPORT=4280\n');
+    writeFileSync(join(dir, '.env.example'), 'REDIS_URL=\n');
+    writeFileSync(join(dir, 'http-client.env.json'), JSON.stringify({ dev: { host: 'http://localhost:4280', token: 't' } }));
+    const w = projectWiring(dir);
+    const by = Object.fromEntries(w.map((e) => [e.key, e]));
+    assert.equal(by['ConnectionStrings:Shop'].value, `Server=localhost;Database=Shop;User ID=sa;Password=${MASK}`);
+    assert.equal(by['Api:BaseUrl'].value, 'https://api.local');
+    assert.equal(by['REDIS_URL'].value, `redis://:${MASK}@cache:6379`);
+    assert.equal(by['PORT'].source, '.env');
+    assert.equal(by['env:dev.host'].value, 'http://localhost:4280');
+    assert.ok(!('DEBUG' in by) && !('Api:Retries' in by) && !('Api:ClientSecret' in by) && !('env:dev.token' in by));
+    assert.doesNotMatch(JSON.stringify(w), /hunter|zzz|:pw@|Password=x/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the activity log: appended, redacted, newest first, by project, and kept small', async () => {
+  const { logActivity, readActivity, MASK } = await import('../src/family.js');
+  const dir = mkdtempSync(join(tmpdir(), 'family-'));
+  try {
+    logActivity('splice', { text: 'pushed main', kind: 'push', project: '/p/shop' }, { dir, now: 1000 });
+    logActivity('trawl', { text: 'ran UPDATE on dev with password=abc', kind: 'write' }, { dir, now: 2000 });
+    logActivity('bosun', { text: 'api crashed', kind: 'crash', project: '/p/other' }, { dir, now: 3000 });
+    assert.deepEqual(readActivity({ dir }).map((e) => e.app), ['bosun', 'trawl', 'splice']);
+    assert.equal(readActivity({ dir })[1].text, `ran UPDATE on dev with password=${MASK}`);
+    assert.deepEqual(readActivity({ dir, project: '/p/shop' }).map((e) => e.app), ['trawl', 'splice']);
+    assert.deepEqual(readActivity({ dir, since: 1500 }).map((e) => e.app), ['bosun', 'trawl']);
+    for (let i = 0; i < 400; i++) logActivity('hail', { text: 'x'.repeat(100) }, { dir, now: 4000 + i, max: 20_000 });
+    const all = readActivity({ dir, limit: 10_000 });
+    assert.ok(all.length < 400 && all.length > 50, `kept ${all.length}`);
+    assert.equal(all[0].at, 4399);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
